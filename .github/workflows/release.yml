@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release:
@@ -61,6 +62,11 @@ jobs:
 
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS
+
+      - name: Publish to npm
+        run: |
+          npm install -g npm@latest
+          npm publish dist/diaspore-*.tgz --access public
 
       - name: Publish release
         env:
