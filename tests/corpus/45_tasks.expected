@@ -1,0 +1,10 @@
+[0, 1, 4, 9, 16, 25, 36, 49]
+True
+produced (4950, 100)
+ping pong worker done
+2000
+[1, 2, 3, 10, 20, 30]
+caught from task: task failed
+send on closed channel
+recv on closed channel
+tasks done

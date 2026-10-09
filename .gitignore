@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+
+# Build output (see `make generate`, `make build` and `make site`)
+build/
+*.dsp.json
+*.dsp.json.gz
+*.dspb
+*.dspb.gz
+*.flow.json
+site/diaspore.wasm
+site/wasm_exec.js
+site/stdlib.json
+site/build.json
+site/ir.schema.json
+tests/fuzz_failures/

@@ -1,0 +1,68 @@
+[project]
+name = "diaspore"
+version = "0.1.0"
+description = "Compile a Python subset to portable JSON for Python, Go, TypeScript, and Lua runtimes"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+keywords = ["python", "compiler", "sandbox", "interpreter", "portable"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Interpreters",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://radkawar.github.io/diaspore"
+Repository = "https://github.com/radkawar/diaspore"
+
+[project.scripts]
+diaspore = "diaspore.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.6", "pydantic>=2.7"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["runtimes/**/testdata"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "D"]
+ignore = [
+    "E741",  # short names (l/o) are idiomatic in the IR field vocabulary
+    "B008",
+    "B905",  # interpreter zips are over compiler-aligned lists by construction
+    "E731",  # protocol-shim lambdas in the VM read better than nested defs
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/corpus*/**" = ["ALL"]  # Corpus programs are the language under test.
+"src/diaspore/ir.py" = ["E501"]  # The discriminated-union line is one long type.
+"src/diaspore/stdlib/**" = ["D"]
+"selfhost/**" = ["D"]
+"tests/**" = ["D"]
+"examples/**" = ["D"]
+"site/**" = ["D"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/diaspore", "docs", "README.md", "LICENSE"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/diaspore"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

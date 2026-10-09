@@ -1,0 +1,35 @@
+print(len("abc"), len([1, 2]), len((1,)), len({"a": 1}), len({1, 2, 3}), len(range(10)))
+print(min(3, 1, 2), max("a", "c", "b"), min([5, 2, 9]), max([5, 2, 9]))
+print(min([], default="empty"), max([], default=-1), min(["bb", "a"], key=len))
+print(max([(1, "z"), (1, "a"), (2, "m")]))
+print(sum([1, 2, 3]), sum([0.5, 0.25]), sum([[1], [2]], []))
+print(any([]), any([0, "", 3]), all([]), all([1, "x"]), all([1, 0]))
+print(sorted([3, 1, 2]), sorted("bca"), sorted([("b", 2), ("a", 9)]))
+print(sorted(["ccc", "a", "bb"], key=len, reverse=True))
+print(list(range(5)), list(range(2, 8, 2)), list(range(5, 0, -1)), list(range(3, 3)))
+print(range(5)[2], range(10)[-1], len(range(2, 20, 3)), 4 in range(5), range(0, 5))
+print(chr(65), ord("z"), hex(255), bin(5), oct(8), hex(-16))
+print(repr("s"), repr([1, "a"]), repr((None, True)), repr({"k": b"v"}))
+print(type(1), type(1.5), type("s"), type(True), type(None))
+print(type([]), type(()), type({}), type(set()), type(range(1)), type(b""))
+print(type(1) is int, type(True) is bool, type(True) is int)
+print(isinstance(1, int), isinstance(True, int), isinstance(1, bool), isinstance(1.0, int))
+print(isinstance("s", (int, str)), isinstance(None, (int, str)))
+print(callable(len), callable(42), callable(int))
+print(bool(0), bool(-1), bool(""), bool(" "), bool([]), bool([0]), bool(None), bool(0.0))
+print(int(True), int(False), float(True))
+print(str(bytes([104, 105])), bytes([104, 105]).decode("utf-8"))
+print(abs(True), round(True) if False else round(0.5), round(1.5))
+
+class Thing:
+    def __init__(self):
+        self.field = 1
+
+t = Thing()
+print(getattr(t, "field"), getattr(t, "nope", "dflt"), hasattr(t, "field"), hasattr(t, "nope"))
+setattr(t, "extra", 99)
+print(t.extra, getattr(t, "extra"))
+print(isinstance(t, Thing), type(t) is Thing, callable(Thing), callable(t))
+values = [1, "two", 3.0, [4], (5,), {6: 6}, {7}, None, True, b"x"]
+print([type(v) is list for v in values])
+print("|".join(str(type(v)) for v in values))

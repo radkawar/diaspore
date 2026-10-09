@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en" data-entry="js/playground.js">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>try{const t=localStorage.getItem('diaspore-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch{}</script>
+  <meta name="description" content="Run sandboxed Python in your browser and inspect its portable JSON IR.">
+  <title>Playground - Diaspore</title><link rel="stylesheet" href="style.css">
+  <script type="module">import('./js/boot.js?t='+Date.now())</script>
+</head>
+<body><a class="skip" href="#main">Skip to editor</a><div class="shell">
+  <nav class="nav" aria-label="Main navigation"><a class="brand" href="./"><span class="mark" aria-hidden="true"></span>Diaspore</a><a href="playground.html" aria-current="page">Playground</a><a href="repl.html">REPL</a><a href="debugger.html">Debugger</a><a class="github" href="https://github.com/radkawar/diaspore">GitHub</a><button class="theme" type="button" aria-label="Switch theme">Theme</button></nav>
+  <main id="main" class="tool-main" aria-label="Playground">
+    <div class="toolbar">
+      <select id="example" aria-label="Example"><option value="squares">Squares</option><option value="showcase">Language tour</option><option value="sandbox">Sandbox</option><option value="generators">Generators</option><option value="records">Records</option></select>
+      <span class="spacer"></span>
+      <button id="packages-button" popovertarget="packages-popover">Packages</button>
+      <button id="share" class="icon-button" type="button" aria-label="Copy link" title="Copy link"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 15 6-6M8 10l-2 2a4 4 0 0 0 6 6l2-2M10 8l2-2a4 4 0 0 1 6 6l-2 2"/></svg></button>
+      <button id="run" class="primary" disabled title="Run (Ctrl+Enter)">Run</button>
+    </div>
+    <div id="packages-popover" class="package-popover" popover>
+      <form id="package-form" class="package-form"><input id="package-name" placeholder="Package name" aria-label="PyPI package name" list="package-list" required><datalist id="package-list"></datalist><button id="install" type="submit">Install</button></form>
+      <div id="package-status" class="package-status" role="status"></div>
+      <div id="installed-packages" class="package-chips" aria-label="Installed packages"></div>
+    </div>
+    <div class="workspace">
+      <section class="panel"><div class="panel-head">main.py <span class="muted">Python</span></div><div class="editor"><div class="source-line" hidden></div><div class="gutter" aria-hidden="true"></div><pre id="highlight" aria-hidden="true"></pre><textarea id="source" aria-label="Python source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off"></textarea></div></section>
+      <div class="results">
+        <section class="panel"><div class="panel-head">Output <span id="metrics" class="muted"></span></div><pre id="output" class="output" aria-live="polite"><span class="quiet">Loading runtime</span></pre></section>
+        <section class="panel"><div class="panel-head">Bundle <span class="push"></span><div class="segmented" role="group" aria-label="Bundle view"><button id="tree-tab" aria-pressed="true">Tree</button><button id="json-tab" aria-pressed="false">JSON</button></div><button id="copy-json" class="icon-button" disabled aria-label="Copy JSON" title="Copy JSON"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button><button id="run-json" disabled hidden title="Run edited bundle">Run JSON</button></div><div id="tree" class="inspector-content tree"></div><div id="json-view" class="inspector-content" hidden><textarea id="json" class="json-editor" aria-label="Editable JSON bundle" spellcheck="false" wrap="soft"></textarea></div></section>
+      </div>
+    </div>
+  </main>
+  <div id="toast" class="toast" role="status" hidden></div>
+</div></body>
+</html>

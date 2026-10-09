@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en" data-entry="js/common.js">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>try{const t=localStorage.getItem('diaspore-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch{}</script>
+  <meta name="description" content="Write Python, ship JSON, run it anywhere, sandboxed. Diaspore is a portable Python subset with four conformant runtimes.">
+  <meta name="theme-color" content="#365846">
+  <title>Diaspore - Portable Python</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module">import('./js/boot.js?t='+Date.now())</script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="shell">
+    <nav class="nav" aria-label="Main navigation">
+      <a class="brand" href="./" aria-current="page"><span class="mark" aria-hidden="true"></span>Diaspore</a>
+      <a href="playground.html">Playground</a><a href="repl.html">REPL</a><a href="debugger.html">Debugger</a>
+      <a class="github" href="https://github.com/radkawar/diaspore">GitHub</a>
+      <button class="theme" type="button" aria-label="Switch theme">Theme</button>
+    </nav>
+    <main id="main">
+      <section class="hero">
+        <div><p class="eyebrow">A portable Python subset</p><h1>Write Python.<br>Ship JSON.<br><span>Run it anywhere.</span></h1></div>
+        <div class="hero-side"><p>Four runtimes. One small bundle.<br>Sandboxed by default.</p><div class="actions"><a class="button primary" href="playground.html">Open playground</a><a class="button" href="https://github.com/radkawar/diaspore/blob/main/docs/spec.md">Read the spec</a></div></div>
+      </section>
+      <section class="pipeline" aria-label="Python to a portable bundle to four runtimes">
+        <div class="stage"><div class="stage-title">01 / Python <span>main.py</span></div><pre data-python>def square(n):
+    return n * n
+
+print([square(n)
+       for n in range(5)])</pre></div>
+        <div class="stage"><div class="stage-title">02 / JSON bundle <span>IR excerpt</span></div><pre class="bundle-preview">{
+  "op": <span class="tok-string">"binop"</span>,
+  "kind": <span class="tok-string">"mul"</span>,
+  "l": {"op": "name", "id": "n"},
+  "r": {"op": "name", "id": "n"}
+}</pre></div>
+        <div class="stage"><div class="stage-title">03 / Same result</div><div class="runtime-rows"><div class="runtime-row"><span>diaspore-py</span><b>[0, 1, 4, 9, 16]</b></div><div class="runtime-row"><span>diaspore-go</span><b>[0, 1, 4, 9, 16]</b></div><div class="runtime-row"><span>diaspore-ts</span><b>[0, 1, 4, 9, 16]</b></div><div class="runtime-row"><span>diaspore-lua</span><b>[0, 1, 4, 9, 16]</b></div></div></div>
+      </section>
+      <div class="pipeline-caption"><a href="playground.html?example=squares">Run this in your browser</a></div>
+      <section class="feature-grid" aria-label="Features">
+        <div class="feature"><h2>Portable by construction</h2><p>A self-hosted compiler emits portable JSON IR.</p></div>
+        <div class="feature"><h2>Authority is explicit</h2><p>Host-granted capabilities and a metered step budget.</p></div>
+        <div class="feature"><h2>Pick up where you paused</h2><p>Durable flows resume on another runtime.</p></div>
+      </section>
+      <section class="quickstart"><div><h2>Try it locally</h2><div class="actions"><a href="https://github.com/radkawar/diaspore#quick-start">Quick start</a></div></div><pre>uv tool install git+https://github.com/radkawar/diaspore
+diaspore build main.py -o main.dsp.json
+diaspore run main.dsp.json</pre></section>
+    </main>
+    <footer><span>Diaspore / MIT licensed</span><a href="https://github.com/radkawar/diaspore/blob/main/docs/spec.md">Specification</a><a href="https://github.com/radkawar/diaspore/blob/main/docs/security.md">Security</a><a href="https://github.com/radkawar/diaspore">Source</a></footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "diaspore-ts",
+  "private": true,
+  "type": "module",
+  "description": "Diaspore sandbox runtime and self-hosted compiler for Node.js.",
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  }
+}

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en" data-entry="js/debugger.js">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>try{const t=localStorage.getItem('diaspore-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch{}</script>
+  <meta name="description" content="Step forward and backward through Python execution in your browser.">
+  <title>Debugger - Diaspore</title><link rel="stylesheet" href="style.css">
+  <script type="module">import('./js/boot.js?t='+Date.now())</script>
+  <style>
+    .debug-workspace { grid-template-columns: 1.2fr 1fr; }
+    .debug-workspace > * { min-width: 0; min-height: 0; }
+    .debug-inspector { display: grid; grid-template-rows: minmax(0, 1.4fr) minmax(160px, 1fr); gap: 14px; }
+    .debug-controls { display: flex; flex-wrap: wrap; flex-shrink: 0; gap: 6px; padding: 12px; border-bottom: 1px solid var(--line); }
+    .debug-controls button { flex: 1 0 auto; padding: 7px 10px; }
+    .debug-controls button:disabled { cursor: default; }
+    .timeline { display: flex; flex-shrink: 0; gap: 12px; align-items: center; padding: 12px 15px; }
+    .timeline input { flex: 1; min-width: 0; padding: 0; accent-color: var(--accent); }
+    .timeline output { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
+    .trace-state { flex-shrink: 0; padding: 0 15px 12px; font: 11px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+    .debug-data { display: grid; grid-template-columns: 1fr 1.2fr; flex: 1; min-height: 0; }
+    .debug-data > section { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .debug-data > section + section { border-left: 1px solid var(--line); }
+    .debug-data h2 { font: 600 12px var(--sans); margin: 0; padding: 12px 15px; border-bottom: 1px solid var(--line); }
+    .stack-list { list-style: none; margin: 0; padding: 8px; overflow: auto; }
+    .stack-list li { padding: 7px; font: 11px/1.6 var(--mono); overflow-wrap: anywhere; }
+    .stack-list li:first-child { background: var(--accent-bg); border-radius: 5px; color: var(--accent); }
+    .stack-list small { display: block; font: 10px var(--mono); color: var(--muted); }
+    .locals-list { margin: 0; padding: 10px 15px; overflow: auto; font: 11px/1.7 var(--mono); }
+    .locals-list dt { color: var(--blue); }
+    .locals-list dd { margin: 0 0 8px; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .debug-inspector .output { height: auto; flex: 1; min-height: 0; }
+    @media (max-width: 850px) {
+      .debug-workspace { grid-template-columns: 1fr; }
+      .debug-workspace .editor { height: 310px; flex: none; }
+      .debug-inspector { grid-template-rows: 345px 205px; gap: 12px; }
+    }
+    @media (max-width: 520px) {
+      .debug-workspace .editor { height: 275px; }
+      .debug-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+      .debug-controls #continue { grid-column: span 2; }
+      .debug-controls button { font-size: 11px; padding: 8px; }
+    }
+  </style>
+</head>
+<body><a class="skip" href="#main">Skip to debugger</a><div class="shell">
+  <nav class="nav" aria-label="Main navigation"><a class="brand" href="./"><span class="mark" aria-hidden="true"></span>Diaspore</a><a href="playground.html">Playground</a><a href="repl.html">REPL</a><a href="debugger.html" aria-current="page">Debugger</a><a class="github" href="https://github.com/radkawar/diaspore">GitHub</a><button class="theme" type="button" aria-label="Switch theme">Theme</button></nav>
+  <main id="main" class="tool-main">
+    <div class="toolbar"><select id="example" aria-label="Example"><option value="recursion">Recursion</option><option value="generator">Generator</option><option value="class">Class</option></select><span class="spacer"></span><button id="share" type="button" class="icon-button" title="Copy link" aria-label="Copy link"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 15 6-6M8 10l-2 2a4 4 0 0 0 6 6l2-2M10 8l2-2a4 4 0 0 1 6 6l-2 2"/></svg></button><button id="debug" type="button" class="primary" disabled title="Debug (F5)">Debug</button></div>
+    <div class="workspace debug-workspace">
+      <section class="panel"><div class="panel-head">main.py <span id="source-position" class="muted">Python</span></div><div class="editor"><div class="source-line" hidden></div><div class="gutter" aria-hidden="true"></div><pre id="highlight" aria-hidden="true"></pre><textarea id="source" aria-label="Python source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off"></textarea></div></section>
+      <div class="debug-inspector">
+        <section class="panel" aria-label="Execution">
+          <div class="debug-controls"><button id="back" disabled title="Step back (Shift + F10)">Back</button><button id="step" disabled title="Step into (F11)">Step</button><button id="over" disabled title="Step over (F10)">Step over</button><button id="out" disabled title="Step out (Shift + F11)">Step out</button><button id="continue" disabled title="Continue to end (F8)">Continue</button></div>
+          <div class="timeline"><input id="scrubber" type="range" min="0" max="0" value="0" disabled aria-label="Execution step"><output id="step-count" for="scrubber"></output></div>
+          <div id="trace-state" class="trace-state quiet" role="status">F5 to debug</div>
+          <div class="debug-data"><section><h2>Call stack</h2><ol id="stack" class="stack-list"></ol></section><section><h2>Locals</h2><dl id="locals" class="locals-list"></dl></section></div>
+        </section>
+        <section class="panel"><div class="panel-head">Output <span id="metrics" class="muted"></span></div><pre id="output" class="output" aria-live="polite"></pre></section>
+      </div>
+    </div>
+  </main>
+  <div id="toast" class="toast" role="status" hidden></div>
+</div></body>
+</html>
