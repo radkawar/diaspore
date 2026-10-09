@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: uv sync
+      - run: make generate
+
+      - name: Go binaries
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os=${target%/*}; arch=${target#*/}
+            name=diaspore-go_${VERSION}_${os}_${arch}
+            ext=; [ "$os" = windows ] && ext=.exe
+            mkdir -p "build/$name"
+            (cd runtimes/go && CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
+              go build -trimpath -ldflags="-s -w" -o "$GITHUB_WORKSPACE/build/$name/diaspore-go$ext" ./cmd/diaspore-go)
+            cp LICENSE README.md "build/$name/"
+            if [ "$os" = windows ]; then
+              (cd build && zip -qr "../dist/$name.zip" "$name")
+            else
+              tar -C build -czf "dist/$name.tar.gz" "$name"
+            fi
+          done
+
+      - name: Python package
+        run: uv build --out-dir dist
+
+      - name: npm package
+        run: |
+          cd runtimes/ts
+          npm ci --no-audit --no-fund
+          npm pack --pack-destination ../../dist
+
+      - name: Lua runtime
+        run: |
+          name=diaspore-lua_${VERSION}
+          mkdir -p "build/$name"
+          cp -r runtimes/lua/. "build/$name/"
+          cp LICENSE "build/$name/"
+          tar -C build -czf "dist/$name.tar.gz" "$name"
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$VERSION" dist/* --title "$VERSION" --generate-notes --verify-tag

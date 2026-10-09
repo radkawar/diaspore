@@ -1,5 +1,5 @@
 import {highlight, escapeHTML} from './common.js';
-import {ready, invoke} from './runtime.js';
+import {ready, isReady, invoke} from './runtime.js';
 import {shareLink, restoreLink} from './share.js';
 import {stdlib, install} from './packages.js';
 
@@ -60,7 +60,7 @@ function repaint() {
   syncScroll();
 }
 function controls() {
-  $('debug').disabled = busy;
+  $('debug').disabled = !isReady || busy;
   $('example').disabled = busy;
   source.readOnly = busy;
   $('back').disabled = busy || !events.length || cursor === 0;
@@ -129,7 +129,7 @@ function advance(mode) {
   seek(events.length - 1);
 }
 async function debug() {
-  if (busy) return;
+  if (!isReady || busy) return;
   clearTrace();
   busy = true;
   controls();
@@ -223,6 +223,7 @@ try {
     repaint();
   }
   busy = false;
+  $('output').textContent = '';
   controls();
 } catch (error) {
   $('trace-state').textContent = 'Unavailable';

@@ -1,5 +1,5 @@
 import {highlight, escapeHTML} from './common.js';
-import {ready, invoke} from './runtime.js';
+import {ready, isReady, invoke} from './runtime.js';
 import {install, curated, stdlib} from './packages.js';
 import {shareLink, restoreLink} from './share.js';
 
@@ -7,7 +7,7 @@ const $ = id => document.getElementById(id);
 const source = $('source'), paint = $('highlight'), output = $('output');
 const files = {};
 const installed = new Map();
-let busy = false, bundle = null;
+let busy = true, bundle = null;
 let cleanJSON = '';
 function updateJSONAction() {
   $('run-json').hidden = $('json-view').hidden || !bundle || $('json').value === cleanJSON;
@@ -112,7 +112,7 @@ function showBundle(text) {
 }
 function setBusy(value) {
   busy = value;
-  for (const id of ['run', 'install', 'run-json']) $(id).disabled = value || (id === 'run-json' && !bundle);
+  for (const id of ['run', 'install', 'run-json']) $(id).disabled = !isReady || value || (id === 'run-json' && !bundle);
   $('example').disabled = value;
 }
 function renderResult(result, elapsed) {
@@ -123,8 +123,10 @@ function renderResult(result, elapsed) {
   $('metrics').textContent = `exit ${result.code} / ${(result.steps || 0).toLocaleString()} steps / ${Math.round(elapsed)} ms`;
 }
 async function execute(mode) {
-  if (busy) return;
+  if (!isReady || busy) return;
   setBusy(true);
+  $('run').textContent = 'Running...';
+  $('run').setAttribute('aria-busy', 'true');
   const start = performance.now();
   try {
     if (mode === 'json') {
@@ -138,7 +140,11 @@ async function execute(mode) {
       renderResult(await invoke('run', compiled.bundle, '{}'), performance.now() - start);
     }
   } catch (error) { output.textContent = error.message; }
-  finally { setBusy(false); }
+  finally {
+    $('run').textContent = 'Run';
+    $('run').removeAttribute('aria-busy');
+    setBusy(false);
+  }
 }
 $('run').onclick = () => execute('run');
 $('run-json').onclick = () => execute('json');

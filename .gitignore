@@ -7,6 +7,9 @@ __pycache__/
 
 # Node
 node_modules/
+runtimes/ts/dist/
+runtimes/ts/LICENSE
+runtimes/ts/*.tgz
 
 # Build output (see `make generate`, `make build` and `make site`)
 build/

@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /* diaspore-ts CLI: execute Diaspore JSON bundles (docs/spec.md).
  *
  * Usage:
@@ -331,16 +332,14 @@ function cmdResume(rest: string[]): number {
 /**
  * The interpreter threads diaspore generators through JS generators, which costs
  * several JS stack frames per diaspore call frame; V8's default stack cannot hold
- * the spec's default 1000-frame diaspore recursion limit. The harness invokes a
- * fixed command line, so the CLI re-execs itself once with a larger V8 stack
- * (6 MB, safely under the typical 8 MB OS thread stack).
+ * the spec's default 1000-frame diaspore recursion limit. The CLI re-execs
+ * itself with a 6 MB stack, below the typical 8 MB OS thread stack.
  */
 function reexecWithLargerStack(): never {
   const r = spawnSync(
     process.execPath,
     [
-      "--experimental-strip-types",
-      "--no-warnings",
+      ...(import.meta.url.endsWith(".ts") ? ["--experimental-strip-types", "--no-warnings"] : []),
       "--stack-size=6000",
       fileURLToPath(import.meta.url),
       ...process.argv.slice(2),

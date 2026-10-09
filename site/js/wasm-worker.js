@@ -1,9 +1,11 @@
 const version = new URL(import.meta.url).search;
 (async () => {
   try {
-    await import(new URL(`../wasm_exec.js${version}`, import.meta.url).href);
+    const [, response] = await Promise.all([
+      import(new URL(`../wasm_exec.js${version}`, import.meta.url).href),
+      fetch(new URL(`../diaspore.wasm${version}`, import.meta.url)),
+    ]);
     const go = new Go();
-    const response = await fetch(new URL(`../diaspore.wasm${version}`, import.meta.url));
     if (!response.ok) throw new Error(`Runtime download failed (${response.status})`);
     const {instance} = await WebAssembly.instantiate(await response.arrayBuffer(), go.importObject);
     go.run(instance).catch(error => postMessage({error: error.message}));

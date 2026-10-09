@@ -1,24 +1,25 @@
 # diaspore-ts
 
 Diaspore's TypeScript sandbox runtime executes JSON, gzip, and DSPB bundles
-under Node's type stripping, with no runtime npm dependencies. See the
-[language specification](../../docs/spec.md).
+with no runtime npm dependencies. The npm package includes compiled JavaScript
+and the self-hosted compiler. See the
+[language specification](https://github.com/radkawar/diaspore/blob/main/docs/spec.md).
 
 ## Requirements
 
-Node >= 23.6. Compiler commands require the generated
-`runtimes/ts/dspc.dsp.json.gz`; create it with `make generate` (requires Python
-and uv).
+Node >= 22 for the npm package. Running TypeScript sources directly requires
+Node >= 23.6.
 
 ## Usage
 
-Run these commands from the repository root:
+Install the package, then use its CLI:
 
 ```sh
-node runtimes/ts/src/cli.ts build entry.py -o entry.dsp.json
-node runtimes/ts/src/cli.ts run entry.dsp.json --max-steps 1000000
-node runtimes/ts/src/cli.ts run entry.dsp.json --durable --snapshot run.flow.json
-node runtimes/ts/src/cli.ts resume entry.dsp.json run.flow.json --send '{"approved": true}'
+npm install diaspore
+npx diaspore-ts build entry.py -o entry.dsp.json
+npx diaspore-ts run entry.dsp.json --max-steps 1000000
+npx diaspore-ts run entry.dsp.json --durable --snapshot run.flow.json
+npx diaspore-ts resume entry.dsp.json run.flow.json --send '{"approved": true}'
 ```
 
 Builds accept repeatable `--path DIR` options to search additional module
@@ -37,7 +38,7 @@ Compile a module that imports `host` with
 
 ```ts
 import { readFileSync } from "node:fs";
-import { Interp, loadBundle } from "./runtimes/ts/src/index.ts";
+import { Interp, loadBundle } from "diaspore";
 
 const bundle = loadBundle(readFileSync("plugin.dsp.json"));
 const vm = new Interp(bundle, {
@@ -64,11 +65,17 @@ during replay.
 
 ## Development
 
+From a repository checkout, generate the compiler bundle with `make generate`
+(requires Python and uv), then run:
+
 ```sh
 npm install --prefix runtimes/ts && npm run check --prefix runtimes/ts
+npm pack ./runtimes/ts --pack-destination runtimes/ts
 uv run pytest -q tests/test_corpus.py -k ts_vm
 node runtimes/ts/src/cli.ts selftest-build
 ```
 
-The self-test compares generated compiler output with the Python compiler and
-checks DSPB encoding and decoding.
+Packing compiles the sources to `dist/` and includes the generated compiler
+bundle and license. It fails if the compiler bundle is missing. The self-test
+compares compiler output with the Python compiler and checks DSPB encoding
+and decoding.

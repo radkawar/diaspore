@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-entry="js/repl.js">
+<html lang="en" data-entry="js/repl.js" data-runtime>
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <script>try{const t=localStorage.getItem('diaspore-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch{}</script>
@@ -11,10 +11,10 @@
   <nav class="nav" aria-label="Main navigation"><a class="brand" href="./"><span class="mark" aria-hidden="true"></span>Diaspore</a><a href="playground.html">Playground</a><a href="repl.html" aria-current="page">REPL</a><a href="debugger.html">Debugger</a><a class="github" href="https://github.com/radkawar/diaspore">GitHub</a><button class="theme" type="button" aria-label="Switch theme">Theme</button></nav>
   <main class="repl-main" aria-label="Python REPL">
     <div class="terminal-controls">
-      <button id="clear" class="icon-button" aria-label="Clear output" title="Clear output"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+      <button id="clear" class="icon-button" aria-label="Clear output" title="Clear output" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
       <button id="reset" class="icon-button" aria-label="Restart session" title="Restart session" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10a8 8 0 1 1 1 7M4 4v6h6"/></svg></button>
     </div>
-    <div class="terminal" id="terminal" tabindex="-1"><div id="transcript" role="log" aria-live="polite"><pre id="repl-banner" class="quiet">Loading Diaspore...</pre></div><div class="terminal-input"><span class="prompt" id="prompt" aria-hidden="true">&gt;&gt;&gt; </span><textarea id="repl-input" rows="1" aria-label="Python prompt" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" disabled></textarea></div></div>
+    <div class="terminal" id="terminal" tabindex="-1"><div id="transcript" role="log" aria-live="polite"><pre id="repl-banner" class="quiet">Loading runtime</pre></div><div class="terminal-input"><span class="prompt" id="prompt" aria-hidden="true">&gt;&gt;&gt; </span><textarea id="repl-input" rows="1" aria-label="Python prompt" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" disabled></textarea></div></div>
   </main>
 </div></body>
 </html>

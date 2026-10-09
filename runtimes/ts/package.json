@@ -1,10 +1,37 @@
 {
-  "name": "diaspore-ts",
-  "private": true,
+  "name": "diaspore",
+  "version": "0.1.0",
   "type": "module",
-  "description": "Diaspore sandbox runtime and self-hosted compiler for Node.js.",
+  "description": "Run Diaspore bundles (portable, sandboxed Python) in Node",
+  "license": "MIT",
+  "author": "radkawar",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/radkawar/diaspore.git",
+    "directory": "runtimes/ts"
+  },
+  "homepage": "https://radkawar.github.io/diaspore",
+  "bugs": {
+    "url": "https://github.com/radkawar/diaspore/issues"
+  },
+  "keywords": ["diaspore", "python", "sandbox", "interpreter", "portable"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "diaspore-ts": "dist/cli.js"
+  },
+  "files": ["dist", "dspc.dsp.json.gz", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "node scripts/prepack.mjs && npm run build"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

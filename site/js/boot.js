@@ -14,7 +14,13 @@ try {
   map.textContent = JSON.stringify({imports});
   document.head.append(map);
   document.querySelector('link[rel="stylesheet"]').href = new URL(`style.css?v=${build.version}`, base);
-  await import(new URL(document.documentElement.dataset.entry, base).href);
+  const entry = new URL(document.documentElement.dataset.entry, base).href;
+  if (document.documentElement.hasAttribute('data-runtime')) {
+    const {ready} = await import(new URL('js/runtime.js', base).href);
+    await Promise.all([ready, import(entry)]);
+  } else {
+    await import(entry);
+  }
 } catch (error) {
   const status = document.querySelector('.runtime-status');
   if (status) status.textContent = 'Unable to load';

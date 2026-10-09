@@ -1,5 +1,5 @@
 import {highlight} from './common.js';
-import {ready, invoke} from './runtime.js';
+import {ready, isReady, invoke} from './runtime.js';
 import {install, stdlib} from './packages.js';
 
 const input = document.getElementById('repl-input');
@@ -23,9 +23,16 @@ function echo(text, continuation) {
   transcript.append(entry);
 }
 function resize() { input.style.height = '26px'; input.style.height = `${input.scrollHeight}px`; terminal.scrollTop = terminal.scrollHeight; }
-function unlock() { busy = false; input.disabled = false; document.getElementById('reset').disabled = false; input.focus(); resize(); }
+function unlock() {
+  busy = false;
+  input.disabled = !isReady;
+  document.getElementById('reset').disabled = !isReady;
+  document.getElementById('clear').disabled = !isReady;
+  if (isReady) input.focus();
+  resize();
+}
 async function submit() {
-  if (busy) return;
+  if (!isReady || busy) return;
   const line = input.value;
   input.value = '';
   echo(line, block.length > 0);
@@ -77,7 +84,7 @@ input.addEventListener('keydown', event => {
 });
 document.getElementById('clear').onclick = () => { transcript.replaceChildren(); input.focus(); };
 document.getElementById('reset').onclick = async () => {
-  if (busy) return;
+  if (!isReady || busy) return;
   busy = true;
   input.disabled = true;
   try { await invoke('reset'); block = []; prompt.textContent = '>>>'; input.value = ''; append('Session reset.\n', 'quiet'); }
