@@ -9,14 +9,14 @@ into a JSON snapshot that any other runtime can resume.
 
 [Playground](https://radkawar.github.io/diaspore) |
 [Specification](docs/spec.md) | [Security model](docs/security.md) |
-[Examples](examples)
+[Examples](examples) | [Releases](https://github.com/radkawar/diaspore/releases)
 
 ```sh
-diaspore build app.py -o app.dsp.json            # compile once
-diaspore run app.dsp.json                        # Python
-./build/diaspore-go run app.dsp.json             # Go
-node runtimes/ts/src/cli.ts run app.dsp.json     # TypeScript
-lua5.4 runtimes/lua/cli.lua run app.dsp.json     # Lua
+diaspore build app.py -o app.dsp.json     # compile once
+diaspore run app.dsp.json                 # Python
+diaspore-go run app.dsp.json              # Go
+npx diaspore-ts run app.dsp.json          # TypeScript
+lua5.4 runtimes/lua/cli.lua run app.dsp.json  # Lua
 ```
 
 ## Features
@@ -37,12 +37,15 @@ lua5.4 runtimes/lua/cli.lua run app.dsp.json     # Lua
 
 ## Runtimes
 
-| Runtime | Source | Notes |
+| Runtime | Install | Notes |
 | --- | --- | --- |
-| diaspore-py | [src/diaspore](src/diaspore) | Reference VM, compiler and CLI |
-| diaspore-go | [runtimes/go](runtimes/go) | Near CPython speed; also compiles to WebAssembly |
-| diaspore-ts | [runtimes/ts](runtimes/ts) | Node, no runtime dependencies |
-| diaspore-lua | [runtimes/lua](runtimes/lua) | Pure Lua 5.4; no tasks, regex or big integers |
+| diaspore-py | `uv tool install git+https://github.com/radkawar/diaspore` | Reference VM, compiler and CLI |
+| diaspore-go | [Release binaries](https://github.com/radkawar/diaspore/releases); library: `go get github.com/radkawar/diaspore/runtimes/go` | Near CPython speed; also compiles to WebAssembly |
+| diaspore-ts | [`npm install diaspore`](https://www.npmjs.com/package/diaspore) | Node 22+, no runtime dependencies |
+| diaspore-lua | [Release tarball](https://github.com/radkawar/diaspore/releases) | Pure Lua 5.4; no tasks, regex or big integers |
+
+Sources: [src/diaspore](src/diaspore), [runtimes/go](runtimes/go),
+[runtimes/ts](runtimes/ts), [runtimes/lua](runtimes/lua).
 
 ## Getting started
 
@@ -55,10 +58,15 @@ diaspore build main.py -o main.dsp.json
 diaspore run main.dsp.json
 ```
 
-Prebuilt `diaspore-go` binaries are on the
-[releases page](https://github.com/radkawar/diaspore/releases), and the
-TypeScript runtime is `npm install diaspore`. To build everything from source
-you need Go 1.26+; Node 23.6+ and Lua 5.4 are needed only for their runtimes.
+Run the same bundle from Node, or embed it:
+
+```sh
+npm install diaspore
+npx diaspore-ts run main.dsp.json
+```
+
+To build everything from source you need Go 1.26+; Node 23.6+ and Lua 5.4 are
+needed only for their runtimes.
 
 ```sh
 git clone https://github.com/radkawar/diaspore && cd diaspore
