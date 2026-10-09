@@ -35,6 +35,7 @@ type VM struct {
 	bundle          map[string]any
 	policy          map[string]map[string][]string
 	fsOverlay       map[string]string
+	virtualFiles    map[string]string
 	durable         bool
 	determin        bool
 	journal         []jEntry
@@ -95,11 +96,18 @@ func WithStderr(w io.Writer) Option { return func(vm *VM) { vm.stderr = w } }
 // WithStdin redirects the sandbox's stdin (used by input()).
 func WithStdin(r io.Reader) Option { return func(vm *VM) { vm.stdin = bufio.NewReader(r) } }
 
-// WithFSOverlay provides an in-memory read-only file overlay consulted by
-// open() before the real filesystem - hosts without a filesystem (the wasm
-// playground) use it to feed sources to the embedded compiler.
+// WithFSOverlay replaces the filesystem with an in-memory, read-only file map.
+// Hosts without a filesystem (the wasm playground) use it to feed sources to
+// the embedded compiler. Paths are matched exactly; the fs policy still applies.
 func WithFSOverlay(files map[string]string) Option {
 	return func(vm *VM) { vm.fsOverlay = files }
+}
+
+// WithVirtualFiles adds in-memory, read-only files on top of the real
+// filesystem. open() serves an exact path match from files and falls back to
+// the real filesystem otherwise. The fs policy applies to both.
+func WithVirtualFiles(files map[string]string) Option {
+	return func(vm *VM) { vm.virtualFiles = files }
 }
 
 // WithPolicy narrows granted capabilities to scoped allowlists (spec 13.1):

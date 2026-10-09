@@ -4,19 +4,13 @@ import hashlib
 import json
 from pathlib import Path
 
+from diaspore.compiler import write_stdlib_overlay
+
 
 def main() -> None:
     """Write the standard library overlay and a cache-safe asset manifest."""
     site = Path(__file__).resolve().parent
-    stdlib = site.parent / "src" / "diaspore" / "stdlib"
-    files = {
-        "/stdlib/" + path.relative_to(stdlib).as_posix(): path.read_text(encoding="utf-8")
-        for path in sorted(stdlib.rglob("*.py"))
-    }
-    (site / "stdlib.json").write_text(
-        json.dumps(files, ensure_ascii=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
+    write_stdlib_overlay(str(site / "stdlib.json"))
     assets = sorted(site.glob("js/*.js")) + [
         site / "style.css",
         site / "diaspore.wasm",

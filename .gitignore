@@ -24,3 +24,6 @@ site/stdlib.json
 site/build.json
 site/ir.schema.json
 tests/fuzz_failures/
+runtimes/go/dspc/stdlib.json.gz
+runtimes/ts/stdlib/
+runtimes/ts/.stdlib-stamp

@@ -7,6 +7,7 @@ import * as nodePath from "node:path";
 import * as nodeOs from "node:os";
 import { gunzipSync } from "node:zlib";
 
+import { STDLIB_DIR } from "./build.ts";
 import { Interp } from "./interp.ts";
 import { CodeObject, diasporeErr } from "./values.ts";
 
@@ -37,9 +38,9 @@ export function compileSnippet(source: string, filename: string, mode: string): 
     const chunks: string[] = [];
     const errChunks: string[] = [];
     const vm = new Interp(dspcBundle(), {
-      argv: ["dspc", file],
+      argv: ["dspc", file, "--path", STDLIB_DIR],
       caps: ["fs"],
-      policy: { fs: { read: [dir, file], write: [] } },
+      policy: { fs: { read: [dir, file, STDLIB_DIR], write: [] } },
       maxDepth: 3000,
       stdout: (s) => chunks.push(s),
       stderr: (s) => errChunks.push(s),

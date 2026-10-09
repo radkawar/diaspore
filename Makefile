@@ -2,15 +2,18 @@
 .PHONY: help sync generate build test test-py test-go test-ts test-lua fuzz lint \
 	fmt schema site serve bench clean
 
-GO_DIR   := runtimes/go
-TS_DIR   := runtimes/ts
-LUA_DIR  := runtimes/lua
-BUILD    := build
-GO_BIN   := $(BUILD)/diaspore-go
-DSPC_GO  := $(GO_DIR)/dspc/dspc.dsp.json.gz
-DSPC_TS  := $(TS_DIR)/dspc.dsp.json.gz
-GO_SRC   := $(shell find $(GO_DIR) -name '*.go' -not -name '*_test.go')
-PY_SRC   := $(shell find src/diaspore -name '*.py')
+GO_DIR     := runtimes/go
+TS_DIR     := runtimes/ts
+LUA_DIR    := runtimes/lua
+BUILD      := build
+GO_BIN     := $(BUILD)/diaspore-go
+DSPC_GO    := $(GO_DIR)/dspc/dspc.dsp.json.gz
+DSPC_TS    := $(TS_DIR)/dspc.dsp.json.gz
+STDLIB_GO  := $(GO_DIR)/dspc/stdlib.json.gz
+STDLIB_TS  := $(TS_DIR)/stdlib
+GO_SRC     := $(shell find $(GO_DIR) -name '*.go' -not -name '*_test.go')
+PY_SRC     := $(shell find src/diaspore -name '*.py')
+STDLIB_SRC := $(shell find src/diaspore/stdlib -name '*.py')
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-10s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -24,9 +27,17 @@ $(DSPC_GO): selfhost/dspc.py $(PY_SRC)
 $(DSPC_TS): $(DSPC_GO)
 	cp $< $@
 
-generate: $(DSPC_GO) $(DSPC_TS) ## Compile the self-hosted compiler embedded by the Go and TS runtimes
+$(STDLIB_GO): $(STDLIB_SRC)
+	uv run python -c 'from diaspore.compiler import write_stdlib_overlay; write_stdlib_overlay("$@")'
 
-$(GO_BIN): $(GO_SRC) $(GO_DIR)/go.mod $(DSPC_GO)
+$(TS_DIR)/.stdlib-stamp: $(STDLIB_SRC)
+	rm -rf $(STDLIB_TS)
+	cd src/diaspore && find stdlib -name '*.py' -exec install -D -m 644 {} $(CURDIR)/$(TS_DIR)/{} \;
+	touch $@
+
+generate: $(DSPC_GO) $(DSPC_TS) $(STDLIB_GO) $(TS_DIR)/.stdlib-stamp ## Generate the compiler and stdlib embedded by the Go and TS runtimes
+
+$(GO_BIN): $(GO_SRC) $(GO_DIR)/go.mod $(DSPC_GO) $(STDLIB_GO)
 	cd $(GO_DIR) && go build -o $(CURDIR)/$@ ./cmd/diaspore-go
 
 build: generate $(GO_BIN) ## Generate artifacts and build the diaspore-go binary
@@ -85,5 +96,5 @@ bench: build ## Run the benchmark on CPython and every runtime
 
 clean: ## Remove build output and generated artifacts
 	rm -rf $(BUILD) .pytest_cache tests/fuzz_failures
-	rm -f $(DSPC_GO) $(DSPC_TS) site/diaspore.wasm site/wasm_exec.js site/stdlib.json site/build.json site/ir.schema.json
+	rm -rf $(DSPC_GO) $(DSPC_TS) $(STDLIB_GO) $(STDLIB_TS) $(TS_DIR)/.stdlib-stamp site/diaspore.wasm site/wasm_exec.js site/stdlib.json site/build.json site/ir.schema.json
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

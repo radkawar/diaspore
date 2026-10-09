@@ -7,7 +7,6 @@ subset, so `python3 program.py` defines the expected stdout, exit code, and
 
 from __future__ import annotations
 
-import gzip
 import io
 import json
 import os
@@ -26,12 +25,10 @@ GO_DIR = RUNTIMES / "go"
 GO_BIN = ROOT / "build" / "diaspore-go"
 TS_DIR = RUNTIMES / "ts"
 LUA_DIR = RUNTIMES / "lua"
-DSPC_SOURCE = ROOT / "selfhost" / "dspc.py"
-DSPC_TARGETS = (GO_DIR / "dspc" / "dspc.dsp.json.gz", TS_DIR / "dspc.dsp.json.gz")
 
 sys.path.insert(0, str(ROOT / "src"))
 
-from diaspore.compiler import compile_bundle, dumps  # noqa: E402
+from diaspore.compiler import compile_bundle  # noqa: E402
 from diaspore.validator import validate_bundle  # noqa: E402
 from diaspore.vm import Machine  # noqa: E402
 
@@ -98,19 +95,14 @@ def run_diaspore_py(entry: Path, max_steps: int | None = None) -> Result:
 
 
 def ensure_dspc_bundles() -> None:
-    """Compiles the self-hosted compiler for the Go and TypeScript runtimes.
+    """Generates the compiler and stdlib embedded by the Go and TS runtimes.
 
-    Both runtimes embed this bundle, so it must exist before either one can
-    build Python. It is a build artifact, regenerated whenever the compiler
-    source is newer than the existing copy.
+    These are build artifacts; `make generate` rebuilds only what is stale.
     """
-    newest = max(p.stat().st_mtime for p in [DSPC_SOURCE, *(ROOT / "src").rglob("*.py")])
-    stale = [t for t in DSPC_TARGETS if not t.exists() or t.stat().st_mtime < newest]
-    if not stale:
-        return
-    data = gzip.compress((dumps(compile_bundle(str(DSPC_SOURCE))) + "\n").encode())
-    for target in stale:
-        target.write_bytes(data)
+    proc = subprocess.run(["make", "-s", "generate"], cwd=ROOT,
+                          capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        pytest.fail(f"make generate failed:\n{proc.stdout}{proc.stderr}")
 
 
 # Runtime exclusions reflect features outside each runtime's supported subset.

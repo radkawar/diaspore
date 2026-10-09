@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import gzip
 import json
 import math
 import os
@@ -994,10 +995,47 @@ class ModuleCompiler:
         return {"op": "if", "test": test, "then": then, "orelse": [], "ln": ln}
 
 
-
 # Pure-subset stdlib modules shipped with diaspore. They are searched after the
 # entry's own directory, so a user module of the same name still wins.
 STDLIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stdlib")
+
+
+def stdlib_overlay(root: str = "/stdlib") -> dict[str, str]:
+    """Return the shipped standard library as a virtual file map.
+
+    The embedded compilers (diaspore-go, the browser) have no access to this
+    package's files, so they receive the stdlib as in-memory files and search
+    `root` after the entry directory and any `--path` roots.
+
+    Args:
+        root: Absolute virtual directory the modules appear under.
+
+    Returns:
+        A mapping from virtual path to module source, sorted by path.
+    """
+    files = {}
+    for dirpath, dirnames, filenames in os.walk(STDLIB_DIR):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for name in sorted(filenames):
+            if name.endswith(".py"):
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, STDLIB_DIR).replace(os.sep, "/")
+                with open(path, encoding="utf-8") as f:
+                    files[f"{root}/{rel}"] = f.read()
+    return dict(sorted(files.items()))
+
+
+def write_stdlib_overlay(path: str) -> None:
+    """Write `stdlib_overlay()` as JSON, gzip-compressed when `path` ends in .gz.
+
+    Args:
+        path: Output file path.
+    """
+    data = (json.dumps(stdlib_overlay(), separators=(",", ":")) + "\n").encode()
+    if path.endswith(".gz"):
+        data = gzip.compress(data, mtime=0)
+    with open(path, "wb") as f:
+        f.write(data)
 
 
 def compile_bundle(entry_path: str,

@@ -182,6 +182,12 @@ func biOpen(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		return nil, newErrorf("OSError",
 			"[Errno 2] No such file or directory: %s", reprString(path))
 	}
+	if content, ok := vm.virtualFiles[path]; ok && kind == "read" {
+		if err := vm.requireFSLexical(kind, path); err != nil {
+			return nil, err
+		}
+		return newMemFile(content, mode == "rb"), nil
+	}
 	real, err := vm.requireFS(kind, path)
 	if err != nil {
 		return nil, err
