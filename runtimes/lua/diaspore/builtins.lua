@@ -178,6 +178,24 @@ local function attr_name(v)
   throw("TypeError", "attribute name must be string, not '" .. type_name(v) .. "'")
 end
 
+values.OBJECT.ns.__setattr__ = bi("__setattr__", function(I, args, kw)
+  arg_count("__setattr__", args, 3, 3)
+  H.no_kw("__setattr__", kw)
+  I:object_set_attr(args[1], attr_name(args[2]), args[3])
+  return NONE
+end)
+values.OBJECT.ns.__delattr__ = bi("__delattr__", function(I, args, kw)
+  arg_count("__delattr__", args, 2, 2)
+  H.no_kw("__delattr__", kw)
+  I:object_del_attr(args[1], attr_name(args[2]))
+  return NONE
+end)
+values.OBJECT.ns.__hash__ = bi("__hash__", function(_I, args, kw)
+  arg_count("__hash__", args, 1, 1)
+  H.no_kw("__hash__", kw)
+  return values.obj_id(args[1]) % (1 << 61)
+end)
+
 local function bi_print(I, args, kw)
   local sep = " "
   local endv = "\n"
@@ -223,7 +241,7 @@ local function bi_input(I, args, kw)
   end
   local line = io.read("l")
   if line == nil then
-    throw("RuntimeError", "EOF when reading a line")
+    throw("EOFError", "EOF when reading a line")
   end
   return line
 end
@@ -280,6 +298,7 @@ local function bi_reversed(I, args, kw)
   local v = args[1]
   local items
   local k = kindof(v)
+  if k == "dictview" then return iter.dict_view_iter(v, true) end
   if k == "list" or k == "tuple" then
     items = {}
     for i = 1, #v.items do items[i] = v.items[i] end
@@ -370,7 +389,7 @@ local function min_max(I, name, args, kw, is_min)
     else
       pick = ops.compare(I, "lt", best_k, xk)
     end
-    if pick then
+    if I:truth(pick) then
       best, best_k = x, xk
     end
   end
@@ -520,23 +539,7 @@ end
 
 local function bi_hash(I, args, kw)
   arg_count("hash", args, 1, 1)
-  local v = args[1]
-  if kindof(v) == "instance" then
-    if values.class_lookup(v.cls, "__hash__") ~= nil then
-      return I:call_dunder(v, "__hash__", {})
-    end
-    return values.obj_id(v) % (1 << 61)
-  end
-  -- complex with zero imag hashes like its real; integral numbers hash to
-  -- their int value (CPython: hash(1)==hash(1.0)==hash(1+0j)==1)
-  if kindof(v) == "complex" and v.im == 0.0 then v = v.re end
-  local n = as_index(v)
-  if n ~= nil then return n end
-  if math.type(v) == "float" then
-    local iv = math.tointeger(v)
-    if iv ~= nil then return iv end
-  end
-  return fnv_hash(values.hash_key(v))
+  return values.hash_value(args[1])
 end
 
 local function bi_id(_I, args, kw)
@@ -608,11 +611,16 @@ local function value_matches_type(v, bt)
   if name == "list" then return kindof(v) == "list" end
   if name == "tuple" then return kindof(v) == "tuple" end
   if name == "dict" then return kindof(v) == "dict" end
-  if name == "set" then return kindof(v) == "set" end
+  if name == "set" then return kindof(v) == "set" and not v.frozen end
+  if name == "frozenset" then return kindof(v) == "set" and v.frozen == true end
   if name == "range" then return kindof(v) == "range" end
+  if name == "slice" then return kindof(v) == "slice" end
   if name == "complex" then return kindof(v) == "complex" end
   if name == "NoneType" then return kindof(v) == "none" end
+  if name == "NotImplementedType" then return v == values.NOT_IMPLEMENTED end
   if name == "type" then return kindof(v) == "class" or kindof(v) == "btype" end
+  if kindof(v) == "dictview" then return name == "dict_" .. v.view end
+  if kindof(v) == "nativeobject" then return v.pytype == bt end
   return false
 end
 
@@ -815,6 +823,20 @@ local function ctor_set(I, args, kw)
   return out
 end
 
+local function ctor_frozenset(I, args, kw)
+  arg_count("frozenset", args, 0, 1)
+  H.no_kw("frozenset", kw)
+  if #args == 1 and kindof(args[1]) == "set" then
+    if args[1].frozen then return args[1] end
+    local out = values.set_copy(args[1])
+    out.frozen = true
+    return out
+  end
+  local out = ctor_set(I, args, kw)
+  out.frozen = true
+  return out
+end
+
 local function ctor_dict(I, args, kw)
   if #args > 1 then
     throw("TypeError", "dict expected at most 1 argument, got " .. #args)
@@ -924,6 +946,17 @@ end
 -- ---------------------------------------------------------------------------
 -- make_builtins
 
+local function ctor_slice(_I, args, kw)
+  arg_count("slice", args, 1, 3)
+  H.no_kw("slice", kw)
+  if #args == 1 then
+    return { kind = "slice", lower = NONE, upper = args[1], step = NONE }
+  end
+  local step = NONE
+  if #args == 3 then step = args[3] end
+  return { kind = "slice", lower = args[1], upper = args[2], step = step }
+end
+
 --- Build the builtin namespace for an interpreter.
 function M.make_builtins(I)
   local types = {
@@ -936,10 +969,24 @@ function M.make_builtins(I)
     tuple = values.btype("tuple", ctor_tuple),
     dict = values.btype("dict", ctor_dict),
     set = values.btype("set", ctor_set),
+    frozenset = values.btype("frozenset", ctor_frozenset),
     range = values.btype("range", ctor_range),
+    slice = values.btype("slice", ctor_slice),
     complex = values.btype("complex", ctor_complex),
     NoneType = values.btype("NoneType", function() return NONE end),
   }
+  local notimplemented_type = values.btype("NotImplementedType", function(_I, args, kw)
+    arg_count("NotImplementedType", args, 0, 0)
+    H.no_kw("NotImplementedType", kw)
+    return values.NOT_IMPLEMENTED
+  end)
+  local view_types = {}
+  for _, view in ipairs({ "keys", "values", "items" }) do
+    local name = "dict_" .. view
+    view_types[view] = values.btype(name, function()
+      throw("TypeError", "cannot create '" .. name .. "' instances")
+    end)
+  end
   types.type = values.btype("type", function(I2, args, kw)
     if #args ~= 1 then -- type(name, bases, ns): dynamic class creation
       if #args ~= 3 then
@@ -972,6 +1019,8 @@ function M.make_builtins(I)
     local k = kindof(v)
     if k == "instance" then return v.cls end
     if k == "class" or k == "btype" then return types.type end
+    if k == "dictview" then return view_types[v.view] end
+    if k == "nativeobject" and v.pytype ~= nil then return v.pytype end
     local t = type(v)
     if t == "boolean" then return types.bool end
     if t == "number" then
@@ -982,10 +1031,12 @@ function M.make_builtins(I)
     if k == "list" then return types.list end
     if k == "tuple" then return types.tuple end
     if k == "dict" then return types.dict end
-    if k == "set" then return types.set end
+    if k == "set" then return v.frozen and types.frozenset or types.set end
     if k == "range" then return types.range end
+    if k == "slice" then return types.slice end
     if k == "complex" then return types.complex end
     if k == "none" then return types.NoneType end
+    if k == "notimplemented" then return notimplemented_type end
     local name = type_name(v)
     return values.btype(name, function()
       throw("TypeError", "cannot construct '" .. name .. "' values")
@@ -1047,6 +1098,12 @@ function M.make_builtins(I)
     I2:set_attr(args[1], attr_name(args[2]), args[3])
     return NONE
   end)
+  add("delattr", function(I2, args, kw)
+    arg_count("delattr", args, 2, 2)
+    H.no_kw("delattr", kw)
+    I2:del_attr(args[1], attr_name(args[2]))
+    return NONE
+  end)
   add("hasattr", bi_hasattr)
   add("input", bi_input)
   add("open", function(I2, args, kw)
@@ -1100,18 +1157,6 @@ function M.make_builtins(I)
     end
     return values.property(fget, fset, fdel, doc)
   end)
-  add("slice", function(_I2, args, kw)
-    arg_count("slice", args, 1, 3)
-    if #args == 1 then
-      return { kind = "slice", lower = NONE, upper = args[1], step = NONE }
-    end
-    return {
-      kind = "slice",
-      lower = args[1],
-      upper = args[2],
-      step = #args == 3 and args[3] or NONE,
-    }
-  end)
   add("globals", function(I2, args, kw)
     arg_count("globals", args, 0, 0)
     return I2:frame_dict((I2:caller_frame() and I2:caller_frame().globals) or nil)
@@ -1133,11 +1178,7 @@ function M.make_builtins(I)
       return d
     end
     if k == "module" then return I2:frame_dict(o.frame.vars) end
-    if k == "class" then
-      local d = values.new_dict()
-      for key, val in pairs(o.ns) do values.dict_set(d, key, val) end
-      return d
-    end
+    if k == "class" then return I2:get_attr(o, "__dict__") end
     throw("TypeError", "vars() argument must have __dict__")
   end)
   add("dir", function(I2, args, kw)
@@ -1183,6 +1224,7 @@ function M.make_builtins(I)
   b.type = types.type
   b.object = values.OBJECT
   b.Ellipsis = values.ELLIPSIS
+  b.NotImplemented = values.NOT_IMPLEMENTED
   for name, t in pairs(types) do
     if name ~= "NoneType" and name ~= "type" then b[name] = t end
   end

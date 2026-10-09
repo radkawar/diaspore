@@ -48,6 +48,71 @@ def length_hint(obj, default=0):
         return default
 
 
+def iadd(a, b):
+    a += b
+    return a
+
+
+def isub(a, b):
+    a -= b
+    return a
+
+
+def imul(a, b):
+    a *= b
+    return a
+
+
+def imatmul(a, b):
+    a @= b
+    return a
+
+
+def itruediv(a, b):
+    a /= b
+    return a
+
+
+def ifloordiv(a, b):
+    a //= b
+    return a
+
+
+def imod(a, b):
+    a %= b
+    return a
+
+
+def ipow(a, b):
+    a **= b
+    return a
+
+
+def ilshift(a, b):
+    a <<= b
+    return a
+
+
+def irshift(a, b):
+    a >>= b
+    return a
+
+
+def iand(a, b):
+    a &= b
+    return a
+
+
+def ior(a, b):
+    a |= b
+    return a
+
+
+def ixor(a, b):
+    a ^= b
+    return a
+
+
 class attrgetter:
     def __init__(self, *names):
         self._names = names
@@ -108,3 +173,16 @@ __getitem__ = getitem
 __setitem__ = setitem
 __delitem__ = delitem
 __contains__ = contains
+__iadd__ = iadd
+__isub__ = isub
+__imul__ = imul
+__imatmul__ = imatmul
+__itruediv__ = itruediv
+__ifloordiv__ = ifloordiv
+__imod__ = imod
+__ipow__ = ipow
+__ilshift__ = ilshift
+__irshift__ = irshift
+__iand__ = iand
+__ior__ = ior
+__ixor__ = ixor

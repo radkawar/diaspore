@@ -90,6 +90,7 @@ var excTree = [][2]string{
 	{"OverflowError", "ArithmeticError"},
 	{"AssertionError", "Exception"},
 	{"AttributeError", "Exception"},
+	{"EOFError", "Exception"},
 	{"ImportError", "Exception"},
 	{"ModuleNotFoundError", "ImportError"},
 	{"LookupError", "Exception"},
@@ -177,6 +178,12 @@ func buildExcClasses() map[string]*Class {
 }
 
 func init() {
+	objectSetattr = bi("__setattr__", biObjectSetattr)
+	objectDelattr = bi("__delattr__", biObjectDelattr)
+	objectClass.NS["__setattr__"] = objectSetattr
+	objectClass.NS["__delattr__"] = objectDelattr
+	objectHash = bi("__hash__", biObjectHash)
+	objectClass.NS["__hash__"] = objectHash
 	m := excClasses
 	// ExceptionGroup inherits from BaseExceptionGroup and Exception (C3).
 	eg := &Class{Name: "ExceptionGroup",
@@ -263,6 +270,16 @@ func newErrorf(name, format string, a ...any) *Raised {
 // newErrorArgs builds a Raised whose exception carries arbitrary args.
 func newErrorArgs(name string, args ...Value) *Raised {
 	return &Raised{Exc: makeExc(name, args...)}
+}
+
+func newUnicodeError(name, encoding string, object Value, start, end int64, reason string) *Raised {
+	exc := makeExc(name, encoding, object, start, end, reason)
+	exc.D["encoding"] = encoding
+	exc.D["object"] = object
+	exc.D["start"] = start
+	exc.D["end"] = end
+	exc.D["reason"] = reason
+	return &Raised{Exc: exc}
 }
 
 // excIsA reports whether v is an instance of the named builtin exception.

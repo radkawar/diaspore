@@ -1,0 +1,25 @@
+IPv6
+datagrams
+file descriptor constructor
+connection timeout
+source address
+aggregated errors
+timeout
+zero timeout
+nonblocking
+local address
+file descriptor
+shutdown
+backlog integer
+disable reuse
+unknown option
+DNS family selection
+port range
+address tuple
+bound connection
+already bound
+outgoing reuse option
+repeat listen None
+ephemeral local port
+listener has no peer
+repeated close None

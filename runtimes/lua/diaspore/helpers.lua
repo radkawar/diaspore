@@ -113,10 +113,14 @@ end
 
 --- Update a dictionary from a mapping or iterable of pairs.
 function M.dict_update_from(I, d, src)
+  if type(src) == "table" and src.kind == "mappingproxy" then
+    src = values.namespace_dict(src.cls)
+  end
   if type(src) == "table" and src.kind == "dict" then
     local entries = values.dict_entries(src)
     for i = 1, #entries do
-      values.dict_set_hk(d, values.hash_key(entries[i].k), entries[i].k, entries[i].v)
+      local entry = entries[i]
+      values.dict_set_hk(d, entry.hk or values.hash_key(entry.k), entry.k, entry.v)
     end
     return
   end
@@ -134,11 +138,37 @@ end
 -- ---------------------------------------------------------------------------
 -- encodings
 
+local function ascii_error(name, object, start, stop)
+  local reason = "ordinal not in range(128)"
+  local exc = values.make_exc(name, "ascii", object, start, stop, reason)
+  exc.d.encoding = "ascii"
+  exc.d.object = object
+  exc.d.start = start
+  exc.d["end"] = stop
+  exc.d.reason = reason
+  values.throw_val(exc)
+end
+
 --- Encode a string as UTF-8, ASCII, or Latin-1 bytes.
 function M.encode_str_to(s, enc)
-  local e = enc:lower()
+  local e = enc:lower():gsub("_", "-")
   if e == "utf-8" or e == "utf8" then
     return values.bytes(s)
+  end
+  if e == "ascii" or e == "us-ascii" or e == "646" then
+    if values.is_ascii(s) then return values.bytes(s) end
+    local start, stop
+    local position = 0
+    for _, cp in utf8.codes(s, true) do
+      if cp > 127 then
+        if start == nil then start = position end
+        stop = position + 1
+      elseif start ~= nil then
+        break
+      end
+      position = position + 1
+    end
+    ascii_error("UnicodeEncodeError", s, start, stop)
   end
   if e == "latin-1" or e == "latin1" or e == "iso-8859-1" then
     local out = {}
@@ -156,10 +186,16 @@ end
 
 --- Decode UTF-8, ASCII, or Latin-1 bytes.
 function M.decode_bytes(b, enc)
-  local e = enc:lower()
+  local e = enc:lower():gsub("_", "-")
   if e == "utf-8" or e == "utf8" then
     if utf8.len(b.b) == nil then
       throw("ValueError", "'utf-8' codec can't decode bytes: invalid data")
+    end
+    return b.b
+  end
+  if e == "ascii" or e == "us-ascii" or e == "646" then
+    for i = 1, #b.b do
+      if b.b:byte(i) > 127 then ascii_error("UnicodeDecodeError", b, i - 1, i) end
     end
     return b.b
   end

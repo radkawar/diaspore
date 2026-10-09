@@ -103,7 +103,7 @@ func CompileFile(path string, debug bool, searchPaths []string, opts ...interp.O
 		argv = append(argv, "--path", searchPath)
 		readPaths = append(readPaths, searchPath)
 	}
-	argv = append(argv, "--path", stdlibRoot)
+	argv = append(argv, "--stdlib", stdlibRoot)
 	readPaths = append(readPaths, stdlibRoot)
 	if debug {
 		argv = append(argv, "--debug")
@@ -132,7 +132,7 @@ func CompileSource(path, source string, opts ...interp.Option) (Result, error) {
 		overlay[name] = src
 	}
 	overlay[path] = source
-	return run([]string{"dspc", "--path", stdlibRoot, path}, []string{dir, stdlibRoot},
+	return run([]string{"dspc", "--stdlib", stdlibRoot, path}, []string{dir, stdlibRoot},
 		append([]interp.Option{interp.WithFSOverlay(overlay)}, opts...))
 }
 

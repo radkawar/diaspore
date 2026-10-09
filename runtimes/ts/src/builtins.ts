@@ -1,6 +1,7 @@
 /* Builtin functions and type constructors (spec 9). */
 
 import * as nodeFs from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 
 import {
   type Value,
@@ -8,11 +9,16 @@ import {
   type KwArgs,
   NONE,
   ELLIPSIS,
+  NOT_IMPLEMENTED,
+  PyNotImplementedT,
   PyNoneT,
   DiasporeList,
   DiasporeTuple,
   DiasporeDict,
+  DiasporeDictView,
+  DiasporeMappingProxy,
   DiasporeSet,
+  DiasporeFrozenSet,
   DiasporeRange,
   DiasporeSlice,
   DiasporeClass,
@@ -20,6 +26,7 @@ import {
   DiasporeFunction,
   DiasporeModule,
   NativeModule,
+  NativeObject,
   BoundMethod,
   StaticMethodV,
   ClassMethodV,
@@ -36,11 +43,15 @@ import {
   isIntKind,
   intFromFloat,
   hashKey,
+  hashValue,
+  fnvHash,
+  storedHashKey,
   objId,
   chars,
   diasporeErr,
   DiasporeError,
   makeExc,
+  unicodeCodecError,
   excIsA,
   OBJECT,
   EXC_CLASSES,
@@ -56,6 +67,7 @@ import {
   DiasporeGenerator,
   InstIter,
   SeqIter,
+  DictViewIter,
   MapIter,
   FilterIter,
   ZipIter,
@@ -88,7 +100,9 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
     ["tuple", new BuiltinType("tuple", ctorTuple)],
     ["dict", new BuiltinType("dict", ctorDict)],
     ["set", new BuiltinType("set", ctorSet)],
+    ["frozenset", new BuiltinType("frozenset", ctorFrozenSet)],
     ["range", new BuiltinType("range", ctorRange)],
+    ["slice", new BuiltinType("slice", ctorSlice)],
     ["complex", new BuiltinType("complex", ctorComplex)],
     ["type", new BuiltinType("type", ctorType)],
     [
@@ -98,6 +112,11 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
       }),
     ],
   ]);
+  types.set("NotImplementedType", new BuiltinType("NotImplementedType", function* (_I, args, kw): G<Value> {
+    argCount("NotImplementedType", args, 0, 0);
+    if (kw.size !== 0) throw diasporeErr("TypeError", "NotImplementedType() takes no arguments");
+    return NOT_IMPLEMENTED;
+  }));
   I.types = types;
 
   const b = new Map<string, Value>();
@@ -154,6 +173,11 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
     yield* I.setAttr(args[0], name, args[2]);
     return NONE;
   });
+  add("delattr", function* (I, args): G<Value> {
+    argCount("delattr", args, 2, 2);
+    yield* I.delAttr(args[0], attrName(args[1]));
+    return NONE;
+  });
   add("hasattr", function* (I, args): G<Value> {
     argCount("hasattr", args, 2, 2);
     const name = attrName(args[1]);
@@ -191,6 +215,7 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
   b.set("type", types.get("type") as BuiltinType);
   b.set("object", OBJECT);
   b.set("Ellipsis", ELLIPSIS);
+  b.set("NotImplemented", NOT_IMPLEMENTED);
   // Unspellable helper behind the compiler's `await x` lowering: resolves an
   // awaitable to the coroutine/generator that yield-from drives.
   b.set(
@@ -217,11 +242,6 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
     };
     return new Property(get(0, "fget"), get(1, "fset"), get(2, "fdel"), get(3, "doc"));
   });
-  add("slice", function* (_I, args): G<Value> {
-    argCount("slice", args, 1, 3);
-    if (args.length === 1) return new DiasporeSlice(NONE, args[0], NONE);
-    return new DiasporeSlice(args[0], args[1], args.length === 3 ? args[2] : NONE);
-  });
   add("globals", function* (): G<Value> {
     throw diasporeErr("RuntimeError", "globals() unsupported here"); // frame-special-cased
   });
@@ -245,7 +265,7 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
     return yield* I.execSnippet(args[0], arg(args, 1), arg(args, 2), "eval");
   });
   for (const [name, t] of types) {
-    if (name !== "NoneType" && name !== "type") b.set(name, t);
+    if (name !== "NoneType" && name !== "NotImplementedType" && name !== "type") b.set(name, t);
   }
   for (const [name, cls] of EXC_CLASSES) b.set(name, cls);
   return b;
@@ -269,8 +289,7 @@ function* biVars(_I: Interp, args: Value[]): G<Value> {
     return d;
   }
   if (o instanceof DiasporeClass) {
-    for (const [k, v] of o.ns) d.setHK("s" + k, k, v);
-    return d;
+    return new DiasporeMappingProxy(o.ns);
   }
   throw diasporeErr("TypeError", "vars() argument must have __dict__");
 }
@@ -334,26 +353,31 @@ function* biPrint(I: Interp, args: Value[], kw: KwArgs): G<Value> {
   return NONE;
 }
 
-// Buffered synchronous stdin reader (used by input()).
-let stdinBuf = Buffer.alloc(0);
+// input() and sys.stdin share one UTF-8, universal-newline buffer.
+let stdinBuf = "";
 let stdinEOF = false;
+let stdinCR = false;
+const stdinDecoder = new StringDecoder("utf8");
 
-/** Read one buffered stdin line, or null at EOF. */
-export function readLineSync(): string | null {
+/** Read text from stdin, optionally bounded by code points or a newline. */
+export function readStdinSync(size = -1, line = false): string {
+  if (size === 0) return "";
   for (;;) {
-    const nl = stdinBuf.indexOf(0x0a);
-    if (nl >= 0) {
-      const line = stdinBuf.subarray(0, nl).toString("utf8");
-      stdinBuf = stdinBuf.subarray(nl + 1);
-      return line;
-    }
-    if (stdinEOF) {
-      if (stdinBuf.length > 0) {
-        const line = stdinBuf.toString("utf8");
-        stdinBuf = Buffer.alloc(0);
-        return line;
+    let end = 0;
+    let count = 0;
+    let complete = stdinEOF;
+    for (const ch of stdinBuf) {
+      end += ch.length;
+      count++;
+      if ((line && ch === "\n") || (size >= 0 && count >= size)) {
+        complete = true;
+        break;
       }
-      return null;
+    }
+    if (complete) {
+      const result = stdinBuf.slice(0, end);
+      stdinBuf = stdinBuf.slice(end);
+      return result;
     }
     const chunk = Buffer.alloc(65536);
     let n = 0;
@@ -362,15 +386,22 @@ export function readLineSync(): string | null {
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "EAGAIN") continue;
-      if (err.code === "EOF") n = 0;
-      else throw e;
+      if (err.code !== "EOF") throw e;
     }
-    if (n === 0) {
-      stdinEOF = true;
-    } else {
-      stdinBuf = Buffer.concat([stdinBuf, chunk.subarray(0, n)]);
-    }
+    let text = (stdinCR ? "\r" : "") +
+      (n === 0 ? stdinDecoder.end() : stdinDecoder.write(chunk.subarray(0, n)));
+    stdinEOF = n === 0;
+    stdinCR = !stdinEOF && text.endsWith("\r");
+    if (stdinCR) text = text.slice(0, -1);
+    stdinBuf += text.replace(/\r\n?/g, "\n");
   }
+}
+
+/** Read one buffered stdin line without its newline, or null at EOF. */
+export function readLineSync(): string | null {
+  const line = readStdinSync(-1, true);
+  if (line === "") return null;
+  return line.endsWith("\n") ? line.slice(0, -1) : line;
 }
 
 function* biInput(I: Interp, args: Value[]): G<Value> {
@@ -384,7 +415,7 @@ function* biInput(I: Interp, args: Value[]): G<Value> {
   }
   const line = readLineSync();
   if (line === null) {
-    throw diasporeErr("RuntimeError", "EOF when reading a line");
+    throw diasporeErr("EOFError", "EOF when reading a line");
   }
   if (I.durable) I.journal.push({ m: "builtins", f: "input", r: line });
   return line;
@@ -441,6 +472,8 @@ function* biFilter(I: Interp, args: Value[]): G<Value> {
 function* biReversed(I: Interp, args: Value[]): G<Value> {
   argCount("reversed", args, 1, 1);
   const v = args[0];
+  if (v instanceof DiasporeDictView) return new DictViewIter(v, true);
+  if (v instanceof DiasporeDict) return new DictViewIter(new DiasporeDictView(v, "keys"), true);
   let items: Value[];
   if (v instanceof DiasporeList) items = [...v.items];
   else if (v instanceof DiasporeTuple) items = [...v.items];
@@ -630,9 +663,7 @@ function* biRound(_I: Interp, args: Value[]): G<Value> {
 
 function* biDivmod(I: Interp, args: Value[]): G<Value> {
   argCount("divmod", args, 2, 2);
-  const q = yield* I.binop("floordiv", args[0], args[1]);
-  const r = yield* I.binop("mod", args[0], args[1]);
-  return new DiasporeTuple([q, r]);
+  return yield* I.binop("divmod", args[0], args[1]);
 }
 
 function* biPow(I: Interp, args: Value[]): G<Value> {
@@ -742,15 +773,29 @@ function valueMatchesType(v: Value, bt: BuiltinType): boolean {
     case "tuple":
       return v instanceof DiasporeTuple;
     case "dict":
-      return v instanceof DiasporeDict;
+      return v instanceof DiasporeDict && !(v instanceof DiasporeMappingProxy);
     case "set":
-      return v instanceof DiasporeSet;
+      return v instanceof DiasporeSet && !(v instanceof DiasporeFrozenSet);
+    case "frozenset":
+      return v instanceof DiasporeFrozenSet;
     case "range":
       return v instanceof DiasporeRange;
+    case "slice":
+      return v instanceof DiasporeSlice;
     case "complex":
       return v instanceof Complex;
     case "NoneType":
       return v instanceof PyNoneT;
+    case "NotImplementedType":
+      return v instanceof PyNotImplementedT;
+    case "mappingproxy":
+      return v instanceof DiasporeMappingProxy;
+    case "dict_keys":
+    case "dict_values":
+    case "dict_items":
+      return v instanceof DiasporeDictView && "dict_" + v.kind === bt.name;
+    case "Random":
+      return v instanceof NativeObject && v.kind === "Random";
     case "type":
       return v instanceof DiasporeClass || v instanceof BuiltinType;
   }
@@ -821,31 +866,9 @@ function* biCallable(_I: Interp, args: Value[]): G<Value> {
   return false;
 }
 
-function fnvHash(s: string): bigint {
-  let h = 0xcbf29ce484222325n;
-  for (let i = 0; i < s.length; i++) {
-    h ^= BigInt(s.charCodeAt(i));
-    h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
-  }
-  return h & 0x7fffffffffffffffn;
-}
-
 function* biHash(_I: Interp, args: Value[]): G<Value> {
   argCount("hash", args, 1, 1);
-  const v = args[0];
-  if (v instanceof DiasporeInstance) return BigInt(objId(v)) % 2n ** 61n;
-  const n = asIndex(v);
-  if (n !== null) return n;
-  // Numerically-integral values (1.0, 1+0j) hash like the equal int.
-  const hk = hashKey(v);
-  if (hk.length > 1 && hk[0] === "i") {
-    try {
-      return BigInt(hk.slice(1));
-    } catch {
-      /* fall through */
-    }
-  }
-  return fnvHash(hk);
+  return hashValue(args[0]);
 }
 
 function* biID(_I: Interp, args: Value[]): G<Value> {
@@ -1103,10 +1126,26 @@ function* ctorBytes(I: Interp, args: Value[]): G<Value> {
 
 /** Encode text using a supported Python encoding name. */
 export function encodeStrTo(s: string, enc: string): Uint8Array {
-  switch (enc.toLowerCase()) {
+  switch (enc.toLowerCase().replace(/_/g, "-")) {
     case "utf-8":
     case "utf8":
       return new TextEncoder().encode(s);
+    case "ascii":
+    case "us-ascii":
+    case "646": {
+      const out = new Uint8Array(s.length);
+      for (let i = 0; i < s.length; i++) {
+        const code = s.charCodeAt(i);
+        if (code > 0x7f) {
+          const points = chars(s);
+          let end = i + 1;
+          while (end < points.length && (points[end].codePointAt(0) as number) > 0x7f) end++;
+          throw unicodeCodecError("UnicodeEncodeError", "ascii", s, i, end, "ordinal not in range(128)");
+        }
+        out[i] = code;
+      }
+      return out;
+    }
     case "latin-1":
     case "latin1":
     case "iso-8859-1": {
@@ -1144,6 +1183,7 @@ function* ctorTuple(I: Interp, args: Value[]): G<Value> {
 function* ctorSet(I: Interp, args: Value[]): G<Value> {
   if (args.length === 1) chargeSized(I, args[0]);
   argCount("set", args, 0, 1);
+  if (args[0] instanceof DiasporeSet) return DiasporeSet.prototype.copy.call(args[0]);
   const out = new DiasporeSet();
   if (args.length === 1) {
     for (const x of yield* iterToArray(I, args[0])) out.add(x);
@@ -1151,11 +1191,26 @@ function* ctorSet(I: Interp, args: Value[]): G<Value> {
   return out;
 }
 
+function* ctorFrozenSet(I: Interp, args: Value[], kw: KwArgs): G<Value> {
+  argCount("frozenset", args, 0, 1);
+  if (kw.size !== 0) throw diasporeErr("TypeError", "frozenset() takes no keyword arguments");
+  if (args.length === 0) return new DiasporeFrozenSet();
+  const source = args[0];
+  if (source instanceof DiasporeFrozenSet) return source;
+  chargeSized(I, source);
+  if (source instanceof DiasporeSet) {
+    return new DiasporeFrozenSet(DiasporeSet.prototype.copy.call(source).map);
+  }
+  const out = new DiasporeSet();
+  for (const item of yield* iterToArray(I, source)) out.add(item);
+  return new DiasporeFrozenSet(out.map);
+}
+
 /** Merge a mapping or iterable of pairs into a sandbox dictionary. */
 export function* dictUpdateFrom(I: Interp, d: DiasporeDict, src: Value): G<void> {
   if (src instanceof DiasporeInstance && src.prim !== null) src = src.prim;
   if (src instanceof DiasporeDict) {
-    for (const [hk, e] of src.map) d.setHK(hk, e.key, e.val);
+    for (const [hk, e] of src.map) d.setHK(storedHashKey(src.map, hk), e.key, e.val);
     return;
   }
   const pairs = yield* iterToArray(I, src);
@@ -1195,6 +1250,13 @@ function* ctorRange(_I: Interp, args: Value[]): G<Value> {
   if (vals.length === 2) return new DiasporeRange(vals[0], vals[1], 1n);
   if (vals[2] === 0n) throw diasporeErr("ValueError", "range() arg 3 must not be zero");
   return new DiasporeRange(vals[0], vals[1], vals[2]);
+}
+
+function* ctorSlice(_I: Interp, args: Value[], kw: KwArgs): G<Value> {
+  argCount("slice", args, 1, 3);
+  if (kw.size !== 0) throw diasporeErr("TypeError", "slice() takes no keyword arguments");
+  if (args.length === 1) return new DiasporeSlice(NONE, args[0], NONE);
+  return new DiasporeSlice(args[0], args[1], args.length === 3 ? args[2] : NONE);
 }
 
 function* ctorType(I: Interp, args: Value[]): G<Value> {
@@ -1239,13 +1301,25 @@ function* ctorType(I: Interp, args: Value[]): G<Value> {
   if (v instanceof Uint8Array) return t.get("bytes") as BuiltinType;
   if (v instanceof DiasporeList) return t.get("list") as BuiltinType;
   if (v instanceof DiasporeTuple) return t.get("tuple") as BuiltinType;
+  if (v instanceof DiasporeMappingProxy) {
+    return new BuiltinType("mappingproxy", function* (): G<Value> {
+      throw diasporeErr("TypeError", "cannot construct 'mappingproxy' values");
+    });
+  }
   if (v instanceof DiasporeDict) return t.get("dict") as BuiltinType;
+  if (v instanceof DiasporeFrozenSet) return t.get("frozenset") as BuiltinType;
   if (v instanceof DiasporeSet) return t.get("set") as BuiltinType;
   if (v instanceof DiasporeRange) return t.get("range") as BuiltinType;
+  if (v instanceof DiasporeSlice) return t.get("slice") as BuiltinType;
   if (v instanceof PyNoneT) return t.get("NoneType") as BuiltinType;
+  if (v instanceof PyNotImplementedT) return t.get("NotImplementedType") as BuiltinType;
   if (v instanceof Complex) return t.get("complex") as BuiltinType;
   const name = typeName(v);
-  return new BuiltinType(name, function* (): G<Value> {
+  const registered = t.get(name);
+  if (registered !== undefined) return registered;
+  const result = new BuiltinType(name, function* (): G<Value> {
     throw diasporeErr("TypeError", `cannot construct '${name}' values`);
   });
+  t.set(name, result);
+  return result;
 }

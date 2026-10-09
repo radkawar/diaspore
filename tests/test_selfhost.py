@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from diaspore import Machine, compile_bundle
+from diaspore.compiler import STDLIB_DIR
 
 from .conftest import ROOT, corpus_entries
 
@@ -30,9 +31,9 @@ def selfhost_compile(dspc: dict, entry: Path, search_paths=()) -> dict:
     m = Machine(
         dspc,
         argv=["dspc", *[arg for path in search_paths for arg in ("--path", str(path))],
-              str(entry)],
+              "--stdlib", STDLIB_DIR, str(entry)],
         caps={"fs"},
-        policy={"fs": {"read": [str(ROOT), "/tmp"], "write": []}},
+        policy={"fs": {"read": [str(ROOT), STDLIB_DIR, "/tmp"], "write": []}},
         max_depth=3000,
         stdout=out,
         stderr=err,
@@ -90,8 +91,6 @@ def test_second_order_fixpoint(dspc_bundle: dict, tmp_path: Path) -> None:
 
 def test_extra_import_roots(dspc_bundle: dict, tmp_path: Path) -> None:
     """Search local files before extra roots and preserve external filenames."""
-    from diaspore.compiler import STDLIB_DIR
-
     app = tmp_path / "app"
     packages = tmp_path / "site-packages"
     app.mkdir()
@@ -104,9 +103,10 @@ def test_extra_import_roots(dspc_bundle: dict, tmp_path: Path) -> None:
         "from .helper import result\n")
     (packages / "example" / "helper.py").write_text(
         "from itertools import chain\nresult = list(chain([1], [2]))\n")
-    paths = [str(packages), STDLIB_DIR]
-    native = compile_bundle(str(entry), search_paths=paths, stdlib=False)
+    paths = [str(packages)]
+    native = compile_bundle(str(entry), search_paths=paths)
     got = selfhost_compile(dspc_bundle, entry, paths)
     assert got == native, _diff_hint(native, got)
     assert {"example", "example.helper", "itertools", "local"} <= got["modules"].keys()
     assert got["modules"]["local"]["file"] == str(app / "local.py")
+    assert got["modules"]["itertools"]["file"] == "<stdlib>/itertools.py"

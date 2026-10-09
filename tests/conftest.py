@@ -15,6 +15,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -67,7 +68,7 @@ def run_cpython(entry: Path) -> Result:
     env = dict(os.environ, PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1")
     proc = subprocess.run(
         [sys.executable, str(entry)],
-        capture_output=True, text=True, timeout=60, env=env,
+        capture_output=True, text=True, timeout=60, env=env, input="",
     )
     return Result(proc.stdout, proc.returncode, _last_stderr_line(proc.stderr, proc.returncode))
 
@@ -90,7 +91,8 @@ def run_diaspore_py(entry: Path, max_steps: int | None = None) -> Result:
     out, err = io.StringIO(), io.StringIO()
     m = Machine(build(entry), argv=[str(entry)], caps=caps_for(entry),
                 max_steps=max_steps, stdout=out, stderr=err)
-    code = m.run()
+    with patch("sys.stdin", io.StringIO("")):
+        code = m.run()
     return Result(out.getvalue(), code, _last_stderr_line(err.getvalue(), code))
 
 
@@ -105,9 +107,19 @@ def ensure_dspc_bundles() -> None:
         pytest.fail(f"make generate failed:\n{proc.stdout}{proc.stderr}")
 
 
-# Runtime exclusions reflect features outside each runtime's supported subset.
-TS_SKIP = {"45_tasks"}
-LUA_SKIP = {"45_tasks", "44_regex", "46_bigints", "61_exec_eval"}
+# Runtime exclusions reflect features outside each runtime's supported subset:
+# diaspore-ts has no tasks or net; diaspore-lua has no tasks, net, re, big
+# integers or runtime compilation.
+_TASKS_AND_NET = {
+    "45_tasks",
+    "70_threading_coordination",
+    "71_threading_queue",
+    "72_threading_limits",
+    "73_socket_echo",
+    "74_socket_limits",
+}
+TS_SKIP = set(_TASKS_AND_NET)
+LUA_SKIP = _TASKS_AND_NET | {"44_regex", "46_bigints", "61_exec_eval", "89_filesystem_metadata"}
 
 
 @pytest.fixture(scope="session")
@@ -129,7 +141,7 @@ def run_diaspore_ts(entry: Path, ts_cmd: list[str], tmp_path: Path) -> Result:
     bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
     cmd = [*ts_cmd, "run", str(bundle_path)]
     cmd += [f"--allow-{cap}" for cap in sorted(caps_for(entry))]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, input="")
     return Result(proc.stdout, proc.returncode, _last_stderr_line(proc.stderr, proc.returncode))
 
 
@@ -151,7 +163,7 @@ def run_diaspore_lua(entry: Path, lua_cmd: list[str], tmp_path: Path) -> Result:
     bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
     cmd = [*lua_cmd, "run", str(bundle_path)]
     cmd += [f"--allow-{cap}" for cap in sorted(caps_for(entry))]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, input="")
     return Result(proc.stdout, proc.returncode, _last_stderr_line(proc.stderr, proc.returncode))
 
 
@@ -181,7 +193,7 @@ def run_diaspore_go(entry: Path, go_bin: Path, tmp_path: Path) -> Result:
     bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
     cmd = [str(go_bin), "run", str(bundle_path)]
     cmd += [f"--allow-{cap}" for cap in sorted(caps_for(entry))]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, input="")
     return Result(proc.stdout, proc.returncode, _last_stderr_line(proc.stderr, proc.returncode))
 
 

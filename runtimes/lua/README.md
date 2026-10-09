@@ -55,11 +55,18 @@ cross this boundary.
 
 - No tasks, regular expressions, network I/O, or runtime
   `compile`/`exec`/`eval`.
+- Filesystem queries use only Lua's standard library. `os.getcwd()` reads `PWD`;
+  path resolution and filesystem policy checks are lexical and do not resolve
+  symlinks. Directory listing raises `NotImplementedError`. File-kind queries
+  probe readability, recognize directories when the host reports `EISDIR`, and
+  cannot reliably distinguish special files from regular files. Filesystem
+  overlays are unsupported.
 - Integers use signed 64-bit arithmetic, with wrapping overflow; larger literals
   become floats. There is no arbitrary-precision integer support.
 - Bundles must be plain JSON. Gzip, DSPB, and durable flows are unsupported.
 - Unicode case conversion covers ASCII and Latin-1; other Unicode predicates are
-  approximate. `globals()`, `locals()`, and `vars()` return snapshots.
+  approximate. `globals()`, `locals()`, and instance `vars()` return snapshots;
+  class namespaces are live read-only views.
 - `time.sleep()` uses a CPU-clock busy wait. Random sequences are
   runtime-specific.
 

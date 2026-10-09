@@ -16,6 +16,7 @@ M.NULL = setmetatable({}, { __tostring = function() return "<null>" end })
 
 M.NONE = { kind = "none" }
 M.ELLIPSIS = { kind = "ellipsis" }
+M.NOT_IMPLEMENTED = { kind = "notimplemented" }
 M.SUPER_MARKER = { kind = "supermarker" }
 
 -- Statement-flow signals (returned, not raised).
@@ -133,6 +134,9 @@ function M.type_name(v)
   if t == "string" then return "str" end
   local k = v.kind
   if k == "none" then return "NoneType" end
+  if k == "notimplemented" then return "NotImplementedType" end
+  if k == "set" and v.frozen then return "frozenset" end
+  if k == "dictview" then return "dict_" .. v.view end
   if k == "instance" then return v.cls.name end
   if k == "class" or k == "btype" then return "type" end
   if k == "function" then return "function" end
@@ -175,14 +179,23 @@ function M.hash_key(v)
   if t == "boolean" then return v and "i1" or "i0" end
   if t == "string" then return "s" .. v end
   local k = v.kind
+  if k == "instance" then return "h" .. M.hash_value(v) end
   if k == "bytes" then return "b" .. v.b end
   if k == "none" then return "N" end
   if k == "ellipsis" then return "E" end
   if k == "tuple" then
     local parts = { "t" }
+    local custom = false
+    local hash = 0xcbf29ce484222325
     for i = 1, #v.items do
       local sub = M.hash_key(v.items[i])
+      if sub:sub(1, 1) == "h" then custom = true end
+      hash = (hash ~ M.hash_code(v.items[i], sub)) * 0x100000001b3
       parts[#parts + 1] = #sub .. ":" .. sub
+    end
+    if custom then
+      hash = hash ~ #v.items
+      return "h" .. (hash == -1 and -2 or hash)
     end
     return table.concat(parts)
   end
@@ -194,15 +207,143 @@ function M.hash_key(v)
     if v.im == 0.0 then return M.hash_key(v.re) end
     return "c" .. string.pack("dd", v.re, v.im)
   end
+  if k == "set" and v.frozen then
+    if v.hash == nil then
+      local hash = 0
+      for slot, entry in pairs(v.map) do
+        local item_hash = M.hash_code(entry.v, entry.hk or slot)
+        hash = hash ~ (((item_hash ~ 89869747) ~ (item_hash << 16)) * 3644798167)
+      end
+      hash = hash ~ ((v.size + 1) * 1927868237)
+      hash = hash ~ (hash >> 11) ~ (hash >> 25)
+      hash = hash * 69069 + 907133923
+      v.hash = hash == -1 and 590923713 or hash
+    end
+    return "h" .. v.hash
+  end
   if k == "slice" then
     -- slices are hashable since CPython 3.12
     return "S" .. M.hash_key(v.lower) .. "|" .. M.hash_key(v.upper)
       .. "|" .. M.hash_key(v.step)
   end
-  if k == "list" or k == "dict" or k == "set" then
+  if k == "list" or k == "dict" or k == "set" or k == "mappingproxy"
+      or (k == "dictview" and v.view ~= "values") then
     M.throw_val(M.make_exc("TypeError", "unhashable type: '" .. M.type_name(v) .. "'"))
   end
   return "p" .. M.obj_id(v)
+end
+
+local function fnv_hash(s)
+  local h = 0xcbf29ce484222325
+  for i = 1, #s do h = (h ~ s:byte(i)) * 0x100000001b3 end
+  return h & 0x7fffffffffffffff
+end
+
+--- Return a numeric hash from a key already hashed by the value protocol.
+function M.hash_code(v, encoded)
+  if encoded:sub(1, 1) == "h" then return math.tointeger(encoded:sub(2)) end
+  if type(v) == "table" and v.kind == "tuple" then
+    local hash = 0xcbf29ce484222325
+    for _, item in ipairs(v.items) do
+      hash = (hash ~ M.hash_value(item)) * 0x100000001b3
+    end
+    hash = hash ~ #v.items
+    return hash == -1 and -2 or hash
+  end
+  if type(v) == "table" and v.kind == "complex" and v.im == 0.0 then v = v.re end
+  local n = M.as_index(v)
+  if n == nil and math.type(v) == "float" then n = math.tointeger(v) end
+  if n ~= nil then return n == -1 and -2 or n end
+  return fnv_hash(encoded)
+end
+
+--- Hash a value, honoring inherited user hash methods.
+function M.hash_value(v)
+  if type(v) == "table" and v.kind == "instance" then
+    local method = M.class_lookup(v.cls, "__hash__")
+    if method == M.NONE then
+      M.throw("TypeError", "unhashable type: '" .. v.cls.name .. "'")
+    end
+    if method == nil or method == M.OBJECT.ns.__hash__ then
+      if v.prim ~= nil then
+        local inherited = true
+        for _, cls in ipairs(v.cls.mro) do
+          if cls == M.OBJECT then break end
+          if cls.ns.__hash__ ~= nil then inherited = false; break end
+        end
+        if inherited then
+          local kind = type(v.prim) == "table" and v.prim.kind or nil
+          if kind == "dict" or kind == "list" or (kind == "set" and not v.prim.frozen) then
+            M.throw("TypeError", "unhashable type: '" .. v.cls.name .. "'")
+          end
+          return M.hash_value(v.prim)
+        end
+      end
+      return M.obj_id(v) % (1 << 61)
+    end
+    local result = v.cls.interp:call_dunder(v, "__hash__", {})
+    local n = M.as_index(result)
+    if n == nil and type(result) == "table" and result.kind == "instance" then
+      n = M.as_index(result.prim)
+    end
+    if n == nil then M.throw("TypeError", "__hash__ method should return an integer") end
+    return n == -1 and -2 or n
+  end
+  return M.hash_code(v, M.hash_key(v))
+end
+
+local function key_interp(key)
+  if type(key) ~= "table" then return nil end
+  if key.kind == "instance" then return key.cls.interp end
+  if key.kind == "tuple" then
+    for _, item in ipairs(key.items) do
+      local I = key_interp(item)
+      if I ~= nil then return I end
+    end
+  elseif key.kind == "set" and key.frozen then
+    for _, entry in pairs(key.map) do
+      local I = key_interp(entry.v)
+      if I ~= nil then return I end
+    end
+  end
+end
+
+local key_ops
+local function find_slot(c, hk, key)
+  if not c.slow_keys and hk:byte(1) ~= 104 then return hk, c.map[hk] end
+  local hash = M.hash_code(key, hk)
+  for i, slot in ipairs(c.keys) do
+    local entry = c.map[slot]
+    if entry ~= nil and entry.pos == i then
+      local stored = entry.v
+      if c.kind == "dict" then stored = entry.k end
+      if entry.hash == nil then entry.hash = M.hash_code(stored, entry.hk or slot) end
+      if entry.hash == hash then
+        if stored == key then return slot, entry, hash end
+        local I = key_interp(stored) or key_interp(key)
+        if I ~= nil or (not (type(stored) == "table" and stored.kind == "instance")
+            and not (type(key) == "table" and key.kind == "instance")) then
+          key_ops = key_ops or require("diaspore.ops")
+          if key_ops.eq_elem(I, stored, key) then return slot, entry, hash end
+        elseif hk == (entry.hk or slot) then
+          return slot, entry, hash
+        end
+      end
+    end
+  end
+  if c.map[hk] ~= nil then return {}, nil, hash end
+  return hk, nil, hash
+end
+
+--- Look up an entry using a previously computed hash key.
+function M.dict_entry_hk(d, hk, key)
+  local _, entry = find_slot(d, hk, key)
+  return entry
+end
+
+--- Look up an entry with collision-aware user equality.
+function M.dict_entry(d, key)
+  return M.dict_entry_hk(d, M.hash_key(key), key)
 end
 
 -- ---------------------------------------------------------------------------
@@ -211,7 +352,32 @@ end
 --- Create an empty insertion-ordered dictionary.
 function M.new_dict() return { kind = "dict", keys = {}, map = {}, size = 0, dead = 0 } end
 --- Create an empty insertion-ordered set.
-function M.new_set() return { kind = "set", keys = {}, map = {}, size = 0, dead = 0 } end
+function M.new_set(frozen)
+  return { kind = "set", keys = {}, map = {}, size = 0, dead = 0, frozen = frozen }
+end
+
+--- Snapshot a class namespace in definition order.
+function M.namespace_dict(cls)
+  local d = M.new_dict()
+  for _, key in ipairs(cls.ns_order or {}) do
+    if cls.ns[key] ~= nil then M.dict_set(d, key, cls.ns[key]) end
+  end
+  for key, val in pairs(cls.ns) do
+    if not M.dict_has(d, key) then M.dict_set(d, key, val) end
+  end
+  return d
+end
+
+--- Create a live dictionary keys, values, or items view.
+function M.dict_view(source, view)
+  return { kind = "dictview", source = source, view = view }
+end
+
+--- Return the dictionary currently exposed by a view.
+function M.view_dict(view)
+  if view.source.kind == "mappingproxy" then return M.namespace_dict(view.source.cls) end
+  return view.source
+end
 
 local function compact(c)
   local nk = {}
@@ -230,13 +396,14 @@ M.compact = compact
 
 --- Store a dictionary entry using a precomputed hash key.
 function M.dict_set_hk(d, hk, key, val)
-  local e = d.map[hk]
+  local slot, e, hash = find_slot(d, hk, key)
   if e then
     e.v = val
   else
     local pos = #d.keys + 1
-    d.keys[pos] = hk
-    d.map[hk] = { k = key, v = val, pos = pos }
+    d.keys[pos] = slot
+    d.map[slot] = { k = key, v = val, pos = pos, hk = hk, hash = hash }
+    if hk:sub(1, 1) == "h" then d.slow_keys = true end
     d.size = d.size + 1
   end
 end
@@ -246,13 +413,13 @@ function M.dict_set(d, key, val) M.dict_set_hk(d, M.hash_key(key), key, val) end
 
 --- Look up a dictionary entry, or return nil.
 function M.dict_get(d, key)
-  local e = d.map[M.hash_key(key)]
+  local e = M.dict_entry(d, key)
   if e then return e.v end
   return nil
 end
 
 --- Test whether a dictionary contains a key.
-function M.dict_has(d, key) return d.map[M.hash_key(key)] ~= nil end
+function M.dict_has(d, key) return M.dict_entry(d, key) ~= nil end
 
 --- Delete an entry using a precomputed hash key and return its value.
 function M.dict_del_hk(d, hk)
@@ -266,7 +433,10 @@ function M.dict_del_hk(d, hk)
 end
 
 --- Delete a dictionary entry and return its value, or nil.
-function M.dict_del(d, key) return M.dict_del_hk(d, M.hash_key(key)) end
+function M.dict_del(d, key)
+  local slot = find_slot(d, M.hash_key(key), key)
+  return M.dict_del_hk(d, slot)
+end
 
 --- Array of live entries {k=,v=,pos=} in insertion order.
 function M.dict_entries(d)
@@ -282,10 +452,16 @@ end
 --- Make a shallow dictionary copy.
 function M.dict_copy(d)
   local out = M.new_dict()
+  out.slow_keys = d.slow_keys
   for i = 1, #d.keys do
     local hk = d.keys[i]
     local e = d.map[hk]
-    if e and e.pos == i then M.dict_set_hk(out, hk, e.k, e.v) end
+    if e and e.pos == i then
+      local pos = #out.keys + 1
+      out.keys[pos] = hk
+      out.map[hk] = { k = e.k, v = e.v, pos = pos, hk = e.hk, hash = e.hash }
+      out.size = out.size + 1
+    end
   end
   return out
 end
@@ -296,14 +472,17 @@ function M.dict_clear(d)
   d.map = {}
   d.size = 0
   d.dead = 0
+  d.slow_keys = nil
 end
 
 --- Insert a set element using a precomputed hash key.
 function M.set_add_hk(s, hk, val)
-  if not s.map[hk] then
+  local slot, entry, hash = find_slot(s, hk, val)
+  if entry == nil then
     local pos = #s.keys + 1
-    s.keys[pos] = hk
-    s.map[hk] = { v = val, pos = pos }
+    s.keys[pos] = slot
+    s.map[slot] = { v = val, pos = pos, hk = hk, hash = hash }
+    if hk:sub(1, 1) == "h" then s.slow_keys = true end
     s.size = s.size + 1
   end
 end
@@ -312,12 +491,20 @@ end
 function M.set_add(s, val) M.set_add_hk(s, M.hash_key(val), val) end
 
 --- Test whether a set contains a value.
-function M.set_has(s, val) return s.map[M.hash_key(val)] ~= nil end
+function M.set_has(s, val)
+  local _, entry = find_slot(s, M.hash_key(val), val)
+  return entry ~= nil
+end
+
+--- Test set membership using a previously computed hash key.
+function M.set_has_hk(s, hk, val)
+  local _, entry = find_slot(s, hk, val)
+  return entry ~= nil
+end
 
 --- Remove a set element and report whether it existed.
 function M.set_discard(s, val)
-  local hk = M.hash_key(val)
-  local e = s.map[hk]
+  local hk, e = find_slot(s, M.hash_key(val), val)
   if not e then return false end
   s.map[hk] = nil
   s.size = s.size - 1
@@ -343,18 +530,25 @@ function M.set_pairs(s)
   for i = 1, #s.keys do
     local hk = s.keys[i]
     local e = s.map[hk]
-    if e and e.pos == i then out[#out + 1] = { hk, e.v } end
+    if e and e.pos == i then out[#out + 1] = { e.hk or hk, e.v } end
   end
   return out
 end
 
 --- Make a shallow set copy.
 function M.set_copy(s)
-  local out = M.new_set()
+  local out = M.new_set(s.frozen)
+  out.slow_keys = s.slow_keys
+  out.hash = s.hash
   for i = 1, #s.keys do
     local hk = s.keys[i]
     local e = s.map[hk]
-    if e and e.pos == i then M.set_add_hk(out, hk, e.v) end
+    if e and e.pos == i then
+      local pos = #out.keys + 1
+      out.keys[pos] = hk
+      out.map[hk] = { v = e.v, pos = pos, hk = e.hk, hash = e.hash }
+      out.size = out.size + 1
+    end
   end
   return out
 end
@@ -365,6 +559,7 @@ function M.set_clear(s)
   s.map = {}
   s.size = 0
   s.dead = 0
+  s.slow_keys = nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -428,6 +623,7 @@ end
 -- as `prim` and dropped from the diaspore base list. Instances of such a class
 -- carry an underlying primitive value that unoverridden operations act on.
 function M.new_class(name, bases, ns, prim)
+  if ns.__eq__ ~= nil and ns.__hash__ == nil then ns.__hash__ = M.NONE end
   local diaspore_bases = {}
   for i = 1, #bases do
     if type(bases[i]) == "table" and bases[i].kind == "class" then
@@ -447,7 +643,8 @@ function M.new_class(name, bases, ns, prim)
       prim = bases[i]
     end
   end
-  local cls = { kind = "class", name = name, bases = diaspore_bases, ns = ns, prim = prim }
+  local cls = { kind = "class", name = name, bases = diaspore_bases,
+    declared_bases = bases, ns = ns, prim = prim }
   cls.mro = c3_mro(cls)
   if OBJECT ~= nil then
     local found = false
@@ -501,6 +698,7 @@ local EXC_TREE = {
   { "OverflowError", "ArithmeticError" },
   { "AssertionError", "Exception" },
   { "AttributeError", "Exception" },
+  { "EOFError", "Exception" },
   { "ImportError", "Exception" },
   { "ModuleNotFoundError", "ImportError" },
   { "LookupError", "Exception" },

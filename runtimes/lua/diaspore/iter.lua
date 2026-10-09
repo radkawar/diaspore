@@ -70,6 +70,39 @@ function M.range_iter(r)
   end)
 end
 
+--- Iterate a live dictionary view, checking changes to its size.
+function M.dict_view_iter(view, reverse)
+  local d = values.view_dict(view)
+  local size = d.size
+  local position = reverse and #d.keys + 1 or 0
+  local step = reverse and -1 or 1
+  local done = false
+  local name = "dict_" .. (reverse and "reverse" or "") .. view.view:sub(1, -2) .. "iterator"
+  return mk(name, function()
+    if done then return NONE, false end
+    local current = values.view_dict(view)
+    if current.size ~= size then
+      throw("RuntimeError", "dictionary changed size during iteration")
+    end
+    while true do
+      position = position + step
+      if position < 1 or position > #d.keys then
+        done = true
+        return NONE, false
+      end
+      local entry = d.map[d.keys[position]]
+      if entry ~= nil and entry.pos == position then
+        if current ~= d then entry = values.dict_entry(current, entry.k) end
+        if entry ~= nil then
+          if view.view == "keys" then return entry.k, true end
+          if view.view == "values" then return entry.v, true end
+          return values.tuple({ entry.k, entry.v }), true
+        end
+      end
+    end
+  end)
+end
+
 --- Adapts a diaspore object implementing __next__.
 function M.inst_iter(I, obj)
   local done = false
@@ -320,10 +353,12 @@ function M.get_iter(I, v)
   if t == "table" then
     local k = v.kind
     if k == "iter" then return v end
+    if k == "dictview" then return M.dict_view_iter(v, false) end
     if k == "list" then return M.list_iter(v) end
     if k == "tuple" then return M.seq_iter(v.items) end
     if k == "bytes" then return M.bytes_iter(v) end
     if k == "range" then return M.range_iter(v) end
+    if k == "mappingproxy" then return M.get_iter(I, values.namespace_dict(v.cls)) end
     if k == "dict" then
       local keys = {}
       local entries = values.dict_entries(v)

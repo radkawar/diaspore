@@ -23,82 +23,95 @@ func bi(name string, fn func(vm *VM, args []Value, kw []KwArg) (Value, error)) *
 
 func (vm *VM) makeBuiltins() map[string]Value {
 	types := map[string]*BuiltinType{
-		"int":      {Name: "int", ctor: ctorInt},
-		"float":    {Name: "float", ctor: ctorFloat},
-		"bool":     {Name: "bool", ctor: ctorBool},
-		"str":      {Name: "str", ctor: ctorStr},
-		"bytes":    {Name: "bytes", ctor: ctorBytes},
-		"list":     {Name: "list", ctor: ctorList},
-		"tuple":    {Name: "tuple", ctor: ctorTuple},
-		"dict":     {Name: "dict", ctor: ctorDict},
-		"set":      {Name: "set", ctor: ctorSet},
-		"range":    {Name: "range", ctor: ctorRange},
-		"complex":  {Name: "complex", ctor: ctorComplex},
-		"type":     {Name: "type", ctor: ctorType},
-		"NoneType": {Name: "NoneType", ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) { return None, nil }},
+		"int":       {Name: "int", ctor: ctorInt},
+		"float":     {Name: "float", ctor: ctorFloat},
+		"bool":      {Name: "bool", ctor: ctorBool},
+		"str":       {Name: "str", ctor: ctorStr},
+		"bytes":     {Name: "bytes", ctor: ctorBytes},
+		"list":      {Name: "list", ctor: ctorList},
+		"tuple":     {Name: "tuple", ctor: ctorTuple},
+		"dict":      {Name: "dict", ctor: ctorDict},
+		"set":       {Name: "set", ctor: ctorSet},
+		"frozenset": {Name: "frozenset", ctor: ctorFrozenSet},
+		"range":     {Name: "range", ctor: ctorRange},
+		"slice":     {Name: "slice", ctor: biSlice},
+		"complex":   {Name: "complex", ctor: ctorComplex},
+		"type":      {Name: "type", ctor: ctorType},
+		"NoneType":  {Name: "NoneType", ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) { return None, nil }},
 	}
+	types["NotImplementedType"] = &BuiltinType{Name: "NotImplementedType",
+		ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount("NotImplementedType", args, 0, 0); err != nil {
+				return nil, err
+			}
+			return NotImplemented, noKw("NotImplementedType", kw)
+		}}
 	vm.types = types
 
 	b := map[string]Value{
-		"print":        bi("print", biPrint),
-		"len":          bi("len", biLen),
-		"enumerate":    bi("enumerate", biEnumerate),
-		"zip":          bi("zip", biZip),
-		"map":          bi("map", biMap),
-		"filter":       bi("filter", biFilter),
-		"reversed":     bi("reversed", biReversed),
-		"sorted":       bi("sorted", biSorted),
-		"sum":          bi("sum", biSum),
-		"min":          bi("min", biMin),
-		"max":          bi("max", biMax),
-		"any":          bi("any", biAny),
-		"all":          bi("all", biAll),
-		"abs":          bi("abs", biAbs),
-		"round":        bi("round", biRound),
-		"divmod":       bi("divmod", biDivmod),
-		"pow":          bi("pow", biPow),
-		"ord":          bi("ord", biOrd),
-		"chr":          bi("chr", biChr),
-		"hex":          bi("hex", biHex),
-		"bin":          bi("bin", biBin),
-		"oct":          bi("oct", biOct),
-		"repr":         bi("repr", biRepr),
-		"ascii":        bi("ascii", biAscii),
-		"isinstance":   bi("isinstance", biIsinstance),
-		"issubclass":   bi("issubclass", biIssubclass),
-		"callable":     bi("callable", biCallable),
-		"hash":         bi("hash", biHash),
-		"id":           bi("id", biID),
-		"iter":         bi("iter", biIter),
-		"next":         bi("next", biNext),
-		"getattr":      bi("getattr", biGetattr),
-		"setattr":      bi("setattr", biSetattr),
-		"hasattr":      bi("hasattr", biHasattr),
-		"input":        bi("input", biInput),
-		"open":         bi("open", biOpen),
-		"exit":         bi("exit", biExit),
-		"staticmethod": bi("staticmethod", biStaticmethod),
-		"classmethod":  bi("classmethod", biClassmethod),
-		"format":       bi("format", biFormat),
-		".await":       bi(".await", biAwait),
-		"compile":      bi("compile", biCompile),
-		"exec":         bi("exec", biExec),
-		"eval":         bi("eval", biEval),
-		"property":     bi("property", biProperty),
-		"slice":        bi("slice", biSlice),
-		"vars":         bi("vars", biVars),
-		"dir":          bi("dir", biDir),
-		"super":        superMarker,
-		"object":       objectClass,
-		"Ellipsis":     Ellipsis,
+		"print":          bi("print", biPrint),
+		"len":            bi("len", biLen),
+		"enumerate":      bi("enumerate", biEnumerate),
+		"zip":            bi("zip", biZip),
+		"map":            bi("map", biMap),
+		"filter":         bi("filter", biFilter),
+		"reversed":       bi("reversed", biReversed),
+		"sorted":         bi("sorted", biSorted),
+		"sum":            bi("sum", biSum),
+		"min":            bi("min", biMin),
+		"max":            bi("max", biMax),
+		"any":            bi("any", biAny),
+		"all":            bi("all", biAll),
+		"abs":            bi("abs", biAbs),
+		"round":          bi("round", biRound),
+		"divmod":         bi("divmod", biDivmod),
+		"pow":            bi("pow", biPow),
+		"ord":            bi("ord", biOrd),
+		"chr":            bi("chr", biChr),
+		"hex":            bi("hex", biHex),
+		"bin":            bi("bin", biBin),
+		"oct":            bi("oct", biOct),
+		"repr":           bi("repr", biRepr),
+		"ascii":          bi("ascii", biAscii),
+		"isinstance":     bi("isinstance", biIsinstance),
+		"issubclass":     bi("issubclass", biIssubclass),
+		"callable":       bi("callable", biCallable),
+		"hash":           bi("hash", biHash),
+		"id":             bi("id", biID),
+		"iter":           bi("iter", biIter),
+		"next":           bi("next", biNext),
+		"getattr":        bi("getattr", biGetattr),
+		"setattr":        bi("setattr", biSetattr),
+		"delattr":        bi("delattr", biDelattr),
+		"hasattr":        bi("hasattr", biHasattr),
+		"input":          bi("input", biInput),
+		"open":           bi("open", biOpen),
+		"exit":           bi("exit", biExit),
+		"staticmethod":   bi("staticmethod", biStaticmethod),
+		"classmethod":    bi("classmethod", biClassmethod),
+		"format":         bi("format", biFormat),
+		".await":         bi(".await", biAwait),
+		"compile":        bi("compile", biCompile),
+		"exec":           bi("exec", biExec),
+		"eval":           bi("eval", biEval),
+		"property":       bi("property", biProperty),
+		"vars":           bi("vars", biVars),
+		"dir":            bi("dir", biDir),
+		"super":          superMarker,
+		"object":         objectClass,
+		"Ellipsis":       Ellipsis,
+		"NotImplemented": NotImplemented,
 	}
 	for name, t := range types {
-		if name != "NoneType" {
+		if name != "NoneType" && name != "NotImplementedType" {
 			b[name] = t
 		}
 	}
 	for name, cls := range excClasses {
 		b[name] = cls
+	}
+	for _, name := range []string{"dict_keys", "dict_values", "dict_items"} {
+		types[name] = dictionaryViewType(name)
 	}
 	return b
 }
@@ -258,6 +271,10 @@ func biReversed(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	}
 	var items []Value
 	switch t := args[0].(type) {
+	case *DictView:
+		return t.iterator(true), nil
+	case *Dict:
+		return (&DictView{dict: t, kind: "keys"}).iterator(true), nil
 	case *List:
 		items = append([]Value{}, t.Items...)
 	case *Tuple:
@@ -298,6 +315,10 @@ func (vm *VM) chargeSized(v Value) error {
 		n = int64(t.Len())
 	case *Set:
 		n = int64(t.Len())
+	case *FrozenSet:
+		n = int64(t.set.Len())
+	case *DictView:
+		n = int64(t.length())
 	case *Range:
 		n = t.Len()
 	}
@@ -578,15 +599,7 @@ func biDivmod(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	if err := argCount("divmod", args, 2, 2); err != nil {
 		return nil, err
 	}
-	q, err := vm.binop("floordiv", args[0], args[1])
-	if err != nil {
-		return nil, err
-	}
-	r, err := vm.binop("mod", args[0], args[1])
-	if err != nil {
-		return nil, err
-	}
-	return &Tuple{Items: []Value{q, r}}, nil
+	return vm.binop("divmod", args[0], args[1])
 }
 
 func biPow(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -594,6 +607,14 @@ func biPow(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		return nil, err
 	}
 	if len(args) == 3 {
+		if inst, ok := args[0].(*Instance); ok {
+			if _, has := inst.Class.Lookup("__pow__"); has {
+				result, err := vm.callDunder(inst, "__pow__", args[1:])
+				if _, declined := result.(NotImplementedType); err != nil || !declined {
+					return result, err
+				}
+			}
+		}
 		a, aok := asBig(args[0])
 		b, bok := asBig(args[1])
 		m, mok := asBig(args[2])
@@ -741,8 +762,14 @@ func valueMatchesType(v Value, bt *BuiltinType) bool {
 	case "set":
 		_, ok := v.(*Set)
 		return ok
+	case "frozenset":
+		_, ok := v.(*FrozenSet)
+		return ok
 	case "range":
 		_, ok := v.(*Range)
+		return ok
+	case "slice":
+		_, ok := v.(*Slice)
 		return ok
 	case "complex":
 		_, ok := v.(complex128)
@@ -750,6 +777,15 @@ func valueMatchesType(v Value, bt *BuiltinType) bool {
 	case "NoneType":
 		_, ok := v.(NoneType)
 		return ok
+	case "NotImplementedType":
+		_, ok := v.(NotImplementedType)
+		return ok
+	case "dict_keys", "dict_values", "dict_items":
+		view, ok := v.(*DictView)
+		return ok && "dict_"+view.kind == bt.Name
+	case "Random":
+		native, ok := v.(*NativeObject)
+		return ok && native.Kind == "Random"
 	case "type":
 		switch v.(type) {
 		case *Class, *BuiltinType:
@@ -857,26 +893,7 @@ func biHash(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	if err := argCount("hash", args, 1, 1); err != nil {
 		return nil, err
 	}
-	if inst, ok := args[0].(*Instance); ok {
-		return int64(reflect.ValueOf(inst).Pointer()) &^ (1 << 62), nil
-	}
-	if c, ok := args[0].(complex128); ok && imag(c) == 0 {
-		return biHash(vm, []Value{real(c)}, nil)
-	}
-	if f, ok := args[0].(float64); ok && !math.IsInf(f, 0) && !math.IsNaN(f) &&
-		f == math.Trunc(f) && f >= float64(math.MinInt64) && f <= float64(math.MaxInt64) {
-		return int64(f), nil
-	}
-	if n, ok := asInt(args[0]); ok {
-		return n, nil
-	}
-	hk, err := hashKey(args[0])
-	if err != nil {
-		return nil, err
-	}
-	h := fnv.New64a()
-	h.Write([]byte(hk))
-	return int64(h.Sum64() &^ (1 << 63)), nil
+	return hashValue(args[0])
 }
 
 func biID(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -973,6 +990,64 @@ func biSetattr(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	return None, nil
 }
 
+func biDelattr(vm *VM, args []Value, kw []KwArg) (Value, error) {
+	if err := argCount("delattr", args, 2, 2); err != nil {
+		return nil, err
+	}
+	name, err := wantStr("attribute name", args[1])
+	if err != nil {
+		return nil, err
+	}
+	if err := vm.delAttr(args[0], name); err != nil {
+		return nil, err
+	}
+	return None, nil
+}
+
+var objectSetattr *Builtin
+var objectDelattr *Builtin
+var objectHash *Builtin
+
+func biObjectHash(vm *VM, args []Value, kw []KwArg) (Value, error) {
+	if err := argCount("__hash__", args, 1, 1); err != nil {
+		return nil, err
+	}
+	if inst, ok := args[0].(*Instance); ok {
+		return int64(reflect.ValueOf(inst).Pointer()) &^ (1 << 62), nil
+	}
+	return nil, newError("TypeError", "object.__hash__ requires an instance")
+}
+
+func biObjectSetattr(vm *VM, args []Value, kw []KwArg) (Value, error) {
+	if err := argCount("__setattr__", args, 3, 3); err != nil {
+		return nil, err
+	}
+	inst, ok := args[0].(*Instance)
+	if !ok {
+		return nil, newError("TypeError", "object.__setattr__ requires an instance")
+	}
+	name, err := wantStr("attribute name", args[1])
+	if err != nil {
+		return nil, err
+	}
+	return None, vm.baseSetAttr(inst, name, args[2])
+}
+
+func biObjectDelattr(vm *VM, args []Value, kw []KwArg) (Value, error) {
+	if err := argCount("__delattr__", args, 2, 2); err != nil {
+		return nil, err
+	}
+	inst, ok := args[0].(*Instance)
+	if !ok {
+		return nil, newError("TypeError", "object.__delattr__ requires an instance")
+	}
+	name, err := wantStr("attribute name", args[1])
+	if err != nil {
+		return nil, err
+	}
+	return None, vm.baseDelAttr(inst, name)
+}
+
 func biHasattr(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	if err := argCount("hasattr", args, 2, 2); err != nil {
 		return nil, err
@@ -1012,10 +1087,14 @@ func biInput(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		vm.flushOut()
 	}
 	line, err := vm.stdin.ReadString('\n')
-	if err != nil && line == "" {
-		return nil, newError("RuntimeError", "EOF when reading a line")
+	if err == io.EOF && line == "" {
+		return nil, newError("EOFError", "EOF when reading a line")
+	}
+	if err != nil && err != io.EOF {
+		return nil, newError("OSError", err.Error())
 	}
 	line = strings.TrimSuffix(line, "\n")
+	line = strings.TrimSuffix(line, "\r")
 	if vm.durable {
 		vm.journal = append(vm.journal, jEntry{"builtins", "input", line})
 	}
@@ -1190,10 +1269,7 @@ func biVars(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		}
 		return d, nil
 	case *Class:
-		for k, v := range t.NS {
-			d.SetStr(k, v)
-		}
-		return d, nil
+		return &classDict{cls: t}, nil
 	}
 	return nil, newError("TypeError", "vars() argument must have __dict__")
 }
@@ -1580,7 +1656,9 @@ func ctorDict(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		}
 	}
 	for _, k := range kw {
-		out.SetStr(k.Name, k.Val)
+		if err := out.Set(k.Name, k.Val); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -1653,6 +1731,7 @@ func ctorType(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		}
 		var bases []*Class
 		var primBase *BuiltinType
+		primIndex := 0
 		for _, b := range basesTup.Items {
 			switch cls := b.(type) {
 			case *Class:
@@ -1660,6 +1739,7 @@ func ctorType(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			case *BuiltinType:
 				if subclassablePrim(cls.Name) {
 					primBase = cls
+					primIndex = len(bases)
 				} else {
 					r, _ := vm.repr(b)
 					return nil, newErrorf("TypeError", "cannot subclass %s in diaspore", r)
@@ -1681,7 +1761,7 @@ func ctorType(vm *VM, args []Value, kw []KwArg) (Value, error) {
 				order = append(order, ks)
 			}
 		}
-		return vm.buildClass(name, bases, ns, order, nil, nil, primBase)
+		return vm.buildClass(name, bases, ns, order, nil, nil, primBase, primIndex)
 	}
 	if len(args) == 2 || len(args) > 3 {
 		return nil, newError("TypeError", "type() takes 1 or 3 arguments")
@@ -1712,6 +1792,8 @@ func ctorType(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		return vm.types["dict"], nil
 	case *Set:
 		return vm.types["set"], nil
+	case *FrozenSet:
+		return vm.types["frozenset"], nil
 	case *Range:
 		return vm.types["range"], nil
 	case *big.Int:
@@ -1720,8 +1802,13 @@ func ctorType(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		return vm.types["complex"], nil
 	case NoneType:
 		return vm.types["NoneType"], nil
+	case NotImplementedType:
+		return vm.types["NotImplementedType"], nil
 	}
 	name := typeName(args[0])
+	if builtinType, ok := vm.types[name]; ok {
+		return builtinType, nil
+	}
 	return &BuiltinType{Name: name, ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		return nil, newErrorf("TypeError", "cannot construct '%s' values", name)
 	}}, nil

@@ -18,12 +18,13 @@ func rawPrim(v Value) Value {
 // builtinMethodNames lists the reflected method surface per builtin type, so
 // unbound access (dict.keys, list.append) can be resolved.
 var builtinMethodNames = map[string]map[string]bool{
-	"dict":  setOfNames("get", "keys", "values", "items", "pop", "update", "setdefault", "clear", "copy"),
-	"list":  setOfNames("append", "extend", "insert", "pop", "remove", "clear", "index", "count", "reverse", "sort", "copy"),
-	"set":   setOfNames("add", "remove", "discard", "clear", "copy", "union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset"),
-	"str":   setOfNames("upper", "lower", "title", "capitalize", "casefold", "strip", "lstrip", "rstrip", "split", "rsplit", "splitlines", "join", "replace", "find", "rfind", "index", "count", "startswith", "endswith", "isdigit", "isalpha", "isalnum", "isspace", "islower", "isupper", "swapcase", "zfill", "ljust", "rjust", "center", "encode", "partition", "rpartition", "removeprefix", "removesuffix", "format"),
-	"tuple": setOfNames("count", "index"),
-	"bytes": setOfNames("decode", "find", "split", "strip", "lstrip", "rstrip", "replace", "startswith", "endswith", "upper", "lower"),
+	"dict":      setOfNames("get", "keys", "values", "items", "pop", "update", "setdefault", "clear", "copy"),
+	"list":      setOfNames("append", "extend", "insert", "pop", "remove", "clear", "index", "count", "reverse", "sort", "copy"),
+	"set":       setOfNames("add", "remove", "discard", "clear", "copy", "union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset"),
+	"frozenset": setOfNames("copy", "union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint"),
+	"str":       setOfNames("upper", "lower", "title", "capitalize", "casefold", "strip", "lstrip", "rstrip", "split", "rsplit", "splitlines", "join", "replace", "find", "rfind", "index", "count", "startswith", "endswith", "isdigit", "isalpha", "isalnum", "isspace", "islower", "isupper", "swapcase", "zfill", "ljust", "rjust", "center", "encode", "partition", "rpartition", "removeprefix", "removesuffix", "format"),
+	"tuple":     setOfNames("count", "index"),
+	"bytes":     setOfNames("decode", "find", "split", "strip", "lstrip", "rstrip", "replace", "startswith", "endswith", "upper", "lower"),
 }
 
 func setOfNames(names ...string) map[string]bool {
@@ -105,8 +106,26 @@ func (vm *VM) builtinMethod(o Value, n string) (Value, error) {
 		fn = listMethod(t, n)
 	case *Dict:
 		fn = dictMethod(t, n)
+	case *classDict:
+		switch n {
+		case "keys", "values", "items":
+			fn = func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+				if err := argCount(n, args, 0, 0); err != nil {
+					return nil, err
+				}
+				return &DictView{class: t.cls, kind: n}, noKw(n, kw)
+			}
+		case "get", "copy":
+			fn = func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+				return dictMethod(t.snapshot(), n)(vm, args, kw)
+			}
+		}
 	case *Set:
 		fn = setMethod(t, n)
+	case *FrozenSet:
+		fn = frozenSetMethod(t, n)
+	case *DictView:
+		fn = dictViewMethod(t, n)
 	case *Tuple:
 		fn = tupleMethod(t, n)
 	case []byte:
@@ -596,6 +615,23 @@ func encodeStr(s, enc string) (Value, error) {
 	switch strings.ToLower(enc) {
 	case "utf-8", "utf8":
 		return []byte(s), nil
+	case "ascii", "us-ascii", "us_ascii":
+		position, start, end := int64(0), int64(-1), int64(0)
+		for _, r := range s {
+			if r > 127 {
+				if start < 0 {
+					start = position
+				}
+				end = position + 1
+			} else if start >= 0 {
+				break
+			}
+			position++
+		}
+		if start >= 0 {
+			return nil, newUnicodeError("UnicodeEncodeError", "ascii", s, start, end, "ordinal not in range(128)")
+		}
+		return []byte(s), nil
 	case "latin-1", "latin1", "iso-8859-1":
 		out := make([]byte, 0, len(s))
 		for _, r := range s {
@@ -1060,21 +1096,15 @@ func dictMethod(d *Dict, n string) func(*VM, []Value, []KwArg) (Value, error) {
 			}
 			return None, nil
 		}
-	case "keys":
+	case "keys", "values", "items":
 		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			return &List{Items: d.Keys()}, nil
-		}
-	case "values":
-		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			return &List{Items: d.Values()}, nil
-		}
-	case "items":
-		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			items := make([]Value, 0, d.Len())
-			for _, e := range d.entries {
-				items = append(items, &Tuple{Items: []Value{e.key, e.val}})
+			if err := argCount(n, args, 0, 0); err != nil {
+				return nil, err
 			}
-			return &List{Items: items}, nil
+			if err := noKw(n, kw); err != nil {
+				return nil, err
+			}
+			return &DictView{dict: d, kind: n}, nil
 		}
 	case "pop":
 		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -1104,7 +1134,9 @@ func dictMethod(d *Dict, n string) func(*VM, []Value, []KwArg) (Value, error) {
 				}
 			}
 			for _, k := range kw {
-				d.SetStr(k.Name, k.Val)
+				if err := d.Set(k.Name, k.Val); err != nil {
+					return nil, err
+				}
 			}
 			return None, nil
 		}
@@ -1144,11 +1176,12 @@ func dictMethod(d *Dict, n string) func(*VM, []Value, []KwArg) (Value, error) {
 
 func dictUpdateFrom(vm *VM, d *Dict, src Value) error {
 	src = rawPrim(src)
+	if view, ok := src.(*classDict); ok {
+		src = view.snapshot()
+	}
 	if other, ok := src.(*Dict); ok {
 		for _, e := range other.entries {
-			if e.str {
-				d.SetStr(e.hk, e.val)
-			} else if err := d.Set(e.key, e.val); err != nil {
+			if err := d.Set(e.key, e.val); err != nil {
 				return err
 			}
 		}
@@ -1256,7 +1289,7 @@ func setMethod(s *Set, n string) func(*VM, []Value, []KwArg) (Value, error) {
 			if err != nil {
 				return nil, err
 			}
-			return setIsSubset(s, other), nil
+			return setIsSubset(s, other)
 		}
 	case "issuperset":
 		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -1267,14 +1300,34 @@ func setMethod(s *Set, n string) func(*VM, []Value, []KwArg) (Value, error) {
 			if err != nil {
 				return nil, err
 			}
-			return setIsSubset(other, s), nil
+			return setIsSubset(other, s)
+		}
+	case "isdisjoint":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := needArgs(n, args, 1, 1); err != nil {
+				return nil, err
+			}
+			it, err := vm.getIter(args[0])
+			if err != nil {
+				return nil, err
+			}
+			for {
+				value, more, err := it.Next()
+				if err != nil || !more {
+					return !more, err
+				}
+				found, err := s.Has(value)
+				if err != nil || found {
+					return false, err
+				}
+			}
 		}
 	}
 	return nil
 }
 
 func (vm *VM) toSet(v Value) (*Set, error) {
-	if s, ok := v.(*Set); ok {
+	if s, ok := setValue(v); ok {
 		return s, nil
 	}
 	items, err := vm.iterToSlice(v)
@@ -1500,6 +1553,13 @@ func decodeBytes(b []byte, enc string) (Value, error) {
 		if !utf8.Valid(b) {
 			return nil, newError("ValueError",
 				"'utf-8' codec can't decode bytes: invalid data")
+		}
+		return string(b), nil
+	case "ascii", "us-ascii", "us_ascii":
+		for i, c := range b {
+			if c > 127 {
+				return nil, newUnicodeError("UnicodeDecodeError", "ascii", b, int64(i), int64(i+1), "ordinal not in range(128)")
+			}
 		}
 		return string(b), nil
 	case "latin-1", "latin1", "iso-8859-1":

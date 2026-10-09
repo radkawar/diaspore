@@ -684,33 +684,16 @@ local function dict_method(d, n)
   if n == "get" then
     return function(_I, args)
       need_args(n, args, 1, 2)
-      local e = d.map[values.hash_key(args[1])]
+      local e = values.dict_entry(d, args[1])
       if e ~= nil then return e.v end
       if #args == 2 then return args[2] end
       return NONE
     end
-  elseif n == "keys" then
-    return function()
-      local out = {}
-      local entries = values.dict_entries(d)
-      for i = 1, #entries do out[i] = entries[i].k end
-      return values.list(out)
-    end
-  elseif n == "values" then
-    return function()
-      local out = {}
-      local entries = values.dict_entries(d)
-      for i = 1, #entries do out[i] = entries[i].v end
-      return values.list(out)
-    end
-  elseif n == "items" then
-    return function()
-      local out = {}
-      local entries = values.dict_entries(d)
-      for i = 1, #entries do
-        out[i] = values.tuple({ entries[i].k, entries[i].v })
-      end
-      return values.list(out)
+  elseif n == "keys" or n == "values" or n == "items" then
+    return function(_I, args, kw)
+      need_args(n, args, 0, 0)
+      no_kw(n, kw)
+      return values.dict_view(d, n)
     end
   elseif n == "pop" then
     return function(_I, args)
@@ -732,10 +715,11 @@ local function dict_method(d, n)
   elseif n == "setdefault" then
     return function(_I, args)
       need_args(n, args, 1, 2)
-      local e = d.map[values.hash_key(args[1])]
+      local hk = values.hash_key(args[1])
+      local e = values.dict_entry_hk(d, hk, args[1])
       if e ~= nil then return e.v end
       local dv = #args == 2 and args[2] or NONE
-      values.dict_set(d, args[1], dv)
+      values.dict_set_hk(d, hk, args[1], dv)
       return dv
     end
   elseif n == "clear" then
@@ -763,6 +747,7 @@ local function to_set(I, v)
 end
 
 local function set_method(s, n)
+  if s.frozen and not M.METHOD_SETS.frozenset[n] then return nil end
   if n == "add" then
     return function(_I, args)
       need_args(n, args, 1, 1)
@@ -789,12 +774,15 @@ local function set_method(s, n)
       return NONE
     end
   elseif n == "copy" then
-    return function()
+    return function(_I, args)
+      need_args(n, args, 0, 0)
+      if s.frozen then return s end
       return values.set_copy(s)
     end
   elseif n == "union" or n == "intersection" or n == "difference"
       or n == "symmetric_difference" then
     return function(I, args)
+      if n == "symmetric_difference" then need_args(n, args, 1, 1) end
       local out = values.set_copy(s)
       local op = (n == "union" and "bitor") or (n == "intersection" and "bitand")
         or (n == "difference" and "sub") or "bitxor"
@@ -812,6 +800,16 @@ local function set_method(s, n)
     return function(I, args)
       need_args(n, args, 1, 1)
       return ops.set_is_subset(to_set(I, args[1]), s)
+    end
+  elseif n == "isdisjoint" then
+    return function(I, args)
+      need_args(n, args, 1, 1)
+      local it = iter.get_iter(I, args[1])
+      while true do
+        local value, more = it.next()
+        if not more then return true end
+        if values.set_has(s, value) then return false end
+      end
     end
   end
   return nil
@@ -1015,18 +1013,43 @@ function M.builtin_method(_I, o, n)
       fn = list_method(o, n)
     elseif k == "dict" then
       fn = dict_method(o, n)
+    elseif k == "mappingproxy" then
+      if n == "keys" or n == "values" or n == "items" then
+        return values.builtin(n, function(_I2, args, kw)
+          need_args(n, args, 0, 0)
+          no_kw(n, kw)
+          return values.dict_view(o, n)
+        end)
+      end
+      if n == "get" or n == "copy" then
+        fn = function(I, args, kw)
+          return dict_method(values.namespace_dict(o.cls), n)(I, args, kw)
+        end
+      end
     elseif k == "set" then
       fn = set_method(o, n)
     elseif k == "tuple" then
       fn = tuple_method(o, n)
     elseif k == "bytes" then
       fn = bytes_method(o, n)
+    elseif k == "dictview" and o.view ~= "values" and n == "isdisjoint" then
+      fn = function(I, args, kw)
+        need_args(n, args, 1, 1)
+        no_kw(n, kw)
+        local it = iter.get_iter(I, args[1])
+        while true do
+          local item, more = it.next()
+          if not more then return true end
+          if ops.contains(I, o, item) then return false end
+        end
+      end
     end
   end
   if fn == nil then
     throw("AttributeError", "'" .. type_name(o) .. "' object has no attribute '" .. n .. "'")
   end
   return values.builtin(n, function(I, args, kw)
+    if kindof(o) == "set" and o.frozen then no_kw(n, kw or {}) end
     return fn(I, args, kw or {})
   end)
 end
@@ -1051,7 +1074,9 @@ M.METHOD_SETS = {
     "setdefault", "clear", "copy" }),
   set = set_of({ "add", "remove", "discard", "clear", "copy", "union",
     "intersection", "difference", "symmetric_difference", "issubset",
-    "issuperset" }),
+    "issuperset", "isdisjoint" }),
+  frozenset = set_of({ "copy", "union", "intersection", "difference",
+    "symmetric_difference", "issubset", "issuperset", "isdisjoint" }),
   tuple = set_of({ "count", "index" }),
   bytes = set_of({ "decode", "find", "split", "strip", "lstrip", "rstrip",
     "replace", "startswith", "endswith", "upper", "lower" }),

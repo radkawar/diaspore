@@ -15,7 +15,9 @@ import {
   DiasporeList,
   DiasporeTuple,
   DiasporeDict,
+  DiasporeMappingProxy,
   DiasporeSet,
+  DiasporeFrozenSet,
   DiasporeSlice,
   DiasporeClass,
   DiasporeInstance,
@@ -39,6 +41,7 @@ import {
   EXC_CLASSES,
   makeGroup,
   type BuiltinFn,
+  storedHashKey,
   typeName,
   diasporeErr,
   makeExc,
@@ -177,6 +180,7 @@ export class Interp {
   replaying: boolean;
   maxSteps: number; // 0 = unlimited
   maxDepth: number;
+  readonly depthCap: number;
   steps = 0;
   depth = 0;
   stdoutW: (s: string) => void;
@@ -210,6 +214,7 @@ export class Interp {
     this.replaying = this.journal.length > 0;
     this.maxSteps = opts.maxSteps ?? 0;
     this.maxDepth = opts.maxDepth ?? 1000;
+    this.depthCap = this.maxDepth;
     this.stdoutW = opts.stdout ?? ((s) => process.stdout.write(s));
     this.stderrW = opts.stderr ?? ((s) => process.stderr.write(s));
     this.builtins = makeBuiltins(this);
@@ -410,6 +415,7 @@ export class Interp {
       }
       const fr = new Frame(new Map(), null, null, EMPTY_SET, EMPTY_SET, false, null, "<module>", name);
       fr.vars.set("__name__", name === this.main ? "__main__" : name);
+      fr.vars.set("__file__", m.file as string);
       const mod = new DiasporeModule(name, fr);
       this.modules.set(name, mod);
       try {
@@ -787,6 +793,7 @@ export class Interp {
   ): G<DiasporeClass> {
     const make = (): DiasporeClass => {
       const made = new DiasporeClass(name, [...bases], new Map(ns));
+      made.runtime = this;
       for (const v of made.ns.values()) {
         if (v instanceof DiasporeFunction && v.defclass === null) {
           v.defclass = made;
@@ -1069,15 +1076,7 @@ export class Interp {
         const k = yield* this.evKey(t.k, fr);
         yield* delIndex(this, o, k);
       } else if (op === "attr") {
-        const o = yield* this.ev(t.o, fr);
-        if (o instanceof DiasporeInstance && o.d.has(t.n)) {
-          o.d.delete(t.n);
-        } else {
-          throw diasporeErr(
-            "AttributeError",
-            `'${typeName(o)}' object has no attribute '${t.n}'`,
-          );
-        }
+        yield* this.delAttr(yield* this.ev(t.o, fr), t.n);
       } else {
         throw diasporeErr("TypeError", "cannot delete this target");
       }
@@ -1132,7 +1131,8 @@ export class Interp {
         const comps = e.comps as Node[];
         for (let i = 0; i < ops.length; i++) {
           const right = yield* this.ev(comps[i], fr);
-          if (!(yield* compare(this, ops[i], left, right))) return false;
+          const result = yield* compare(this, ops[i], left, right);
+          if (i === ops.length - 1 || !(yield* this.truth(result))) return result;
           left = right;
         }
         return true;
@@ -1160,7 +1160,7 @@ export class Interp {
             if (!(v instanceof DiasporeDict)) {
               throw diasporeErr("TypeError", "argument after ** must be a mapping");
             }
-            for (const [hk, en] of v.map) out.setHK(hk, en.key, en.val);
+            for (const [hk, en] of v.map) out.setHK(storedHashKey(v.map, hk), en.key, en.val);
           } else {
             const k = yield* this.ev(entry.k, fr);
             const v = yield* this.ev(entry.v, fr);
@@ -1650,8 +1650,6 @@ export class Interp {
   *getAttr(o: Value, n: string): G<Value> {
     if (o instanceof DiasporeInstance) {
       if (n === "__class__") return o.cls;
-      const dv = o.d.get(n);
-      if (dv !== undefined) return dv;
       if ((n === "exceptions" || n === "message") && o.cls.issub(BASE_EXC_GROUP())) {
         return o.d.get(n) ?? NONE;
       }
@@ -1664,6 +1662,17 @@ export class Interp {
           );
         }
         return yield* this.invoke(this.bindAttr(cv.fget, o, o.cls), [], new Map());
+      }
+      if (cv instanceof DiasporeInstance) {
+        const data = cv.cls.lookup("__set__") !== undefined || cv.cls.lookup("__delete__") !== undefined;
+        if (data && cv.cls.lookup("__get__") !== undefined) {
+          return yield* this.callDunder(cv, "__get__", [o, o.cls]);
+        }
+      }
+      const dv = o.d.get(n);
+      if (dv !== undefined) return dv;
+      if (cv instanceof DiasporeInstance && cv.cls.lookup("__get__") !== undefined) {
+        return yield* this.callDunder(cv, "__get__", [o, o.cls]);
       }
       if (cv !== undefined) return this.bindAttr(cv, o, o.cls);
       if (o.prim !== null) {
@@ -1688,12 +1697,10 @@ export class Interp {
         if (n === "__name__" || n === "__qualname__") return o.name;
         if (n === "__mro__") return new DiasporeTuple([...o.mro]);
         if (n === "__bases__") {
-          return new DiasporeTuple(o.bases.length > 0 ? [...o.bases] : [OBJECT]);
+          return new DiasporeTuple(o.declaredBases.length > 0 ? [...o.declaredBases] : o === OBJECT ? [] : [OBJECT]);
         }
         if (n === "__dict__") {
-          const d = new DiasporeDict();
-          for (const [k, val] of o.ns) d.setHK("s" + k, k, val);
-          return d;
+          return new DiasporeMappingProxy(o.ns);
         }
         throw diasporeErr("AttributeError", `type object '${o.name}' has no attribute '${n}'`);
       }
@@ -1882,21 +1889,16 @@ export class Interp {
       return;
     }
     if (o instanceof DiasporeInstance) {
-      const prop = o.cls.lookup(n);
-      if (prop instanceof Property) {
-        if (prop.fset === null) {
-          throw diasporeErr(
-            "AttributeError",
-            `property '${n}' of '${o.cls.name}' object has no setter`,
-          );
-        }
-        yield* this.invoke(this.bindAttr(prop.fset, o, o.cls), [v], new Map());
-        return;
+      const hook = o.cls.lookup("__setattr__");
+      if (hook !== undefined && hook !== OBJECT.ns.get("__setattr__")) {
+        yield* this.invoke(this.bindAttr(hook, o, o.cls), [n, v], new Map());
+      } else {
+        yield* this.setAttrBase(o, n, v);
       }
-      o.d.set(n, v);
       return;
     }
     if (o instanceof DiasporeClass) {
+      o.runtime ??= this;
       o.ns.set(n, v);
       return;
     }
@@ -1905,6 +1907,70 @@ export class Interp {
       return;
     }
     throw diasporeErr("AttributeError", `'${typeName(o)}' object has no attribute '${n}'`);
+  }
+
+  *setAttrBase(o: DiasporeInstance, n: string, v: Value): G<void> {
+    const prop = o.cls.lookup(n);
+    if (prop instanceof Property) {
+      if (prop.fset === null) {
+        throw diasporeErr("AttributeError", `property '${n}' of '${o.cls.name}' object has no setter`);
+      }
+      yield* this.invoke(this.bindAttr(prop.fset, o, o.cls), [v], new Map());
+      return;
+    }
+    if (prop instanceof DiasporeInstance) {
+      if (prop.cls.lookup("__set__") !== undefined) {
+        yield* this.callDunder(prop, "__set__", [o, v]);
+        return;
+      }
+      if (prop.cls.lookup("__delete__") !== undefined) {
+        throw diasporeErr("AttributeError", "__set__");
+      }
+    }
+    o.d.set(n, v);
+  }
+
+  *delAttr(o: Value, n: string): G<void> {
+    if (o instanceof DiasporeInstance) {
+      const hook = o.cls.lookup("__delattr__");
+      if (hook !== undefined && hook !== OBJECT.ns.get("__delattr__")) {
+        yield* this.invoke(this.bindAttr(hook, o, o.cls), [n], new Map());
+      } else {
+        yield* this.delAttrBase(o, n);
+      }
+      return;
+    }
+    if (o instanceof DiasporeClass) {
+      if (o.ns.delete(n)) return;
+      throw diasporeErr("AttributeError", `type object '${o.name}' has no attribute '${n}'`);
+    }
+    if (o instanceof DiasporeFunction && o.attrs.delete(n)) return;
+    if (o instanceof DiasporeModule && o.frame.vars.delete(n)) return;
+    if (o instanceof NativeModule && o.ns.delete(n)) return;
+    throw diasporeErr("AttributeError", `'${typeName(o)}' object has no attribute '${n}'`);
+  }
+
+  *delAttrBase(o: DiasporeInstance, n: string): G<void> {
+    const prop = o.cls.lookup(n);
+    if (prop instanceof Property) {
+      if (prop.fdel === null) {
+        throw diasporeErr("AttributeError", `property '${n}' of '${o.cls.name}' object has no deleter`);
+      }
+      yield* this.invoke(this.bindAttr(prop.fdel, o, o.cls), [], new Map());
+      return;
+    }
+    if (prop instanceof DiasporeInstance) {
+      if (prop.cls.lookup("__delete__") !== undefined) {
+        yield* this.callDunder(prop, "__delete__", [o]);
+        return;
+      }
+      if (prop.cls.lookup("__set__") !== undefined) {
+        throw diasporeErr("AttributeError", "__delete__");
+      }
+    }
+    if (!o.d.delete(n)) {
+      throw diasporeErr("AttributeError", `'${o.cls.name}' object has no attribute '${n}'`);
+    }
   }
 
   // ------------------------------------------------------------- protocols
@@ -1934,7 +2000,7 @@ export class Interp {
   }
 
   *compare(kind: string, l: Value, r: Value): G<boolean> {
-    return yield* compare(this, kind, l, r);
+    return yield* this.truth(yield* compare(this, kind, l, r));
   }
 
   *eq(l: Value, r: Value): G<boolean> {
@@ -2035,9 +2101,9 @@ function BASE_EXC_GROUP(): DiasporeClass {
 
 /** Builtin types that may be subclassed by user classes. */
 export const PRIM_BASE_NAMES: Set<string> = new Set([
-  "dict", "list", "set", "str", "int", "float", "tuple", "bytes", "bool",
+  "dict", "list", "set", "frozenset", "str", "int", "float", "tuple", "bytes", "bool",
 ]);
-const IMMUTABLE_PRIM: Set<string> = new Set(["str", "bytes", "int", "float", "tuple", "bool"]);
+const IMMUTABLE_PRIM: Set<string> = new Set(["str", "bytes", "int", "float", "tuple", "bool", "frozenset"]);
 
 /** Empty primitive for a mutable/immutable builtin base. */
 function primEmpty(base: string): Value {
@@ -2048,6 +2114,8 @@ function primEmpty(base: string): Value {
       return new DiasporeList();
     case "set":
       return new DiasporeSet();
+    case "frozenset":
+      return new DiasporeFrozenSet();
     case "tuple":
       return new DiasporeTuple();
     case "str":

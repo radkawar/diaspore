@@ -11,6 +11,7 @@ import {
   DiasporeList,
   DiasporeTuple,
   DiasporeDict,
+  DiasporeDictView,
   DiasporeSet,
   DiasporeRange,
   DiasporeInstance,
@@ -54,6 +55,57 @@ export class SeqIter extends DiasporeIterBase {
   *next(): G<[Value, boolean]> {
     if (this.i >= this.items.length) return [NONE, false];
     return [this.items[this.i++], true];
+  }
+}
+
+/** Iterate a dictionary view while observing value updates and rejecting size changes. */
+export class DictViewIter extends DiasporeIterBase {
+  kindName: string;
+  view: DiasporeDictView;
+  size: number;
+  entries: Iterator<{ key: Value; val: Value }> | null;
+  slots: string[] | null;
+  offset = 0;
+  done = false;
+  invalid = false;
+  remaining: number;
+  constructor(view: DiasporeDictView, reverse = false) {
+    super();
+    this.view = view;
+    this.size = view.size;
+    this.remaining = view.size;
+    this.kindName = "dict_" + (reverse ? "reverse" : "") +
+      (view.kind === "keys" ? "key" : view.kind === "values" ? "value" : "item") + "iterator";
+    this.entries = reverse ? null : view.dict.map.values();
+    this.slots = reverse ? [...view.dict.map.keys()].reverse() : null;
+  }
+  *next(): G<[Value, boolean]> {
+    if (this.done) return [NONE, false];
+    if (this.invalid || this.view.size !== this.size) {
+      this.invalid = true;
+      throw diasporeErr("RuntimeError", "dictionary changed size during iteration");
+    }
+    let entry: { key: Value; val: Value } | undefined;
+    if (this.slots !== null) {
+      while (entry === undefined && this.offset < this.slots.length) {
+        entry = this.view.dict.map.get(this.slots[this.offset++]);
+      }
+    } else {
+      const next = (this.entries as Iterator<{ key: Value; val: Value }>).next();
+      if (!next.done) entry = next.value;
+    }
+    if (entry === undefined) {
+      this.done = true;
+      return [NONE, false];
+    }
+    if (this.remaining === 0) {
+      this.done = true;
+      throw diasporeErr("RuntimeError", "dictionary keys changed during iteration");
+    }
+    this.remaining--;
+    const value = this.view.kind === "keys" ? entry.key : this.view.kind === "values" ?
+      entry.val : new DiasporeTuple([entry.key, entry.val]);
+    return [value, true];
   }
 }
 
@@ -348,6 +400,7 @@ export function* getIter(I: Interp, v: Value): G<DiasporeIterBase> {
   if (typeof v === "string") return new StrIter(v);
   if (v instanceof Uint8Array) return new BytesIter(v);
   if (v instanceof DiasporeRange) return new RangeIter(v);
+  if (v instanceof DiasporeDictView) return new DictViewIter(v);
   if (v instanceof DiasporeDict) return new SeqIter(v.keys());
   if (v instanceof DiasporeSet) return new SeqIter(v.elems());
   if (v instanceof NativeObject) {

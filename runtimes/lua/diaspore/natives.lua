@@ -215,6 +215,118 @@ end
 -- ---------------------------------------------------------------------------
 -- random (algorithm is VM-specific; excluded from conformance)
 
+local function make_random_type(I)
+  local Random
+  Random = values.btype("Random", function(_I, args, kw)
+    arg_count("Random", args, 0, 1)
+    H.no_kw("Random", kw)
+    local state = {}
+    local rng = { kind = "nativeobject", nkind = "Random", pytype = Random, props = {} }
+    local function seed(value)
+      local n
+      if value == nil or is_none(value) then
+        n = I.deterministic and 0
+          or (os.time() ~ math.floor(os.clock() * 1000000) ~ values.obj_id(rng))
+      else
+        n = as_index(value)
+        if n == nil then
+          local t = type(value)
+          if t == "string" then value = values.bytes(value)
+          elseif t ~= "number" and not (t == "table" and value.kind == "bytes") then
+            throw("TypeError", "seed must be None, int, float, str, or bytes")
+          end
+          n = values.hash_value(value)
+        end
+      end
+      -- SplitMix64 initializes the four words of the independent xoshiro state.
+      for i = 1, 4 do
+        n = n + 0x9e3779b97f4a7c15
+        local z = (n ~ (n >> 30)) * 0xbf58476d1ce4e5b9
+        z = (z ~ (z >> 27)) * 0x94d049bb133111eb
+        state[i] = z ~ (z >> 31)
+      end
+    end
+    local function next_bits()
+      local x = state[2] * 5
+      local result = ((x << 7) | (x >> 57)) * 9
+      local t = state[2] << 17
+      state[3] = state[3] ~ state[1]
+      state[4] = state[4] ~ state[2]
+      state[2] = state[2] ~ state[3]
+      state[1] = state[1] ~ state[4]
+      state[3] = state[3] ~ t
+      state[4] = (state[4] << 45) | (state[4] >> 19)
+      return result
+    end
+    local function randint(a, b)
+      if b < a then throw("ValueError", "empty range for randint()") end
+      local size = b - a + 1
+      if size <= 0 then
+        while true do
+          I:fuel()
+          local n = next_bits()
+          if n >= a and n <= b then return n end
+        end
+      end
+      local mask = size - 1
+      mask = mask | (mask >> 1)
+      mask = mask | (mask >> 2)
+      mask = mask | (mask >> 4)
+      mask = mask | (mask >> 8)
+      mask = mask | (mask >> 16)
+      mask = mask | (mask >> 32)
+      while true do
+        I:fuel()
+        local n = next_bits() & mask
+        if n < size then return a + n end
+      end
+    end
+    rng.methods = {
+      seed = bi("seed", function(_I2, a, keywords)
+        arg_count("seed", a, 0, 1)
+        H.no_kw("seed", keywords)
+        seed(a[1])
+        return NONE
+      end),
+      random = bi("random", function(_I2, a, keywords)
+        arg_count("random", a, 0, 0)
+        H.no_kw("random", keywords)
+        return (next_bits() >> 11) * 0x1.0p-53
+      end),
+      randint = bi("randint", function(_I2, a, keywords)
+        arg_count("randint", a, 2, 2)
+        H.no_kw("randint", keywords)
+        local lower, upper = as_index(a[1]), as_index(a[2])
+        if lower == nil or upper == nil then throw("TypeError", "randint requires integers") end
+        return randint(lower, upper)
+      end),
+      choice = bi("choice", function(I2, a, keywords)
+        arg_count("choice", a, 1, 1)
+        H.no_kw("choice", keywords)
+        local items = iter.iter_to_array(I2, a[1])
+        if #items == 0 then throw("IndexError", "Cannot choose from an empty sequence") end
+        return items[randint(1, #items)]
+      end),
+      shuffle = bi("shuffle", function(_I2, a, keywords)
+        arg_count("shuffle", a, 1, 1)
+        H.no_kw("shuffle", keywords)
+        if type(a[1]) ~= "table" or a[1].kind ~= "list" then
+          throw("TypeError", "shuffle requires a list")
+        end
+        local items = a[1].items
+        for i = #items, 2, -1 do
+          local j = randint(1, i)
+          items[i], items[j] = items[j], items[i]
+        end
+        return NONE
+      end),
+    }
+    seed(args[1])
+    return rng
+  end)
+  return Random
+end
+
 local function make_random_module(I)
   if I.deterministic then
     math.randomseed(0)
@@ -222,6 +334,7 @@ local function make_random_module(I)
     math.randomseed(os.time())
   end
   return native_module("random", {
+    Random = make_random_type(I),
     seed = bi("seed", function(_I, args, kw)
       arg_count("seed", args, 1, 1)
       local n = as_index(args[1])
@@ -267,12 +380,90 @@ end
 -- ---------------------------------------------------------------------------
 -- sys
 
+local function sys_stream(I, name)
+  local methods = {}
+  if name == "stdin" then
+    local function read_size(method, args, kw)
+      arg_count(method, args, 0, 1)
+      H.no_kw(method, kw)
+      if #args == 0 or is_none(args[1]) then return -1 end
+      local size = as_index(args[1])
+      if size == nil then throw("TypeError", "argument should be integer or None") end
+      return size
+    end
+    methods.read = bi("read", function(_I, args, kw)
+      local size = read_size("read", args, kw)
+      if size == 0 then return "" end
+      local text, message = io.stdin:read(size < 0 and "a" or size)
+      if message ~= nil then throw("OSError", message) end
+      return text or ""
+    end)
+    methods.readline = bi("readline", function(_I, args, kw)
+      local size = read_size("readline", args, kw)
+      if size < 0 then
+        local text, message = io.stdin:read("L")
+        if message ~= nil then throw("OSError", message) end
+        return text or ""
+      end
+      local parts = {}
+      for _ = 1, size do
+        local ch, message = io.stdin:read(1)
+        if message ~= nil then throw("OSError", message) end
+        if ch == nil then break end
+        parts[#parts + 1] = ch
+        if ch == "\n" then break end
+      end
+      return table.concat(parts)
+    end)
+  else
+    methods.write = bi("write", function(_I, args, kw)
+      arg_count("write", args, 1, 1)
+      H.no_kw("write", kw)
+      local text = H.want_str("write() argument", args[1])
+      if name == "stdout" then I:write(text) else I:ewrite(text) end
+      return values.str_len(text)
+    end)
+  end
+  methods.flush = bi("flush", function(_I, args, kw)
+    arg_count("flush", args, 0, 0)
+    H.no_kw("flush", kw)
+    if name == "stdout" then I:flush()
+    elseif name == "stderr" and not I.stderr then io.stderr:flush() end
+    return NONE
+  end)
+  return { kind = "nativeobject", nkind = "TextIOWrapper", methods = methods,
+    props = { name = "<" .. name .. ">", mode = name == "stdin" and "r" or "w",
+      encoding = "utf-8", closed = false } }
+end
+
 local function make_sys_module(I)
   local argv = {}
   for i = 1, #I.argv do argv[i] = I.argv[i] end
   return native_module("sys", {
     argv = values.list(argv),
     platform = "diaspore-lua",
+    stdin = sys_stream(I, "stdin"),
+    stdout = sys_stream(I, "stdout"),
+    stderr = sys_stream(I, "stderr"),
+    getrecursionlimit = bi("getrecursionlimit", function(_I, args, kw)
+      arg_count("getrecursionlimit", args, 0, 0)
+      H.no_kw("getrecursionlimit", kw)
+      return I.recursion_limit
+    end),
+    setrecursionlimit = bi("setrecursionlimit", function(_I, args, kw)
+      arg_count("setrecursionlimit", args, 1, 1)
+      H.no_kw("setrecursionlimit", kw)
+      local limit = as_index(args[1])
+      if limit == nil then throw("TypeError", "an integer is required") end
+      if limit < 1 then throw("ValueError", "recursion limit must be greater or equal than 1") end
+      limit = math.min(limit, I.max_depth)
+      if limit <= I.depth then
+        throw("RecursionError", "cannot set the recursion limit to " .. limit
+          .. " at the recursion depth " .. I.depth .. ": the limit is too low")
+      end
+      I.recursion_limit = limit
+      return NONE
+    end),
     exit = bi("exit", function(_I, args, kw)
       arg_count("exit", args, 0, 1)
       local code = #args == 1 and args[1] or 0
@@ -300,6 +491,55 @@ local function make_flow_module()
 end
 
 -- ---------------------------------------------------------------------------
+-- private filesystem queries used by the bundled os and pathlib modules
+
+local function os_path(I, name, args, kw)
+  arg_count(name, args, 1, 1)
+  H.no_kw(name, kw)
+  local path = H.want_str("path", args[1])
+  if path:find("\0", 1, true) then throw("ValueError", "embedded null byte") end
+  return I:require_fs("read", path)
+end
+
+local function make_os_module()
+  return native_module("_os", {
+    getcwd = bi("getcwd", function(I, args, kw)
+      arg_count("getcwd", args, 0, 0)
+      H.no_kw("getcwd", kw)
+      I:require_cap("fs")
+      local cwd = os.getenv("PWD")
+      if cwd == nil then
+        throw("RuntimeError", "diaspore-lua cannot determine working directory without PWD")
+      end
+      return cwd
+    end),
+    kind = bi("kind", function(I, args, kw)
+      local path = os_path(I, "kind", args, kw)
+      local f, message, errno = io.open(path, "rb")
+      if f ~= nil then
+        local _
+        _, message, errno = f:read(0)
+        f:close()
+        if errno == 21 then return "dir" end
+        if message == nil then return "file" end
+      elseif errno == 2 or errno == 20 then
+        return NONE
+      elseif errno == 21 then
+        return "dir"
+      end
+      throw(errno == 13 and "PermissionError" or "OSError", tostring(message))
+    end),
+    listdir = bi("listdir", function(I, args, kw)
+      os_path(I, "listdir", args, kw)
+      throw("NotImplementedError", "diaspore-lua cannot list directories")
+    end),
+    realpath = bi("realpath", function(I, args, kw)
+      return os_path(I, "realpath", args, kw)
+    end),
+  })
+end
+
+-- ---------------------------------------------------------------------------
 -- open() and file methods (capability "fs")
 
 --- Open a file after checking filesystem capabilities.
@@ -312,6 +552,19 @@ function M.bi_open(I, args, kw)
   if kv ~= nil then mode = H.want_str("mode", kv) end
   if mode ~= "r" and mode ~= "w" and mode ~= "a" and mode ~= "rb" and mode ~= "wb" then
     throw("ValueError", "invalid mode: '" .. mode .. "'")
+  end
+  local encoding = H.kw_get(kw, "encoding")
+  if encoding ~= nil and not is_none(encoding) then
+    if mode == "rb" or mode == "wb" then
+      throw("ValueError", "binary mode doesn't take an encoding argument")
+    end
+    if type(encoding) ~= "string" then
+      throw("TypeError", "open() argument 'encoding' must be str or None, not " .. type_name(encoding))
+    end
+    local normalized = encoding:lower():gsub("_", "-")
+    if normalized ~= "utf8" and normalized ~= "utf-8" then
+      throw("NotImplementedError", "only UTF-8 text is supported")
+    end
   end
   local kind = (mode == "r" or mode == "rb") and "read" or "write"
   local real = I:require_fs(kind, path)
@@ -402,6 +655,7 @@ function M.make_native_modules(I)
     json = make_json_module(),
     random = make_random_module(I),
     sys = make_sys_module(I),
+    _os = make_os_module(),
     net = stub_module("net", { "listen", "connect", "accept", "recv", "send", "close", "peer" }),
     re = stub_module("re", { "search", "match", "fullmatch", "findall", "split", "sub", "escape" }),
     tasks = stub_module("tasks", { "spawn", "channel", "lock" }),

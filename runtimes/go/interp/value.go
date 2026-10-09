@@ -45,6 +45,12 @@ type EllipsisType struct{}
 // Ellipsis is the Diaspore `...` value.
 var Ellipsis = EllipsisType{}
 
+// NotImplementedType is the type of the NotImplemented singleton.
+type NotImplementedType struct{}
+
+// NotImplemented asks binary operators to try the other operand.
+var NotImplemented = NotImplementedType{}
+
 // List is a Diaspore list.
 type List struct {
 	// Items holds the elements in index order.
@@ -106,6 +112,7 @@ type Dict struct {
 	entries  []dictEntry
 	strIndex map[string]int // string keys (raw)
 	index    map[string]int // all other keys (hashKey-encoded)
+	slowKeys int
 }
 
 // NewDict returns an empty dict.
@@ -124,6 +131,17 @@ func (d *Dict) GetStr(k string) (Value, bool) {
 
 // Get looks up key k; the error is a TypeError for unhashable keys.
 func (d *Dict) Get(k Value) (Value, bool, error) {
+	if d.slowKeys != 0 {
+		hk, err := hashKey(k)
+		if err != nil {
+			return nil, false, err
+		}
+		i, ok, err := findHashed(d.entries, k, hk)
+		if err != nil || !ok {
+			return nil, false, err
+		}
+		return d.entries[i].val, true, nil
+	}
 	if s, ok := k.(string); ok {
 		v, ok := d.GetStr(s)
 		return v, ok, nil
@@ -131,6 +149,13 @@ func (d *Dict) Get(k Value) (Value, bool, error) {
 	hk, err := hashKey(k)
 	if err != nil {
 		return nil, false, err
+	}
+	if len(hk) != 0 && hk[0] == 'h' {
+		i, ok, err := findHashed(d.entries, k, hk)
+		if err != nil || !ok {
+			return nil, false, err
+		}
+		return d.entries[i].val, true, nil
 	}
 	if i, ok := d.index[hk]; ok {
 		return d.entries[i].val, true, nil
@@ -153,13 +178,37 @@ func (d *Dict) SetStr(k string, v Value) {
 
 // Set inserts or updates key k.
 func (d *Dict) Set(k, v Value) error {
-	if s, ok := k.(string); ok {
+	if s, ok := k.(string); ok && d.slowKeys == 0 {
 		d.SetStr(s, v)
 		return nil
 	}
 	hk, err := hashKey(k)
 	if err != nil {
 		return err
+	}
+	slow := len(hk) != 0 && hk[0] == 'h'
+	if d.slowKeys != 0 || slow {
+		i, found, err := findHashed(d.entries, k, hk)
+		if err != nil {
+			return err
+		}
+		if found {
+			d.entries[i].val = v
+			return nil
+		}
+		if s, ok := k.(string); ok {
+			d.SetStr(s, v)
+			return nil
+		}
+		if d.index == nil {
+			d.index = map[string]int{}
+		}
+		d.index[hk] = len(d.entries)
+		d.entries = append(d.entries, dictEntry{hk: hk, key: k, val: v})
+		if slow {
+			d.slowKeys++
+		}
+		return nil
 	}
 	if i, ok := d.index[hk]; ok {
 		d.entries[i].val = v
@@ -175,36 +224,51 @@ func (d *Dict) Set(k, v Value) error {
 
 // lookupEntry finds the position of another dict's entry key (used by
 // equality, which walks entries).
-func (d *Dict) lookupEntry(e *dictEntry) (int, bool) {
+func (d *Dict) lookupEntry(e *dictEntry) (int, bool, error) {
+	hk := e.hk
 	if e.str {
-		i, ok := d.strIndex[e.hk]
-		return i, ok
+		if d.slowKeys == 0 {
+			i, ok := d.strIndex[hk]
+			return i, ok, nil
+		}
+		hk = "s" + hk
 	}
-	i, ok := d.index[e.hk]
-	return i, ok
+	if d.slowKeys != 0 || (len(hk) != 0 && hk[0] == 'h') {
+		return findHashed(d.entries, e.key, hk)
+	}
+	i, ok := d.index[hk]
+	return i, ok, nil
 }
 
 // Delete removes key k, reporting whether it was present.
 func (d *Dict) Delete(k Value) (Value, bool, error) {
+	hk, err := hashKey(k)
+	if err != nil {
+		return nil, false, err
+	}
 	var i int
 	var ok bool
-	if s, isStr := k.(string); isStr {
-		i, ok = d.strIndex[s]
-		if ok {
-			delete(d.strIndex, s)
-		}
-	} else {
-		hk, err := hashKey(k)
+	if d.slowKeys != 0 || (len(hk) != 0 && hk[0] == 'h') {
+		i, ok, err = findHashed(d.entries, k, hk)
 		if err != nil {
 			return nil, false, err
 		}
+	} else if s, isStr := k.(string); isStr {
+		i, ok = d.strIndex[s]
+	} else {
 		i, ok = d.index[hk]
-		if ok {
-			delete(d.index, hk)
-		}
 	}
 	if !ok {
 		return nil, false, nil
+	}
+	entry := d.entries[i]
+	if entry.str {
+		delete(d.strIndex, entry.hk)
+	} else {
+		delete(d.index, entry.hk)
+		if len(entry.hk) != 0 && entry.hk[0] == 'h' {
+			d.slowKeys--
+		}
 	}
 	v := d.entries[i].val
 	d.entries = append(d.entries[:i], d.entries[i+1:]...)
@@ -238,7 +302,7 @@ func (d *Dict) Values() []Value {
 
 // Copy returns a shallow copy.
 func (d *Dict) Copy() *Dict {
-	nd := &Dict{entries: append([]dictEntry{}, d.entries...)}
+	nd := &Dict{entries: append([]dictEntry{}, d.entries...), slowKeys: d.slowKeys}
 	if d.strIndex != nil {
 		nd.strIndex = make(map[string]int, len(d.strIndex))
 		for k, v := range d.strIndex {
@@ -259,12 +323,14 @@ func (d *Dict) Clear() {
 	d.entries = nil
 	d.strIndex = nil
 	d.index = nil
+	d.slowKeys = 0
 }
 
 // Set is a Diaspore set: insertion-ordered with Python element hashing.
 type Set struct {
-	entries []dictEntry // val unused
-	index   map[string]int
+	entries  []dictEntry // val unused
+	index    map[string]int
+	slowKeys int
 }
 
 // NewSet returns an empty set.
@@ -275,9 +341,16 @@ func (s *Set) Len() int { return len(s.entries) }
 
 // Has reports membership; the error is a TypeError for unhashable values.
 func (s *Set) Has(k Value) (bool, error) {
+	if mutable, ok := k.(*Set); ok {
+		k = &FrozenSet{set: mutable}
+	}
 	hk, err := hashKey(k)
 	if err != nil {
 		return false, err
+	}
+	if s.slowKeys != 0 || (len(hk) != 0 && hk[0] == 'h') {
+		_, ok, err := findHashed(s.entries, k, hk)
+		return ok, err
 	}
 	_, ok := s.index[hk]
 	return ok, nil
@@ -289,22 +362,31 @@ func (s *Set) Add(k Value) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := s.index[hk]; !ok {
-		s.index[hk] = len(s.entries)
-		s.entries = append(s.entries, dictEntry{hk: hk, key: k})
-	}
-	return nil
+	return s.addHK(hk, k)
 }
 
 // Discard removes k, reporting whether it was present.
 func (s *Set) Discard(k Value) (bool, error) {
+	if mutable, ok := k.(*Set); ok {
+		k = &FrozenSet{set: mutable}
+	}
 	hk, err := hashKey(k)
 	if err != nil {
 		return false, err
 	}
 	i, ok := s.index[hk]
+	if s.slowKeys != 0 || (len(hk) != 0 && hk[0] == 'h') {
+		i, ok, err = findHashed(s.entries, k, hk)
+		if err != nil {
+			return false, err
+		}
+	}
 	if !ok {
 		return false, nil
+	}
+	hk = s.entries[i].hk
+	if len(hk) != 0 && hk[0] == 'h' {
+		s.slowKeys--
 	}
 	s.entries = append(s.entries[:i], s.entries[i+1:]...)
 	delete(s.index, hk)
@@ -326,6 +408,7 @@ func (s *Set) Elems() []Value {
 // Copy returns a shallow copy.
 func (s *Set) Copy() *Set {
 	ns := NewSet()
+	ns.slowKeys = s.slowKeys
 	ns.entries = append(ns.entries, s.entries...)
 	for k, v := range s.index {
 		ns.index[k] = v
@@ -337,6 +420,7 @@ func (s *Set) Copy() *Set {
 func (s *Set) Clear() {
 	s.entries = nil
 	s.index = map[string]int{}
+	s.slowKeys = 0
 }
 
 // Class is a user-defined class.
@@ -350,7 +434,33 @@ type Class struct {
 	// MRO holds the method resolution order, including this class.
 	MRO []*Class
 	// Prim is the builtin base for primitive subclasses, or nil.
-	Prim *BuiltinType
+	Prim            *BuiltinType
+	attrHooksCached bool
+	setattrHook     Value
+	delattrHook     Value
+	subclasses      []*Class
+	dictOrder       []string
+	vm              *VM
+	directPrim      *BuiltinType
+	primIndex       int
+}
+
+func baseValues(bases []*Class, prim *BuiltinType, primIndex int) []Value {
+	count := len(bases)
+	if prim != nil {
+		count++
+	}
+	values := make([]Value, count)
+	j := 0
+	for i := range values {
+		if prim != nil && i == primIndex {
+			values[i] = prim
+		} else {
+			values[i] = bases[j]
+			j++
+		}
+	}
+	return values
 }
 
 // Lookup finds name along the MRO.
@@ -361,6 +471,52 @@ func (c *Class) Lookup(name string) (Value, bool) {
 		}
 	}
 	return nil, false
+}
+
+func (c *Class) attributeHooks() {
+	if c.attrHooksCached {
+		return
+	}
+	c.setattrHook, _ = c.Lookup("__setattr__")
+	c.delattrHook, _ = c.Lookup("__delattr__")
+	if c.setattrHook == objectSetattr {
+		c.setattrHook = nil
+	}
+	if c.delattrHook == objectDelattr {
+		c.delattrHook = nil
+	}
+	c.attrHooksCached = true
+}
+
+func (c *Class) invalidateAttributeHooks() {
+	c.attrHooksCached = false
+	for _, sub := range c.subclasses {
+		sub.invalidateAttributeHooks()
+	}
+}
+
+type classDict struct {
+	cls *Class
+}
+
+func (d *classDict) snapshot() *Dict {
+	out := NewDict()
+	for _, k := range d.cls.dictOrder {
+		if v, ok := d.cls.NS[k]; ok {
+			out.SetStr(k, v)
+		}
+	}
+	var extra []string
+	for k := range d.cls.NS {
+		if _, ok, _ := out.Get(k); !ok {
+			extra = append(extra, k)
+		}
+	}
+	sort.Strings(extra)
+	for _, k := range extra {
+		out.SetStr(k, d.cls.NS[k])
+	}
+	return out
 }
 
 // IsSub reports whether c is other or a subclass of other.
@@ -518,7 +674,7 @@ type Property struct {
 
 func subclassablePrim(name string) bool {
 	switch name {
-	case "int", "float", "str", "bytes", "tuple", "list", "dict", "set", "bool":
+	case "int", "float", "str", "bytes", "tuple", "list", "dict", "set", "frozenset", "bool":
 		return true
 	}
 	return false
@@ -537,8 +693,8 @@ func FromGo(v any) (Value, error) {
 	switch t := v.(type) {
 	case nil:
 		return None, nil
-	case NoneType, EllipsisType, bool, int64, float64, string,
-		*List, *Tuple, *Dict, *Set, *Range, *Instance, *Class, *big.Int:
+	case NoneType, EllipsisType, NotImplementedType, bool, int64, float64, string,
+		*List, *Tuple, *Dict, *DictView, *Set, *FrozenSet, *Range, *Instance, *Class, *big.Int:
 		return t, nil
 	case int:
 		return int64(t), nil
@@ -602,6 +758,10 @@ func typeName(v Value) string {
 		return "NoneType"
 	case EllipsisType:
 		return "ellipsis"
+	case NotImplementedType:
+		return "NotImplementedType"
+	case *classDict:
+		return "mappingproxy"
 	case bool:
 		return "bool"
 	case int64:
@@ -618,8 +778,12 @@ func typeName(v Value) string {
 		return "tuple"
 	case *Dict:
 		return "dict"
+	case *DictView:
+		return "dict_" + t.kind
 	case *Set:
 		return "set"
+	case *FrozenSet:
+		return "frozenset"
 	case *Range:
 		return "range"
 	case *Slice:
@@ -662,8 +826,8 @@ func typeName(v Value) string {
 	return fmt.Sprintf("%T", v)
 }
 
-// hashKey produces a unique, comparable encoding of a hashable value, with
-// Python's numeric key unification (1, 1.0 and True hash alike). Unhashable
+// hashKey encodes primitive keys without collisions, and stores Python hashes
+// for keys requiring equality dispatch. Numeric keys 1, 1.0 and True unify. Unhashable
 // values yield a TypeError.
 func hashKey(v Value) (string, error) {
 	switch t := v.(type) {
@@ -671,6 +835,8 @@ func hashKey(v Value) (string, error) {
 		return "N", nil
 	case EllipsisType:
 		return "E", nil
+	case NotImplementedType:
+		return "NI", nil
 	case bool:
 		if t {
 			return "i1", nil
@@ -703,27 +869,24 @@ func hashKey(v Value) (string, error) {
 		return "s" + t, nil
 	case []byte:
 		return "b" + string(t), nil
+	case *FrozenSet:
+		return "h" + strconv.FormatInt(frozenHash(t), 10), nil
 	case *Tuple:
-		out := "t"
-		for _, x := range t.Items {
-			k, err := hashKey(x)
-			if err != nil {
-				return "", newError("TypeError", "unhashable type: '"+typeName(v)+"'")
-			}
-			out += strconv.Itoa(len(k)) + ":" + k
-		}
-		return out, nil
+		h, err := compoundHash(t.Items)
+		return "h" + strconv.FormatInt(h, 10), err
 	case *Range:
 		return fmt.Sprintf("r%d,%d,%d", t.Start, t.Stop, t.Step), nil
 	case *Slice:
-		lo, e1 := hashKey(t.Lower)
-		up, e2 := hashKey(t.Upper)
-		st, e3 := hashKey(t.Step)
-		if e1 != nil || e2 != nil || e3 != nil {
-			return "", newError("TypeError", "unhashable type: 'slice'")
+		h, err := compoundHash([]Value{t.Lower, t.Upper, t.Step})
+		return "h" + strconv.FormatInt(h, 10), err
+	case *DictView:
+		if t.kind == "values" {
+			return fmt.Sprintf("p%p", t), nil
 		}
-		return "S" + lo + "|" + up + "|" + st, nil
-	case *Instance, *Class, *BuiltinType, *Function, *BoundMethod, *Builtin,
+	case *Instance:
+		h, err := instanceHash(t)
+		return "h" + strconv.FormatInt(h, 10), err
+	case *Class, *BuiltinType, *Function, *BoundMethod, *Builtin,
 		*Module, *NativeModule, *Generator, *StaticMethod, *ClassMethod:
 		return fmt.Sprintf("p%p", v), nil
 	}

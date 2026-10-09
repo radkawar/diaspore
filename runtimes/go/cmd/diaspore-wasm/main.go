@@ -126,7 +126,7 @@ func compileSource(path, source string, files map[string]string) (dspc.Result, e
 	overlay[path] = source
 	var stdout, stderr bytes.Buffer
 	vm := interp.New(compiler,
-		interp.WithArgs([]string{"dspc", "--path", "/site-packages", "--path", "/stdlib", "--debug", path}),
+		interp.WithArgs([]string{"dspc", "--path", "/site-packages", "--stdlib", "/stdlib", "--debug", path}),
 		interp.WithCaps("fs"),
 		interp.WithPolicy(map[string]map[string][]string{"fs": {"read": {"/src", "/site-packages", "/stdlib"}}}),
 		interp.WithFSOverlay(overlay),

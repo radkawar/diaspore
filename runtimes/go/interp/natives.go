@@ -168,6 +168,22 @@ func biOpen(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	default:
 		return nil, newErrorf("ValueError", "invalid mode: '%s'", mode)
 	}
+	if encoding, ok := kwGet(kw, "encoding"); ok {
+		if _, none := encoding.(NoneType); !none {
+			if strings.Contains(mode, "b") {
+				return nil, newError("ValueError", "binary mode doesn't take an encoding argument")
+			}
+			name, err := wantStr("encoding", encoding)
+			if err != nil {
+				return nil, err
+			}
+			switch strings.ToLower(name) {
+			case "utf8", "utf-8", "utf_8":
+			default:
+				return nil, newError("NotImplementedError", "only UTF-8 text is supported")
+			}
+		}
+	}
 	if vm.fsOverlay != nil {
 		// The overlay replaces the filesystem entirely (wasm hosts have
 		// none); policy matching is lexical - no OS resolution.
@@ -214,6 +230,7 @@ func (vm *VM) makeNativeModules() map[string]*NativeModule {
 		"re":     vm.makeReModule(),
 		"tasks":  vm.makeTasksModule(),
 		"flow":   vm.makeFlowModule(),
+		"_os":    vm.makeOSModule(),
 	}
 }
 
@@ -451,7 +468,7 @@ func (vm *VM) makeJSONModule() *NativeModule {
 	}}
 }
 
-func (vm *VM) makeRandomModule() *NativeModule {
+func (vm *VM) randomMethods(effectName string) map[string]*Builtin {
 	var rng *rand.Rand
 	if vm.determin {
 		rng = rand.New(rand.NewSource(0))
@@ -459,17 +476,32 @@ func (vm *VM) makeRandomModule() *NativeModule {
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
 	seedFn := bi("seed", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := argCount("seed", args, 1, 1); err != nil {
+		if err := argCount("seed", args, 0, 1); err != nil {
 			return nil, err
 		}
-		n, ok := asInt(args[0])
-		if !ok {
-			return nil, newError("TypeError", "seed must be an integer in diaspore")
+		if err := noKw("seed", kw); err != nil {
+			return nil, err
+		}
+		n := int64(0)
+		if !vm.determin {
+			n = time.Now().UnixNano()
+		}
+		if len(args) != 0 {
+			if _, none := args[0].(NoneType); !none {
+				var ok bool
+				n, ok = asInt(args[0])
+				if !ok {
+					return nil, newError("TypeError", "seed must be an integer in diaspore")
+				}
+			}
 		}
 		rng = rand.New(rand.NewSource(n))
 		return None, nil
 	})
 	randomFn := bi("random", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		if err := argCount("random", args, 0, 0); err != nil {
+			return nil, err
+		}
 		return rng.Float64(), nil
 	})
 	randintFn := bi("randint", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -484,20 +516,33 @@ func (vm *VM) makeRandomModule() *NativeModule {
 		if b < a {
 			return nil, newError("ValueError", "empty range for randint()")
 		}
-		return a + rng.Int63n(b-a+1), nil
+		width := uint64(b) - uint64(a) + 1
+		if width != 0 && width <= math.MaxInt64 {
+			return a + rng.Int63n(int64(width)), nil
+		}
+		if width == 0 {
+			return int64(uint64(a) + rng.Uint64()), nil
+		}
+		threshold := -width % width
+		for {
+			value := rng.Uint64()
+			if value >= threshold {
+				return int64(uint64(a) + value%width), nil
+			}
+		}
 	})
 	choiceFn := bi("choice", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		if err := argCount("choice", args, 1, 1); err != nil {
 			return nil, err
 		}
-		items, err := vm.iterToSlice(args[0])
+		length, err := vm.diasporeLen(args[0])
 		if err != nil {
 			return nil, err
 		}
-		if len(items) == 0 {
+		if length == 0 {
 			return nil, newError("IndexError", "Cannot choose from an empty sequence")
 		}
-		return items[rng.Intn(len(items))], nil
+		return vm.getIndex(args[0], int64(rng.Intn(int(length))))
 	})
 	// shuffle journals the resulting order so replay reproduces the mutation.
 	shuffleFn := bi("shuffle", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -508,17 +553,19 @@ func (vm *VM) makeRandomModule() *NativeModule {
 		if !ok {
 			return nil, newError("TypeError", "shuffle requires a list")
 		}
-		doShuffle := func() (Value, error) {
+		shuffle := func() {
 			rng.Shuffle(len(l.Items), func(i, j int) {
 				l.Items[i], l.Items[j] = l.Items[j], l.Items[i]
 			})
-			return &List{Items: append([]Value{}, l.Items...)}, nil
 		}
 		if !vm.durable {
-			_, err := doShuffle()
-			return None, err
+			shuffle()
+			return None, nil
 		}
-		order, err := vm.effect("random", "shuffle", doShuffle)
+		order, err := vm.effect(effectName, "shuffle", func() (Value, error) {
+			shuffle()
+			return &List{Items: append([]Value{}, l.Items...)}, nil
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -529,13 +576,38 @@ func (vm *VM) makeRandomModule() *NativeModule {
 		l.Items = append(l.Items[:0], ol.Items...)
 		return None, nil
 	})
-	return &NativeModule{Name: "random", NS: map[string]Value{
-		"seed":    vm.journaled("random", "seed", seedFn),
-		"random":  vm.journaled("random", "random", randomFn),
-		"randint": vm.journaled("random", "randint", randintFn),
-		"choice":  vm.journaled("random", "choice", choiceFn),
+	return map[string]*Builtin{
+		"seed":    vm.journaled(effectName, "seed", seedFn),
+		"random":  vm.journaled(effectName, "random", randomFn),
+		"randint": vm.journaled(effectName, "randint", randintFn),
+		"choice":  vm.journaled(effectName, "choice", choiceFn),
 		"shuffle": shuffleFn,
+	}
+}
+
+func (vm *VM) makeRandomModule() *NativeModule {
+	ns := map[string]Value{}
+	for name, method := range vm.randomMethods("random") {
+		ns[name] = method
+	}
+	randomType := &BuiltinType{Name: "Random", ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		if err := argCount("Random", args, 0, 1); err != nil {
+			return nil, err
+		}
+		if err := noKw("Random", kw); err != nil {
+			return nil, err
+		}
+		methods := vm.randomMethods("random.Random")
+		if len(args) != 0 {
+			if _, err := methods["seed"].Fn(vm, args, nil); err != nil {
+				return nil, err
+			}
+		}
+		return &NativeObject{Kind: "Random", methods: methods}, nil
 	}}
+	ns["Random"] = randomType
+	vm.types["Random"] = randomType
+	return &NativeModule{Name: "random", NS: ns}
 }
 
 func (vm *VM) makeSysModule() *NativeModule {
@@ -544,8 +616,13 @@ func (vm *VM) makeSysModule() *NativeModule {
 		argv[i] = a
 	}
 	return &NativeModule{Name: "sys", NS: map[string]Value{
-		"argv":     &List{Items: argv},
-		"platform": "diaspore-go",
+		"argv":              &List{Items: argv},
+		"platform":          "diaspore-go",
+		"stdout":            vm.makeTextStream("stdout"),
+		"stderr":            vm.makeTextStream("stderr"),
+		"stdin":             vm.makeTextStream("stdin"),
+		"getrecursionlimit": bi("getrecursionlimit", biGetRecursionLimit),
+		"setrecursionlimit": bi("setrecursionlimit", biSetRecursionLimit),
 		"exit": bi("exit", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			return biExit(vm, args, kw)
 		}),

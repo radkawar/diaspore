@@ -132,6 +132,7 @@ function M.new(bundle, opts)
   I.deterministic = opts.deterministic or false
   I.max_steps = opts.max_steps or 0
   I.max_depth = opts.max_depth or 1000
+  I.recursion_limit = I.max_depth
   I.stdout = opts.stdout
   I.stderr = opts.stderr
   I.steps = 0
@@ -267,6 +268,7 @@ function Interp:import_module(name)
     end
     local fr = new_frame({}, nil, nil, EMPTY, EMPTY, false, nil, "<module>", name)
     fr.vars.__name__ = (name == self.main) and "__main__" or name
+    fr.vars.__file__ = get(m, "file") or name
     local mod = { kind = "module", name = name, frame = fr }
     self.modules[name] = mod
     local st = self.stack
@@ -520,10 +522,10 @@ STMTS["func"] = function(I, s, fr)
 end
 
 -- A base is a diaspore class or a subclassable builtin type (dict/list/set/str/
--- int/float/tuple/bytes/bool).
+-- int/float/tuple/bytes/bool/frozenset).
 local PRIM_BASES = {
   dict = true, list = true, set = true, str = true, int = true,
-  float = true, tuple = true, bytes = true, bool = true,
+  float = true, tuple = true, bytes = true, bool = true, frozenset = true,
 }
 
 local function check_base(I, bv)
@@ -586,6 +588,9 @@ function Interp:build_class(name, bases, ns_map, ns_order, metaclass, kwargs)
   kwargs = kwargs or {}
   local function make(cls_name, cls_bases, cls_ns)
     local made = values.new_class(cls_name, cls_bases, cls_ns)
+    made.interp = self
+    made.ns_order = {}
+    for i = 1, #ns_order do made.ns_order[i] = ns_order[i] end
     for _, v in pairs(made.ns) do
       local vk = kindof(v)
       if vk == "function" and v.defclass == nil then
@@ -898,14 +903,7 @@ STMTS["del"] = function(I, s, fr)
       local key = I:ev_key(t.k, fr)
       ops.del_index(I, o, key)
     elseif op == "attr" then
-      -- matches diaspore-py: instance-dict deletion only (no property deleter)
-      local o = I:ev(t.o, fr)
-      if kindof(o) == "instance" and o.d[t.n] ~= nil then
-        o.d[t.n] = nil
-      else
-        throw("AttributeError", "'" .. type_name(o)
-          .. "' object has no attribute '" .. t.n .. "'")
-      end
+      I:del_attr(I:ev(t.o, fr), t.n)
     else
       throw("TypeError", "cannot delete this target")
     end
@@ -1015,12 +1013,14 @@ EXPRS["compare"] = function(I, e, fr)
   local left = I:ev(e.left, fr)
   local kinds = e.ops
   local comps = e.comps
+  local result = true
   for i = 1, #kinds do
     local right = I:ev(comps[i], fr)
-    if not ops.compare(I, kinds[i], left, right) then return false end
+    result = ops.compare(I, kinds[i], left, right)
+    if i < #kinds and not I:truth(result) then return result end
     left = right
   end
-  return true
+  return result
 end
 
 EXPRS["cond"] = function(I, e, fr)
@@ -1071,7 +1071,8 @@ EXPRS["dict"] = function(I, e, fr)
       end
       local es = values.dict_entries(v)
       for j = 1, #es do
-        values.dict_set_hk(out, values.hash_key(es[j].k), es[j].k, es[j].v)
+        local item = es[j]
+        values.dict_set_hk(out, item.hk or values.hash_key(item.k), item.k, item.v)
       end
     else
       local k = I:ev(entry.k, fr)
@@ -1387,7 +1388,7 @@ function Interp:call_function(fn, args, kwargs)
     fr.is_gen = true
     return iter.new_generator(self, fn, fr)
   end
-  if self.depth >= self.max_depth then
+  if self.depth >= self.recursion_limit then
     throw("RecursionError", "maximum recursion depth exceeded")
   end
   local st = self.stack
@@ -1408,6 +1409,7 @@ local function prim_empty(name)
   if name == "dict" then return values.new_dict() end
   if name == "list" then return values.list({}) end
   if name == "set" then return values.new_set() end
+  if name == "frozenset" then return values.new_set(true) end
   if name == "str" then return "" end
   if name == "bytes" then return values.bytes("") end
   if name == "tuple" then return values.tuple({}) end
@@ -1417,6 +1419,7 @@ end
 
 local IMMUTABLE_PRIM = {
   str = true, bytes = true, int = true, float = true, tuple = true, bool = true,
+  frozenset = true,
 }
 
 function Interp:instantiate(cls, args, kwargs)
@@ -1526,6 +1529,9 @@ function Interp:bind_attr(v, inst, cls)
   if k == "staticmethod" then return v.fn end
   if k == "classmethod" then return { kind = "boundmethod", fn = v.fn, recv = cls } end
   if k == "builtin" then return { kind = "boundmethod", fn = v, recv = inst } end
+  if k == "instance" and class_lookup(v.cls, "__get__") ~= nil then
+    return self:call_dunder(v, "__get__", { inst, cls })
+  end
   return v
 end
 
@@ -1533,14 +1539,21 @@ function Interp:get_attr(o, n)
   local k = kindof(o)
   if k == "instance" then
     if n == "__class__" then return o.cls end
-    local dv = o.d[n]
-    if dv ~= nil then return dv end
+    local cv = class_lookup(o.cls, n)
+    if kindof(cv) == "instance" and class_lookup(cv.cls, "__get__") ~= nil
+        and (class_lookup(cv.cls, "__set__") ~= nil
+          or class_lookup(cv.cls, "__delete__") ~= nil) then
+      return self:call_dunder(cv, "__get__", { o, o.cls })
+    end
+    if kindof(cv) ~= "property" then
+      local dv = o.d[n]
+      if dv ~= nil then return dv end
+    end
     if (n == "exceptions" or n == "message")
         and values.issub(o.cls, values.EXC_CLASSES.BaseExceptionGroup) then
       local gv = o.d[n]
       if gv ~= nil then return gv end
     end
-    local cv = class_lookup(o.cls, n)
     if kindof(cv) == "property" then
       if cv.fget == nil then
         throw("AttributeError", "property '" .. n .. "' of '"
@@ -1568,6 +1581,16 @@ function Interp:get_attr(o, n)
     throw("AttributeError", "type object '" .. o.name .. "' has no attribute '" .. n .. "'")
   end
   if k == "class" then
+    if n == "__bases__" then
+      local bases = o.declared_bases
+      if #bases == 0 and o ~= values.OBJECT then
+        return values.tuple({ values.OBJECT })
+      end
+      local b = {}
+      for i = 1, #bases do b[i] = bases[i] end
+      return values.tuple(b)
+    end
+    if n == "__dict__" then return { kind = "mappingproxy", cls = o } end
     local v = class_lookup(o, n)
     if v == nil then
       if n == "__name__" or n == "__qualname__" then return o.name end
@@ -1576,22 +1599,14 @@ function Interp:get_attr(o, n)
         for i = 1, #o.mro do m[i] = o.mro[i] end
         return values.tuple(m)
       end
-      if n == "__bases__" then
-        if #o.bases == 0 then return values.tuple({ values.OBJECT }) end
-        local b = {}
-        for i = 1, #o.bases do b[i] = o.bases[i] end
-        return values.tuple(b)
-      end
-      if n == "__dict__" then
-        local d = values.new_dict()
-        for key, val in pairs(o.ns) do values.dict_set(d, key, val) end
-        return d
-      end
       throw("AttributeError", "type object '" .. o.name .. "' has no attribute '" .. n .. "'")
     end
     local vk = kindof(v)
     if vk == "classmethod" then return { kind = "boundmethod", fn = v.fn, recv = o } end
     if vk == "staticmethod" then return v.fn end
+    if vk == "instance" and class_lookup(v.cls, "__get__") ~= nil then
+      return self:call_dunder(v, "__get__", { NONE, o })
+    end
     return v
   end
   if k == "property" then
@@ -1733,25 +1748,101 @@ function Interp:set_attr(o, n, v)
     return
   end
   if k == "instance" then
-    local prop = class_lookup(o.cls, n)
-    if kindof(prop) == "property" then
-      if prop.fset == nil then
-        throw("AttributeError", "property '" .. n .. "' of '"
-          .. o.cls.name .. "' object has no setter")
-      end
-      self:call(self:bind_attr(prop.fset, o, o.cls), { v }, {})
-      return
+    local hook = class_lookup(o.cls, "__setattr__")
+    if hook ~= nil and hook ~= values.OBJECT.ns.__setattr__ then
+      self:call(self:bind_attr(hook, o, o.cls), { n, v }, {})
+    else
+      self:object_set_attr(o, n, v)
     end
-    o.d[n] = v
     return
   end
   if k == "class" then
+    if n == "__dict__" then throw("AttributeError", "attribute '__dict__' of 'type' objects is not writable") end
+    if o.ns[n] == nil and o.ns_order ~= nil then o.ns_order[#o.ns_order + 1] = n end
     o.ns[n] = v
     return
   end
   if k == "module" then
     o.frame.vars[n] = v
     return
+  end
+  throw("AttributeError", "'" .. type_name(o) .. "' object has no attribute '" .. n .. "'")
+end
+
+function Interp:object_set_attr(o, n, v)
+  if kindof(o) ~= "instance" then
+    throw("TypeError", "can't apply this __setattr__ to " .. type_name(o) .. " object")
+  end
+  local descriptor = class_lookup(o.cls, n)
+  if kindof(descriptor) == "property" then
+    if descriptor.fset == nil then
+      throw("AttributeError", "property '" .. n .. "' of '"
+        .. o.cls.name .. "' object has no setter")
+    end
+    self:call(self:bind_attr(descriptor.fset, o, o.cls), { v }, {})
+    return
+  end
+  if kindof(descriptor) == "instance"
+      and (class_lookup(descriptor.cls, "__set__") ~= nil
+        or class_lookup(descriptor.cls, "__delete__") ~= nil) then
+    self:call_dunder(descriptor, "__set__", { o, v })
+    return
+  end
+  o.d[n] = v
+end
+
+function Interp:object_del_attr(o, n)
+  if kindof(o) ~= "instance" then
+    throw("TypeError", "can't apply this __delattr__ to " .. type_name(o) .. " object")
+  end
+  local descriptor = class_lookup(o.cls, n)
+  if kindof(descriptor) == "property" then
+    if descriptor.fdel == nil then
+      throw("AttributeError", "property '" .. n .. "' of '"
+        .. o.cls.name .. "' object has no deleter")
+    end
+    self:call(self:bind_attr(descriptor.fdel, o, o.cls), {}, {})
+    return
+  end
+  if kindof(descriptor) == "instance"
+      and (class_lookup(descriptor.cls, "__set__") ~= nil
+        or class_lookup(descriptor.cls, "__delete__") ~= nil) then
+    self:call_dunder(descriptor, "__delete__", { o })
+    return
+  end
+  if o.d[n] == nil then
+    throw("AttributeError", "'" .. o.cls.name .. "' object has no attribute '" .. n .. "'")
+  end
+  o.d[n] = nil
+end
+
+function Interp:del_attr(o, n)
+  local k = kindof(o)
+  if k == "instance" then
+    local hook = class_lookup(o.cls, "__delattr__")
+    if hook ~= nil and hook ~= values.OBJECT.ns.__delattr__ then
+      self:call(self:bind_attr(hook, o, o.cls), { n }, {})
+    else
+      self:object_del_attr(o, n)
+    end
+    return
+  end
+  local attrs
+  if k == "class" then attrs = o.ns
+  elseif k == "module" then attrs = o.frame.vars
+  elseif k == "function" then attrs = o.attrs
+  end
+  if attrs ~= nil and attrs[n] ~= nil then
+    attrs[n] = nil
+    if k == "class" and o.ns_order ~= nil then
+      for i = #o.ns_order, 1, -1 do
+        if o.ns_order[i] == n then table.remove(o.ns_order, i) end
+      end
+    end
+    return
+  end
+  if k == "class" then
+    throw("AttributeError", "type object '" .. o.name .. "' has no attribute '" .. n .. "'")
   end
   throw("AttributeError", "'" .. type_name(o) .. "' object has no attribute '" .. n .. "'")
 end

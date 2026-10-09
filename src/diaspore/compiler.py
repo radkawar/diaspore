@@ -14,18 +14,20 @@ import os
 
 DIASPORE_VERSION = 1
 
-NATIVE_MODULES = {"time", "math", "json", "random", "sys", "net", "re", "tasks", "flow"}
+NATIVE_MODULES = {"time", "math", "json", "random", "sys", "net", "re", "tasks", "flow", "_os"}
 
 # Public names each native module exports (for `from mod import *`); kept in
 # sync with make_native_modules in vm.py.
 NATIVE_EXPORTS = {
-    "sys": ["argv", "exit", "platform", "stderr_write"],
+    "_os": ["getcwd", "kind", "listdir", "realpath"],
+    "sys": ["argv", "exit", "platform", "stderr_write", "stdin", "stdout", "stderr",
+            "getrecursionlimit", "setrecursionlimit"],
     "math": ["pi", "e", "inf", "nan", "sqrt", "floor", "ceil", "fabs", "pow",
              "log", "log2", "log10", "exp", "sin", "cos", "tan", "hypot",
              "fmod", "isnan", "isinf"],
     "time": ["time", "monotonic", "sleep"],
     "json": ["dumps", "loads"],
-    "random": ["seed", "random", "randint", "choice", "shuffle"],
+    "random": ["seed", "random", "randint", "choice", "shuffle", "Random"],
     "re": ["IGNORECASE", "MULTILINE", "DOTALL", "search", "match", "fullmatch",
            "findall", "split", "sub", "escape"],
     "flow": ["suspend"],
@@ -33,8 +35,8 @@ NATIVE_EXPORTS = {
     "tasks": ["spawn", "channel", "lock"],
 }
 
-# Annotation-only machinery: these imports are compiled away entirely (diaspore
-# strips annotations), so fully-typed Python sources compile unchanged.
+# Type-checking imports remain compile-time declarations; variable annotations
+# themselves are evaluated unless postponed by the annotations future.
 TYPE_ONLY_MODULES = {"typing", "__future__"}
 
 _BINOP = {
@@ -90,11 +92,13 @@ class DiasporeCompileError(Exception):
 
 
 class _Scope:
-    def __init__(self, kind: str, locals_: set[str], gdecl: set[str], ndecl: set[str]):
+    def __init__(self, kind: str, locals_: set[str], gdecl: set[str], ndecl: set[str],
+                 class_name: str = ""):
         self.kind = kind  # "module" | "function" | "class"
         self.locals = locals_
         self.gdecl = gdecl
         self.ndecl = ndecl
+        self.class_name = class_name
 
 
 class _LocalsCollector(ast.NodeVisitor):
@@ -210,6 +214,28 @@ def _is_generator(body: list[ast.stmt]) -> bool:
     return f.found
 
 
+def _has_annotations(body: list[ast.stmt]) -> bool:
+    for stmt in body:
+        if isinstance(stmt, ast.AnnAssign):
+            return True
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            if _has_annotations(getattr(stmt, field, [])):
+                return True
+        for field in ("handlers", "cases"):
+            for branch in getattr(stmt, field, []):
+                if _has_annotations(branch.body):
+                    return True
+    return False
+
+
+def _annotation_setup(ln: int) -> dict:
+    # Always bind in this namespace instead of finding an enclosing dictionary.
+    return {"op": "assign", "targets": [_name("__annotations__")],
+            "v": {"op": "dict", "entries": []}, "ln": ln}
+
+
 class ModuleCompiler:
     """Lower one Python module into portable IR."""
 
@@ -226,6 +252,7 @@ class ModuleCompiler:
         self.star_resolver = star_resolver
         self.is_module = is_module or (lambda name: False)
         self._tmp = 0
+        self.future_annotations = False
 
     def _gensym(self, prefix: str) -> str:
         """Generate a dot-prefixed name that cannot collide with source names."""
@@ -244,8 +271,14 @@ class ModuleCompiler:
             tree = ast.parse(self.source, filename=self.file)
         except SyntaxError as e:
             raise DiasporeCompileError(f"syntax error: {e.msg}", self.file, e.lineno) from None
+        self.future_annotations = any(
+            isinstance(s, ast.ImportFrom) and s.level == 0
+            and s.module == "__future__"
+            and any(a.name == "annotations" for a in s.names)
+            for s in tree.body)
         self.scopes.append(_Scope("module", set(), set(), set()))
-        body = self.block(tree.body)
+        body = [_annotation_setup(tree.body[0].lineno)] if _has_annotations(tree.body) else []
+        body.extend(self.block(tree.body))
         return {"name": self.name, "file": self.file, "body": body}
 
     def block(self, stmts: list[ast.stmt]) -> list[dict]:
@@ -271,11 +304,8 @@ class ModuleCompiler:
             case ast.Assign(targets=ts, value=v):
                 return {"op": "assign", "targets": [self.target(t) for t in ts],
                         "v": self.expr(v), "ln": ln}
-            case ast.AnnAssign(target=t, value=v):
-                if v is None:
-                    return None  # declaration only; locals collector saw it
-                return {"op": "assign", "targets": [self.target(t)],
-                        "v": self.expr(v), "ln": ln}
+            case ast.AnnAssign():
+                return self.annassign(s)
             case ast.AugAssign(target=t, op=op, value=v):
                 kind = _BINOP.get(type(op))
                 if kind is None:
@@ -391,6 +421,47 @@ class ModuleCompiler:
                         "finalbody": self.block(f), "ln": ln}
             case _:
                 raise self.err(f"unsupported statement: {type(s).__name__}", s)
+
+    def _annotation_subscript(self, key: ast.expr, ln: int) -> list[dict]:
+        if isinstance(key, ast.Slice):
+            return [{"op": "expr", "v": self.expr(part), "ln": ln}
+                    for part in (key.lower, key.upper, key.step) if part is not None]
+        if isinstance(key, ast.Tuple):
+            out = []
+            for part in key.elts:
+                out.extend(self._annotation_subscript(part, ln))
+            return out
+        return [{"op": "expr", "v": self.expr(key), "ln": ln}]
+
+    def annassign(self, s: ast.AnnAssign) -> list[dict]:
+        """Store the value before evaluating or recording its annotation."""
+        out = []
+        target = s.target
+        ln = s.lineno
+        if s.value is not None:
+            out.append({"op": "assign", "targets": [self.target(target)],
+                        "v": self.expr(s.value), "ln": ln})
+        elif isinstance(target, (ast.Attribute, ast.Subscript)):
+            # A declaration checks the object/index expressions without reading
+            # the attribute/item or constructing a slice.
+            out.append({"op": "expr", "v": self.expr(target.value), "ln": ln})
+            if isinstance(target, ast.Subscript):
+                out.extend(self._annotation_subscript(target.slice, ln))
+        if self.scopes[-1].kind in ("module", "class"):
+            if s.simple and isinstance(target, ast.Name):
+                annotation = ({"op": "const", "t": "str", "v": ast.unparse(s.annotation)}
+                              if self.future_annotations else self.expr(s.annotation))
+                name = target.id
+                class_name = self.scopes[-1].class_name.lstrip("_")
+                if class_name and name.startswith("__") and not name.endswith("__"):
+                    name = "_" + class_name + name
+                out.append({"op": "assign", "targets": [{
+                    "op": "index", "o": _name("__annotations__"),
+                    "k": {"op": "const", "t": "str", "v": name}}],
+                    "v": annotation, "ln": ln})
+            elif not self.future_annotations:
+                out.append({"op": "expr", "v": self.expr(s.annotation), "ln": ln})
+        return out
 
 
     def import_from(self, mod, names, level: int, s, ln: int):
@@ -508,9 +579,10 @@ class ModuleCompiler:
         col = _LocalsCollector()
         for st in s.body:
             col.visit(st)
-        self.scopes.append(_Scope("class", col.assigned, col.gdecl, col.ndecl))
+        self.scopes.append(_Scope("class", col.assigned, col.gdecl, col.ndecl, s.name))
         try:
-            body = self.block(s.body)
+            body = [_annotation_setup(s.lineno)] if _has_annotations(s.body) else []
+            body.extend(self.block(s.body))
         finally:
             self.scopes.pop()
         bases = []
@@ -1025,6 +1097,11 @@ def stdlib_overlay(root: str = "/stdlib") -> dict[str, str]:
     return dict(sorted(files.items()))
 
 
+# Bundles name stdlib modules "<stdlib>/name.py" (like CPython's "<frozen ...>"),
+# so a bundle does not depend on where the compiler was installed.
+STDLIB_FILE_PREFIX = "<stdlib>/"
+
+
 def write_stdlib_overlay(path: str) -> None:
     """Write `stdlib_overlay()` as JSON, gzip-compressed when `path` ends in .gz.
 
@@ -1070,8 +1147,17 @@ def compile_bundle(entry_path: str,
     unresolved: dict[str, str] = {}  # dotted name -> importing file
 
     search_roots = [root, *(os.path.abspath(path) for path in search_paths)]
+    stdlib_root = None
     if stdlib and os.path.isdir(STDLIB_DIR):
-        search_roots.append(os.path.abspath(STDLIB_DIR))
+        stdlib_root = os.path.abspath(STDLIB_DIR)
+        search_roots.append(stdlib_root)
+
+    def module_file(path: str) -> str:
+        """Name a module's source in the bundle independently of the build host."""
+        if stdlib_root is not None and path.startswith(stdlib_root + os.sep):
+            return STDLIB_FILE_PREFIX + os.path.relpath(path, stdlib_root).replace(os.sep, "/")
+        rel = os.path.relpath(path)
+        return path if rel.startswith("..") else rel
 
     def resolve_path(name: str):
         """Find a module or package, preferring local sources and packages."""
@@ -1124,10 +1210,9 @@ def compile_bundle(entry_path: str,
     def compile_one(name: str, path: str, is_package: bool) -> None:
         with open(path, encoding="utf-8") as f:
             source = f.read()
-        rel = os.path.relpath(path)
         pkg_ctx = name if is_package else (
             name.rsplit(".", 1)[0] if "." in name else "")
-        mc = ModuleCompiler(name, path if rel.startswith("..") else rel, source,
+        mc = ModuleCompiler(name, module_file(path), source,
                             package_ctx=pkg_ctx, star_resolver=star_resolver,
                             is_module=lambda n: resolve_path(n) is not None)
         in_progress.add(name)

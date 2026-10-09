@@ -8,6 +8,7 @@ local iter = require("diaspore.iter")
 local M = {}
 
 local NONE = values.NONE
+local NOT_IMPLEMENTED = values.NOT_IMPLEMENTED
 local throw = values.throw
 local type_name = values.type_name
 local as_index = values.as_index
@@ -50,6 +51,53 @@ end
 local function kindof(v)
   if type(v) == "table" then return v.kind end
   return nil
+end
+
+local function is_set_view(v)
+  return kindof(v) == "dictview" and v.view ~= "values"
+end
+
+local function is_setlike(v)
+  return kindof(v) == "set" or is_set_view(v)
+end
+
+local function setlike_subset(I, a, b)
+  if kindof(a) == "set" and kindof(b) == "set" then return M.set_is_subset(a, b) end
+  local it = iter.get_iter(I, a)
+  while true do
+    local item, more = it.next()
+    if not more then return true end
+    if not M.contains(I, b, item) then return false end
+  end
+end
+
+local function iterable_set(I, v)
+  local out = values.new_set()
+  local it = iter.get_iter(I, v)
+  while true do
+    local item, more = it.next()
+    if not more then return out end
+    values.set_add(out, item)
+  end
+end
+
+local function view_binop(I, kind, l, r)
+  if not is_set_view(l) and not is_set_view(r) then return NOT_IMPLEMENTED end
+  if kind == "bitand" then
+    local view, other = l, r
+    if not is_set_view(l) then view, other = r, l end
+    local out = values.new_set()
+    local it = iter.get_iter(I, other)
+    while true do
+      local item, more = it.next()
+      if not more then return out end
+      if M.contains(I, view, item) then values.set_add(out, item) end
+    end
+  end
+  if kind == "bitor" or kind == "sub" or kind == "bitxor" then
+    return M.set_op(kind, iterable_set(I, l), iterable_set(I, r))
+  end
+  return NOT_IMPLEMENTED
 end
 
 -- ---------------------------------------------------------------------------
@@ -178,7 +226,7 @@ end
 
 --- Apply a set union, intersection, difference, or symmetric difference.
 function M.set_op(kind, a, b)
-  local out = values.new_set()
+  local out = values.new_set(a.frozen)
   local ap = values.set_pairs(a)
   local bp = values.set_pairs(b)
   if kind == "bitor" then
@@ -186,18 +234,18 @@ function M.set_op(kind, a, b)
     for _, p in ipairs(bp) do values.set_add_hk(out, p[1], p[2]) end
   elseif kind == "bitand" then
     for _, p in ipairs(ap) do
-      if b.map[p[1]] then values.set_add_hk(out, p[1], p[2]) end
+      if values.set_has_hk(b, p[1], p[2]) then values.set_add_hk(out, p[1], p[2]) end
     end
   elseif kind == "sub" then
     for _, p in ipairs(ap) do
-      if not b.map[p[1]] then values.set_add_hk(out, p[1], p[2]) end
+      if not values.set_has_hk(b, p[1], p[2]) then values.set_add_hk(out, p[1], p[2]) end
     end
   elseif kind == "bitxor" then
     for _, p in ipairs(ap) do
-      if not b.map[p[1]] then values.set_add_hk(out, p[1], p[2]) end
+      if not values.set_has_hk(b, p[1], p[2]) then values.set_add_hk(out, p[1], p[2]) end
     end
     for _, p in ipairs(bp) do
-      if not a.map[p[1]] then values.set_add_hk(out, p[1], p[2]) end
+      if not values.set_has_hk(a, p[1], p[2]) then values.set_add_hk(out, p[1], p[2]) end
     end
   end
   return out
@@ -206,8 +254,7 @@ end
 --- Test whether every element of the first set is in the second.
 function M.set_is_subset(a, b)
   for hk, e in pairs(a.map) do
-    local _ = e
-    if not b.map[hk] then return false end
+    if not values.set_has_hk(b, e.hk or hk, e.v) then return false end
   end
   return true
 end
@@ -309,6 +356,51 @@ end
 -- ---------------------------------------------------------------------------
 -- binop
 
+local function strict_subtype(l, r)
+  if not is_inst(r) then return false end
+  if is_inst(l) then return l.cls ~= r.cls and values.issub(r.cls, l.cls) end
+  return r.cls.prim ~= nil and r.cls.prim.name == type_name(l)
+end
+
+local function primitive(v)
+  if is_inst(v) and v.prim ~= nil then return v.prim end
+  return v
+end
+
+local function binary_slot(I, kind, obj, other, name, reflected, inplace)
+  if is_inst(obj) and class_lookup(obj.cls, name) ~= nil then
+    return I:call_dunder(obj, name, { other })
+  end
+  if is_set_view(obj) then
+    if reflected then return view_binop(I, kind, other, obj) end
+    return view_binop(I, kind, obj, other)
+  end
+  local a, b = primitive(obj), primitive(other)
+  if is_inst(a) or is_inst(b) or kind == "matmul" then return NOT_IMPLEMENTED end
+  local ak, bk = kindof(a), kindof(b)
+  local supported = false
+  if as_index(a) ~= nil then
+    supported = as_index(b) ~= nil
+  elseif math.type(a) == "float" then
+    supported = is_number(b) and (kind == "add" or kind == "sub" or kind == "mul"
+      or kind == "div" or kind == "floordiv" or kind == "mod" or kind == "pow")
+  elseif ak == "complex" then
+    supported = (is_number(b) or bk == "complex")
+      and (kind == "add" or kind == "sub" or kind == "mul" or kind == "div" or kind == "pow")
+  elseif type(a) == "string" or ak == "bytes" or ak == "list" or ak == "tuple" then
+    supported = kind == "mul" and as_index(b) ~= nil
+    if kind == "add" and not reflected then
+      supported = type_name(a) == type_name(b)
+    end
+  elseif ak == "set" then
+    supported = bk == "set"
+      and (kind == "bitor" or kind == "bitand" or kind == "bitxor" or kind == "sub")
+  end
+  if not supported then return NOT_IMPLEMENTED end
+  if reflected then return M.binop(I, kind, b, a, false) end
+  return M.binop(I, kind, a, b, inplace)
+end
+
 --- Apply a binary operator, including user-defined methods.
 function M.binop(I, kind, l, r, inplace)
   if kind == "mod" and (type(l) == "string" or kindof(l) == "bytes") then
@@ -344,17 +436,31 @@ function M.binop(I, kind, l, r, inplace)
       if inplace and l_inst then
         local iname = "__i" .. names[1]:sub(3)
         if class_lookup(l.cls, iname) ~= nil then
-          return I:call_dunder(l, iname, { r })
+          local result = I:call_dunder(l, iname, { r })
+          if result ~= NOT_IMPLEMENTED then return result end
+          inplace = false
         end
       end
-      if l_inst and class_lookup(l.cls, names[1]) ~= nil then
-        return I:call_dunder(l, names[1], { r })
+      local right = r_inst and class_lookup(r.cls, names[2]) or nil
+      local same_type = l_inst and r_inst and l.cls == r.cls
+      local right_first = strict_subtype(l, r) and right ~= nil
+        and (not l_inst or right ~= class_lookup(l.cls, names[2]))
+      if right_first then
+        local result = I:call_dunder(r, names[2], { l })
+        if result ~= NOT_IMPLEMENTED then return result end
       end
-      if names[2] ~= "" and r_inst and class_lookup(r.cls, names[2]) ~= nil then
-        return I:call_dunder(r, names[2], { l })
+      local result = binary_slot(I, kind, l, r, names[1], false, inplace)
+      if result ~= NOT_IMPLEMENTED then return result end
+      if not right_first and not same_type then
+        result = binary_slot(I, kind, r, l, names[2], true, false)
+        if result ~= NOT_IMPLEMENTED then return result end
       end
     end
     binop_type_error(kind, l, r)
+  end
+  if is_set_view(l) or is_set_view(r) then
+    local result = view_binop(I, kind, l, r)
+    if result ~= NOT_IMPLEMENTED then return result end
   end
   if kind == "matmul" then
     binop_type_error(kind, l, r) -- dunder-only: no builtin type supports @
@@ -459,7 +565,51 @@ end
 -- comparisons
 
 local CMP_SYM = { lt = "<", le = "<=", gt = ">", ge = ">=" }
-local CMP_DUNDER = { lt = "__lt__", le = "__le__", gt = "__gt__", ge = "__ge__" }
+local CMP_DUNDER = {
+  lt = "__lt__", le = "__le__", gt = "__gt__", ge = "__ge__",
+  eq = "__eq__", ne = "__ne__",
+}
+local CMP_REFLECT = { lt = "gt", le = "ge", gt = "lt", ge = "le", eq = "eq", ne = "ne" }
+
+local function compare_slot(I, obj, other, kind)
+  if is_inst(obj) then
+    local name = CMP_DUNDER[kind]
+    if class_lookup(obj.cls, name) ~= nil then
+      return I:call_dunder(obj, name, { other })
+    end
+    if kind == "ne" and class_lookup(obj.cls, "__eq__") ~= nil then
+      local result = I:call_dunder(obj, "__eq__", { other })
+      if result ~= NOT_IMPLEMENTED then return not I:truth(result) end
+      return NOT_IMPLEMENTED
+    end
+  end
+  local a, b = primitive(obj), primitive(other)
+  if is_inst(a) or is_inst(b) then return NOT_IMPLEMENTED end
+  local ak, bk = kindof(a), kindof(b)
+  local equality = kind == "eq" or kind == "ne"
+  local supported = is_number(a) and is_number(b)
+    or type(a) == "string" and type(b) == "string"
+    or ak ~= nil and ak == bk and (ak == "bytes" or ak == "list"
+      or ak == "tuple" or ak == "set" or equality)
+  if is_setlike(a) and is_setlike(b) then supported = true end
+  if equality and (ak == "complex" or bk == "complex") then
+    supported = (is_number(a) or ak == "complex") and (is_number(b) or bk == "complex")
+  end
+  if not supported then return NOT_IMPLEMENTED end
+  return M.compare(I, kind, a, b)
+end
+
+local function rich_compare(I, kind, l, r)
+  local right_first = strict_subtype(l, r)
+  if right_first then
+    local result = compare_slot(I, r, l, CMP_REFLECT[kind])
+    if result ~= NOT_IMPLEMENTED then return result end
+  end
+  local result = compare_slot(I, l, r, kind)
+  if result ~= NOT_IMPLEMENTED then return result end
+  if not right_first then return compare_slot(I, r, l, CMP_REFLECT[kind]) end
+  return NOT_IMPLEMENTED
+end
 
 local function order_type_error(kind, l, r)
   throw("TypeError", "'" .. CMP_SYM[kind] .. "' not supported between instances of '"
@@ -507,7 +657,7 @@ local function cmp_seq(I, a, b)
   local n = math.min(#a, #b)
   for i = 1, n do
     if not M.eq_elem(I, a[i], b[i]) then
-      local lt = M.compare(I, "lt", a[i], b[i])
+      local lt = I:truth(M.compare(I, "lt", a[i], b[i]))
       return lt and -1 or 1, true
     end
   end
@@ -532,9 +682,9 @@ cmp3 = function(I, l, r, kind)
   end
   if lk == "list" and rk == "list" then return cmp_seq(I, l.items, r.items) end
   if lk == "tuple" and rk == "tuple" then return cmp_seq(I, l.items, r.items) end
-  if lk == "set" and rk == "set" then
-    local sub = M.set_is_subset(l, r)
-    local sup = M.set_is_subset(r, l)
+  if is_setlike(l) and is_setlike(r) then
+    local sub = setlike_subset(I, l, r)
+    local sup = setlike_subset(I, r, l)
     if sub and sup then return 0, true end
     if sub then return -1, true end
     if sup then return 1, true end
@@ -549,21 +699,15 @@ function M.compare(I, kind, l, r)
   if kind == "isnot" then return not M.is_identical(l, r) end
   if kind == "in" then return M.contains(I, r, l) end
   if kind == "notin" then return not M.contains(I, r, l) end
-  if kind == "eq" then return M.eq(I, l, r) end
-  if kind == "ne" then
-    if is_inst(l) and class_lookup(l.cls, "__ne__") ~= nil then
-      return I:truth(I:call_dunder(l, "__ne__", { r }))
-    end
-    return not M.eq(I, l, r)
-  end
-  -- ordering
-  if is_inst(l) then
-    if class_lookup(l.cls, CMP_DUNDER[kind]) ~= nil then
-      return I:truth(I:call_dunder(l, CMP_DUNDER[kind], { r }))
-    end
+  if is_inst(l) or is_inst(r) then
+    local result = rich_compare(I, kind, l, r)
+    if result ~= NOT_IMPLEMENTED then return result end
+    if kind == "eq" then return M.is_identical(l, r) end
+    if kind == "ne" then return not M.is_identical(l, r) end
     order_type_error(kind, l, r)
   end
-  if is_inst(r) then order_type_error(kind, l, r) end
+  if kind == "eq" then return M.eq(I, l, r) end
+  if kind == "ne" then return not M.eq(I, l, r) end
   local c, ordered = cmp3(I, l, r, kind)
   if not ordered then return false end
   if kind == "lt" then return c < 0 end
@@ -583,16 +727,13 @@ end
 
 --- Compare sandbox values for equality.
 function M.eq(I, l, r)
-  if is_inst(l) then
-    if class_lookup(l.cls, "__eq__") ~= nil then
-      return I:truth(I:call_dunder(l, "__eq__", { r }))
-    end
-    if is_inst(r) and class_lookup(r.cls, "__eq__") ~= nil then
-      return I:truth(I:call_dunder(r, "__eq__", { l }))
-    end
-    return M.is_identical(l, r)
+  if is_inst(l) or is_inst(r) then return I:truth(M.compare(I, "eq", l, r)) end
+  if kindof(l) == "mappingproxy" then l = values.namespace_dict(l.cls) end
+  if kindof(r) == "mappingproxy" then r = values.namespace_dict(r.cls) end
+  if is_set_view(l) or is_set_view(r) then
+    if not is_setlike(l) or not is_setlike(r) then return false end
+    return M.diaspore_len(I, l) == M.diaspore_len(I, r) and setlike_subset(I, l, r)
   end
-  if is_inst(r) then return M.eq(I, r, l) end
   if kindof(l) == "complex" or kindof(r) == "complex" then
     if is_number(l) or is_number(r) or kindof(l) == "complex" or kindof(r) == "complex" then
       if (is_number(l) or kindof(l) == "complex")
@@ -621,7 +762,7 @@ function M.eq(I, l, r)
   if lk == "dict" then
     if kindof(r) ~= "dict" or l.size ~= r.size then return false end
     for hk, e in pairs(l.map) do
-      local be = r.map[hk]
+      local be = values.dict_entry_hk(r, e.hk or hk, e.k)
       if be == nil then return false end
       if not M.eq_elem(I, e.v, be.v) then return false end
     end
@@ -664,6 +805,16 @@ end
 --- Test membership using the sandbox containment protocol.
 function M.contains(I, container, item)
   local ck = kindof(container)
+  if ck == "dictview" then
+    local d = values.view_dict(container)
+    if container.view == "keys" then return values.dict_has(d, item) end
+    if container.view == "items" then
+      if kindof(item) ~= "tuple" or #item.items ~= 2 then return false end
+      local entry = values.dict_entry(d, item.items[1])
+      return entry ~= nil and M.eq_elem(I, entry.v, item.items[2])
+    end
+    return iter_contains(I, container, item)
+  end
   if ck == "instance" then
     if class_lookup(container.cls, "__contains__") == nil and container.prim ~= nil then
       return M.contains(I, container.prim, item)
@@ -697,8 +848,12 @@ function M.contains(I, container, item)
     end
     return false
   end
-  if ck == "dict" then return container.map[hash_key(item)] ~= nil end
-  if ck == "set" then return container.map[hash_key(item)] ~= nil end
+  if ck == "dict" then return values.dict_has(container, item) end
+  if ck == "mappingproxy" then
+    hash_key(item)
+    return type(item) == "string" and container.cls.ns[item] ~= nil
+  end
+  if ck == "set" then return values.set_has(container, item) end
   if ck == "range" then
     local n = as_index(item)
     if n == nil then
@@ -733,6 +888,8 @@ function M.truth(I, v)
   if k == "bytes" then return #v.b > 0 end
   if k == "list" or k == "tuple" then return #v.items > 0 end
   if k == "dict" or k == "set" then return v.size > 0 end
+  if k == "dictview" then return M.diaspore_len(I, v.source) > 0 end
+  if k == "mappingproxy" then return next(v.cls.ns) ~= nil end
   if k == "range" then return values.range_len(v) > 0 end
   if k == "instance" then
     if class_lookup(v.cls, "__bool__") == nil and class_lookup(v.cls, "__len__") == nil
@@ -762,6 +919,12 @@ function M.diaspore_len(I, v)
   if k == "bytes" then return #v.b end
   if k == "list" or k == "tuple" then return #v.items end
   if k == "dict" or k == "set" then return v.size end
+  if k == "dictview" then return M.diaspore_len(I, v.source) end
+  if k == "mappingproxy" then
+    local count = 0
+    for _ in pairs(v.cls.ns) do count = count + 1 end
+    return count
+  end
   if k == "range" then return values.range_len(v) end
   if k == "instance" then
     if class_lookup(v.cls, "__len__") == nil and v.prim ~= nil then
@@ -856,6 +1019,13 @@ end
 --- Read an indexed item or slice.
 function M.get_index(I, o, k)
   local ok_ = kindof(o)
+  if ok_ == "mappingproxy" then
+    hash_key(k)
+    local v
+    if type(k) == "string" then v = o.cls.ns[k] end
+    if v ~= nil then return v end
+    values.throw_val(values.make_exc("KeyError", k))
+  end
   if ok_ == "instance" then
     if class_lookup(o.cls, "__getitem__") == nil and o.prim ~= nil then
       if kindof(o.prim) == "dict" and not values.dict_has(o.prim, k)
@@ -930,7 +1100,7 @@ function M.get_index(I, o, k)
   end
   if ok_ == "dict" then
     if kindof(k) == "slice" then throw("TypeError", "unhashable type: 'slice'") end
-    local e = o.map[hash_key(k)]
+    local e = values.dict_entry(o, k)
     if e == nil then
       values.throw_val(values.make_exc("KeyError", k))
     end
@@ -1060,6 +1230,17 @@ function M.repr(I, v)
   if t == "boolean" then return v and "True" or "False" end
   if t == "string" then return format.repr_string(v) end
   local k = v.kind
+  if k == "dictview" then
+    local name = type_name(v)
+    if I.repring[v] then return name .. "([...])" end
+    I.repring[v] = true
+    local ok, text = pcall(function()
+      return name .. "(" .. M.repr(I, values.list(iter.iter_to_array(I, v))) .. ")"
+    end)
+    I.repring[v] = nil
+    if not ok then error(text, 0) end
+    return text
+  end
   if k == "list" or k == "tuple" or k == "dict" then
     if I.repring[v] then
       if k == "list" then return "[...]" end
@@ -1092,11 +1273,16 @@ function M.repr(I, v)
   end
   if k == "none" then return "None" end
   if k == "ellipsis" then return "Ellipsis" end
+  if k == "notimplemented" then return "NotImplemented" end
+  if k == "mappingproxy" then
+    return "mappingproxy(" .. M.repr(I, values.namespace_dict(v.cls)) .. ")"
+  end
   if k == "bytes" then return format.repr_bytes(v) end
   if k == "range" then return format.repr_range(v) end
   if k == "set" then
-    if v.size == 0 then return "set()" end
-    return "{" .. repr_join(I, values.set_elems(v)) .. "}"
+    if v.size == 0 then return v.frozen and "frozenset()" or "set()" end
+    local text = "{" .. repr_join(I, values.set_elems(v)) .. "}"
+    return v.frozen and "frozenset(" .. text .. ")" or text
   end
   if k == "slice" then
     return "slice(" .. M.repr(I, v.lower) .. ", " .. M.repr(I, v.upper)
@@ -1150,6 +1336,32 @@ function M.exc_str(I, inst)
   local args = values.exc_args(inst)
   if values.issub(inst.cls, values.EXC_CLASSES.KeyError) and #args == 1 then
     return M.repr(I, args[1])
+  end
+  local encode = values.issub(inst.cls, values.EXC_CLASSES.UnicodeEncodeError)
+  local decode = values.issub(inst.cls, values.EXC_CLASSES.UnicodeDecodeError)
+  if #args == 5 and (encode or decode) then
+    local encoding = inst.d.encoding or args[1]
+    local object = inst.d.object or args[2]
+    local start = inst.d.start or args[3]
+    local stop = inst.d["end"] or args[4]
+    local reason = inst.d.reason or args[5]
+    local part
+    if encode then
+      if stop == start + 1 then
+        local cp = utf8.codepoint(object, utf8.offset(object, start + 1), nil, true)
+        local escape = cp <= 0xff and string.format("\\x%02x", cp)
+          or (cp <= 0xffff and string.format("\\u%04x", cp) or string.format("\\U%08x", cp))
+        part = "character '" .. escape .. "' in position " .. start
+      else
+        part = "characters in position " .. start .. "-" .. (stop - 1)
+      end
+    elseif stop == start + 1 then
+      part = string.format("byte 0x%02x in position %d", object.b:byte(start + 1), start)
+    else
+      part = "bytes in position " .. start .. "-" .. (stop - 1)
+    end
+    return "'" .. encoding .. "' codec can't " .. (encode and "encode " or "decode ")
+      .. part .. ": " .. reason
   end
   if #args == 0 then return "" end
   if #args == 1 then return M.str(I, args[1]) end
@@ -1248,7 +1460,7 @@ end
 function M.sort_values(I, items, key, reverse)
   local use_key = key ~= nil and kindof(key) ~= "none"
   local function less(a, b)
-    return M.compare(I, "lt", a, b)
+    return I:truth(M.compare(I, "lt", a, b))
   end
   if reverse then reverse_in_place(items) end
   if use_key then

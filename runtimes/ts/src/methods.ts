@@ -10,7 +10,11 @@ import {
   DiasporeList,
   DiasporeTuple,
   DiasporeDict,
+  DiasporeDictView,
+  isSetView,
+  DiasporeMappingProxy,
   DiasporeSet,
+  DiasporeFrozenSet,
   Builtin,
   typeName,
   asIndex,
@@ -18,10 +22,12 @@ import {
   diasporeErr,
   DiasporeError,
   makeExc,
+  unicodeCodecError,
   bytesIndexOf,
+  hashValue,
 } from "./values.ts";
 import { reprString } from "./format.ts";
-import { iterToArray } from "./iter.ts";
+import { getIter, iterToArray } from "./iter.ts";
 import { needArgs, noKw, wantInt, wantStr } from "./helpers.ts";
 import { eqElem, setOp, setIsSubset } from "./ops.ts";
 import { keyReverseKw, encodeStrTo } from "./builtins.ts";
@@ -35,6 +41,19 @@ export function builtinMethod(I: Interp, o: Value, n: string): Value {
   if (typeof o === "string") fn = strMethod(o, n);
   else if (o instanceof DiasporeList) fn = listMethod(o, n);
   else if (o instanceof DiasporeDict) fn = dictMethod(o, n);
+  else if (isSetView(o) && n === "isdisjoint") {
+    fn = function* (I2, args, kw) {
+      noKw(n, kw);
+      needArgs(n, args, 1, 1);
+      const it = yield* getIter(I2, args[0]);
+      for (;;) {
+        I2.fuel();
+        const [item, ok] = yield* it.next();
+        if (!ok) return true;
+        if (yield* I2.contains(o, item)) return false;
+      }
+    };
+  }
   else if (o instanceof DiasporeSet) fn = setMethod(o, n);
   else if (o instanceof DiasporeTuple) fn = tupleMethod(o, n);
   else if (o instanceof Uint8Array) fn = bytesMethod(o, n);
@@ -63,7 +82,13 @@ const DICT_METHODS = new Set([
 const SET_METHODS = new Set([
   "add", "remove", "discard", "clear", "copy", "union", "intersection",
   "difference", "symmetric_difference", "issubset", "issuperset",
+  "isdisjoint",
 ]);
+const FROZENSET_METHODS: Record<string, true> = {
+  copy: true, union: true, intersection: true, difference: true,
+  symmetric_difference: true, issubset: true, issuperset: true, isdisjoint: true,
+  __hash__: true,
+};
 const TUPLE_METHODS = new Set(["count", "index"]);
 const BYTES_METHODS = new Set([
   "decode", "find", "split", "strip", "lstrip", "rstrip", "replace",
@@ -81,6 +106,7 @@ const ALLOWLISTS: Record<string, Set<string>> = {
 
 /** Whether `method` is a pinned method of builtin type `tname`. */
 export function methodAllowed(tname: string, method: string): boolean {
+  if (tname === "frozenset") return FROZENSET_METHODS[method] === true;
   const set = ALLOWLISTS[tname];
   return set !== undefined && set.has(method);
 }
@@ -90,6 +116,7 @@ export function primTypeName(v: Value): string | null {
   if (typeof v === "string") return "str";
   if (v instanceof DiasporeList) return "list";
   if (v instanceof DiasporeDict) return "dict";
+  if (v instanceof DiasporeFrozenSet) return "frozenset";
   if (v instanceof DiasporeSet) return "set";
   if (v instanceof DiasporeTuple) return "tuple";
   if (v instanceof Uint8Array) return "bytes";
@@ -742,6 +769,10 @@ function* seqIndexOf(I: Interp, items: Value[], args: Value[]): G<number> {
 // dict methods
 
 function dictMethod(d: DiasporeDict, n: string): MFn | null {
+  if (d instanceof DiasporeMappingProxy &&
+      n !== "get" && n !== "keys" && n !== "values" && n !== "items" && n !== "copy") {
+    return null;
+  }
   switch (n) {
     case "get":
       return function* (I, args) {
@@ -751,16 +782,12 @@ function dictMethod(d: DiasporeDict, n: string): MFn | null {
         return args.length === 2 ? args[1] : NONE;
       };
     case "keys":
-      return function* () {
-        return new DiasporeList(d.keys());
-      };
     case "values":
-      return function* () {
-        return new DiasporeList(d.values());
-      };
     case "items":
-      return function* () {
-        return new DiasporeList(d.entries().map(([k, v]) => new DiasporeTuple([k, v]) as Value));
+      return function* (_I, args, kw) {
+        noKw(n, kw);
+        needArgs(n, args, 0, 0);
+        return new DiasporeDictView(d, n);
       };
     case "pop":
       return function* (I, args) {
@@ -807,6 +834,14 @@ import { dictUpdateFrom } from "./builtins.ts";
 // set methods
 
 function setMethod(s: DiasporeSet, n: string): MFn | null {
+  if (s instanceof DiasporeFrozenSet && FROZENSET_METHODS[n] !== true) return null;
+  if (s instanceof DiasporeFrozenSet && n === "__hash__") {
+    return function* (_I, args, kw) {
+      noKw(n, kw);
+      needArgs(n, args, 0, 0);
+      return hashValue(s);
+    };
+  }
   switch (n) {
     case "add":
       return function* (I, args) {
@@ -832,14 +867,18 @@ function setMethod(s: DiasporeSet, n: string): MFn | null {
         return NONE;
       };
     case "copy":
-      return function* () {
+      return function* (_I, args, kw) {
+        noKw(n, kw);
+        needArgs(n, args, 0, 0);
         return s.copy();
       };
     case "union":
     case "intersection":
     case "difference":
     case "symmetric_difference":
-      return function* (I, args) {
+      return function* (I, args, kw) {
+        noKw(n, kw);
+        if (n === "symmetric_difference") needArgs(n, args, 1, 1);
         let out = s.copy();
         const op =
           n === "union"
@@ -856,14 +895,28 @@ function setMethod(s: DiasporeSet, n: string): MFn | null {
         return out;
       };
     case "issubset":
-      return function* (I, args) {
+      return function* (I, args, kw) {
+        noKw(n, kw);
         needArgs(n, args, 1, 1);
         return setIsSubset(s, yield* toSet(I, args[0]));
       };
     case "issuperset":
-      return function* (I, args) {
+      return function* (I, args, kw) {
+        noKw(n, kw);
         needArgs(n, args, 1, 1);
         return setIsSubset(yield* toSet(I, args[0]), s);
+      };
+    case "isdisjoint":
+      return function* (I, args, kw) {
+        noKw(n, kw);
+        needArgs(n, args, 1, 1);
+        const it = yield* getIter(I, args[0]);
+        for (;;) {
+          I.fuel();
+          const [item, ok] = yield* it.next();
+          if (!ok) return true;
+          if (s.has(item)) return false;
+        }
       };
   }
   return null;
@@ -1064,7 +1117,7 @@ function bytesFields(b: Uint8Array): Uint8Array[] {
 }
 
 export function decodeBytes(b: Uint8Array, enc: string): string {
-  switch (enc.toLowerCase()) {
+  switch (enc.toLowerCase().replace(/_/g, "-")) {
     case "utf-8":
     case "utf8":
       try {
@@ -1072,6 +1125,16 @@ export function decodeBytes(b: Uint8Array, enc: string): string {
       } catch {
         throw diasporeErr("ValueError", "'utf-8' codec can't decode bytes: invalid data");
       }
+    case "ascii":
+    case "us-ascii":
+    case "646": {
+      for (let i = 0; i < b.length; i++) {
+        if (b[i] > 0x7f) {
+          throw unicodeCodecError("UnicodeDecodeError", "ascii", b, i, i + 1, "ordinal not in range(128)");
+        }
+      }
+      return new TextDecoder("utf-8").decode(b);
+    }
     case "latin-1":
     case "latin1":
     case "iso-8859-1": {

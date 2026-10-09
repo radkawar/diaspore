@@ -14,6 +14,7 @@ var binSym = map[string]string{
 	"add": "+", "sub": "-", "mul": "*", "div": "/", "floordiv": "//",
 	"mod": "%", "pow": "**", "lshift": "<<", "rshift": ">>",
 	"bitand": "&", "bitor": "|", "bitxor": "^", "matmul": "@",
+	"divmod": "divmod()",
 }
 
 var binDunder = map[string][2]string{
@@ -24,6 +25,7 @@ var binDunder = map[string][2]string{
 	"pow": {"__pow__", "__rpow__"}, "lshift": {"__lshift__", "__rlshift__"},
 	"rshift": {"__rshift__", "__rrshift__"}, "bitand": {"__and__", "__rand__"},
 	"bitor": {"__or__", "__ror__"}, "bitxor": {"__xor__", "__rxor__"},
+	"divmod": {"__divmod__", "__rdivmod__"},
 }
 
 func asInt(v Value) (int64, bool) {
@@ -93,6 +95,14 @@ func (vm *VM) binop(kind string, l, r Value) (Value, error) {
 }
 
 func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
+	if kind == "bitor" || kind == "bitand" || kind == "bitxor" || kind == "sub" {
+		if view, ok := l.(*DictView); ok && view.kind != "values" {
+			return vm.viewBinop(kind, l, r)
+		}
+		if view, ok := r.(*DictView); ok && view.kind != "values" {
+			return vm.viewBinop(kind, l, r)
+		}
+	}
 	if kind == "mod" {
 		switch l.(type) {
 		case string, []byte:
@@ -133,21 +143,62 @@ func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
 				// Augmented assignment tries __i<op>__ first.
 				iname := "__i" + names[0][2:]
 				if _, ok := li.Class.Lookup(iname); ok {
-					return vm.callDunder(li, iname, []Value{r})
+					res, err := vm.callDunder(li, iname, []Value{r})
+					if _, declined := res.(NotImplementedType); err != nil || !declined {
+						return res, err
+					}
+				}
+			}
+			rightFirst := false
+			if rInst {
+				if lInst && ri.Class != li.Class && ri.Class.IsSub(li.Class) {
+					rfn, rok := ri.Class.Lookup(names[1])
+					lfn, lok := li.Class.Lookup(names[1])
+					rightFirst = rok && (!lok || !isIdentical(rfn, lfn))
+				} else if !lInst && ri.Class.Prim != nil {
+					rightFirst = ri.Class.Prim.Name == typeName(l)
+				}
+			}
+			if rightFirst {
+				res, err := vm.binaryMethod(ri, names[1], l, kind, true)
+				if _, declined := res.(NotImplementedType); err != nil || !declined {
+					return res, err
+				}
+			}
+			if !lInst && rInst && ri.Prim != nil {
+				result, err := vm.binop(kind, l, ri.Prim)
+				if _, declined := raisedAs(err, "TypeError"); !declined {
+					return result, err
 				}
 			}
 			if lInst {
-				if _, ok := li.Class.Lookup(names[0]); ok {
-					return vm.callDunder(li, names[0], []Value{r})
+				res, err := vm.binaryMethod(li, names[0], r, kind, false)
+				if _, declined := res.(NotImplementedType); err != nil || !declined {
+					return res, err
 				}
 			}
-			if names[1] != "" && rInst {
-				if _, ok := ri.Class.Lookup(names[1]); ok {
-					return vm.callDunder(ri, names[1], []Value{l})
+			if rInst && !rightFirst && (!lInst || li.Class != ri.Class) {
+				res, err := vm.binaryMethod(ri, names[1], l, kind, true)
+				if _, declined := res.(NotImplementedType); err != nil || !declined {
+					return res, err
 				}
+			}
+			if lInst && !rInst && li.Prim != nil && isNumber(r) {
+				return vm.binop(kind, li.Prim, r)
 			}
 		}
 		return nil, vm.binopTypeError(kind, l, r)
+	}
+	if kind == "divmod" {
+		q, err := vm.binop("floordiv", l, r)
+		if err != nil {
+			return nil, err
+		}
+		remainder, err := vm.binop("mod", l, r)
+		if err != nil {
+			return nil, err
+		}
+		return &Tuple{Items: []Value{q, remainder}}, nil
 	}
 
 	// int op int (bool counts as int)
@@ -219,6 +270,35 @@ func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
 				"can only concatenate tuple (not \"%s\") to tuple", typeName(r))
 		}
 	case "mul":
+		if inplace {
+			if list, ok := l.(*List); ok {
+				if count, ok := asInt(r); ok {
+					if count <= 0 {
+						list.Items = nil
+						return list, nil
+					}
+					length := len(list.Items)
+					if count == 1 || length == 0 {
+						return list, nil
+					}
+					if count > int64(int(^uint(0)>>1)/length) {
+						return nil, newError("MemoryError", "repeated list is too long")
+					}
+					size := int(count) * length
+					if cap(list.Items) >= size {
+						list.Items = list.Items[:size]
+					} else {
+						items := make([]Value, size)
+						copy(items, list.Items)
+						list.Items = items
+					}
+					for copied := length; copied < size; {
+						copied += copy(list.Items[copied:], list.Items[:copied])
+					}
+					return list, nil
+				}
+			}
+		}
 		if v, err, done := vm.seqRepeat(l, r); done {
 			return v, err
 		}
@@ -226,15 +306,43 @@ func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
 			return v, err
 		}
 	case "bitor", "bitand", "bitxor", "sub":
-		if a, ok := l.(*Set); ok {
-			if b, ok := r.(*Set); ok {
-				return setOp(kind, a, b)
+		if a, ok := setValue(l); ok {
+			if b, ok := setValue(r); ok {
+				result, err := setOp(kind, a, b)
+				if err != nil {
+					return nil, err
+				}
+				if _, frozen := l.(*FrozenSet); frozen {
+					return &FrozenSet{set: result.(*Set)}, nil
+				}
+				return result, nil
 			}
 		}
 	case "mod":
 		// no string % formatting in diaspore
 	}
 	return nil, vm.binopTypeError(kind, l, r)
+}
+
+func (vm *VM) binaryMethod(inst *Instance, name string, other Value, kind string, reflected bool) (Value, error) {
+	if _, ok := inst.Class.Lookup(name); ok {
+		return vm.callDunder(inst, name, []Value{other})
+	}
+	if inst.Prim != nil {
+		if _, unsupported := rawPrim(other).(*Instance); unsupported {
+			return NotImplemented, nil
+		}
+		left, right := inst.Prim, rawPrim(other)
+		if reflected {
+			left, right = right, left
+		}
+		result, err := vm.binop(kind, left, right)
+		if _, declined := raisedAs(err, "TypeError"); declined {
+			return NotImplemented, nil
+		}
+		return result, err
+	}
+	return NotImplemented, nil
 }
 
 // seqRepeat handles seq * n; done reports whether the pair was a repeat form.
@@ -281,46 +389,62 @@ func (vm *VM) seqRepeat(seq, count Value) (Value, error, bool) {
 
 func setOp(kind string, a, b *Set) (Value, error) {
 	out := NewSet()
-	switch kind {
-	case "bitor":
-		for _, e := range a.entries {
-			out.addHK(e.hk, e.key)
+	for _, e := range a.entries {
+		include := true
+		if kind != "bitor" {
+			present, err := b.hasHK(e.hk, e.key)
+			if err != nil {
+				return nil, err
+			}
+			include = present == (kind == "bitand")
 		}
+		if include {
+			if err := out.addHK(e.hk, e.key); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if kind == "bitor" || kind == "bitxor" {
 		for _, e := range b.entries {
-			out.addHK(e.hk, e.key)
-		}
-	case "bitand":
-		for _, e := range a.entries {
-			if _, ok := b.index[e.hk]; ok {
-				out.addHK(e.hk, e.key)
+			if kind == "bitxor" {
+				present, err := a.hasHK(e.hk, e.key)
+				if err != nil {
+					return nil, err
+				}
+				if present {
+					continue
+				}
 			}
-		}
-	case "sub":
-		for _, e := range a.entries {
-			if _, ok := b.index[e.hk]; !ok {
-				out.addHK(e.hk, e.key)
-			}
-		}
-	case "bitxor":
-		for _, e := range a.entries {
-			if _, ok := b.index[e.hk]; !ok {
-				out.addHK(e.hk, e.key)
-			}
-		}
-		for _, e := range b.entries {
-			if _, ok := a.index[e.hk]; !ok {
-				out.addHK(e.hk, e.key)
+			if err := out.addHK(e.hk, e.key); err != nil {
+				return nil, err
 			}
 		}
 	}
 	return out, nil
 }
 
-func (s *Set) addHK(hk string, k Value) {
-	if _, ok := s.index[hk]; !ok {
+func (s *Set) hasHK(hk string, k Value) (bool, error) {
+	if s.slowKeys != 0 || (len(hk) != 0 && hk[0] == 'h') {
+		_, ok, err := findHashed(s.entries, k, hk)
+		return ok, err
+	}
+	_, ok := s.index[hk]
+	return ok, nil
+}
+
+func (s *Set) addHK(hk string, k Value) error {
+	present, err := s.hasHK(hk, k)
+	if err != nil {
+		return err
+	}
+	if !present {
 		s.index[hk] = len(s.entries)
 		s.entries = append(s.entries, dictEntry{hk: hk, key: k})
+		if len(hk) != 0 && hk[0] == 'h' {
+			s.slowKeys++
+		}
 	}
+	return nil
 }
 
 func (vm *VM) intBinop(kind string, a, b int64) (Value, error) {
@@ -617,9 +741,53 @@ func (vm *VM) unary(kind string, v Value) (Value, error) {
 }
 
 var cmpSym = map[string]string{"lt": "<", "le": "<=", "gt": ">", "ge": ">="}
-var cmpDunder = map[string]string{"lt": "__lt__", "le": "__le__", "gt": "__gt__", "ge": "__ge__"}
+var cmpDunder = map[string]string{
+	"lt": "__lt__", "le": "__le__", "gt": "__gt__", "ge": "__ge__",
+	"eq": "__eq__", "ne": "__ne__",
+}
+var cmpReverse = map[string]string{
+	"lt": "gt", "le": "ge", "gt": "lt", "ge": "le", "eq": "eq", "ne": "ne",
+}
 
 func (vm *VM) compare(kind string, l, r Value) (bool, error) {
+	result, err := vm.compareValue(kind, l, r)
+	if err != nil {
+		return false, err
+	}
+	return vm.truth(result)
+}
+
+func (vm *VM) richMethod(inst *Instance, kind string, other Value) (Value, error) {
+	if _, ok := inst.Class.Lookup(cmpDunder[kind]); ok {
+		return vm.callDunder(inst, cmpDunder[kind], []Value{other})
+	}
+	if kind == "ne" {
+		result, err := vm.richMethod(inst, "eq", other)
+		if _, declined := result.(NotImplementedType); err != nil || declined {
+			return result, err
+		}
+		truth, err := vm.truth(result)
+		return !truth, err
+	}
+	if inst.Prim != nil {
+		if _, unsupported := rawPrim(other).(*Instance); unsupported {
+			return NotImplemented, nil
+		}
+		result, err := vm.compareValue(kind, inst.Prim, rawPrim(other))
+		if _, declined := raisedAs(err, "TypeError"); declined {
+			return NotImplemented, nil
+		}
+		// Builtin equality declines unsupported operand types.
+		if kind == "eq" && typeName(inst.Prim) != typeName(rawPrim(other)) &&
+			!(isNumber(inst.Prim) && isNumber(rawPrim(other))) {
+			return NotImplemented, nil
+		}
+		return result, err
+	}
+	return NotImplemented, nil
+}
+
+func (vm *VM) compareValue(kind string, l, r Value) (Value, error) {
 	switch kind {
 	case "is":
 		return isIdentical(l, r), nil
@@ -630,33 +798,52 @@ func (vm *VM) compare(kind string, l, r Value) (bool, error) {
 	case "notin":
 		ok, err := vm.contains(r, l)
 		return !ok, err
+	}
+	li, lInst := l.(*Instance)
+	ri, rInst := r.(*Instance)
+	if lInst || rInst {
+		rightFirst := rInst && lInst && ri.Class != li.Class && ri.Class.IsSub(li.Class)
+		if rInst && !lInst && ri.Class.Prim != nil {
+			rightFirst = ri.Class.Prim.Name == typeName(l)
+		}
+		if rightFirst {
+			result, err := vm.richMethod(ri, cmpReverse[kind], l)
+			if _, declined := result.(NotImplementedType); err != nil || !declined {
+				return result, err
+			}
+		}
+		if lInst {
+			result, err := vm.richMethod(li, kind, r)
+			if _, declined := result.(NotImplementedType); err != nil || !declined {
+				return result, err
+			}
+		}
+		if rInst && !rightFirst {
+			result, err := vm.richMethod(ri, cmpReverse[kind], l)
+			if _, declined := result.(NotImplementedType); err != nil || !declined {
+				return result, err
+			}
+		}
+		if lInst && !rInst && li.Prim != nil {
+			return vm.compareValue(kind, li.Prim, r)
+		}
+		if !lInst && rInst && ri.Prim != nil {
+			return vm.compareValue(kind, l, ri.Prim)
+		}
+		switch kind {
+		case "eq":
+			return isIdentical(l, r), nil
+		case "ne":
+			return !isIdentical(l, r), nil
+		}
+		return nil, vm.orderTypeError(kind, l, r)
+	}
+	switch kind {
 	case "eq":
-		return vm.eq(l, r)
+		return vm.eqBuiltin(l, r)
 	case "ne":
-		if li, ok := l.(*Instance); ok {
-			if _, ok := li.Class.Lookup("__ne__"); ok {
-				res, err := vm.callDunder(li, "__ne__", []Value{r})
-				if err != nil {
-					return false, err
-				}
-				return vm.truth(res)
-			}
-		}
-		ok, err := vm.eq(l, r)
-		return !ok, err
-	}
-	if li, ok := l.(*Instance); ok {
-		if _, has := li.Class.Lookup(cmpDunder[kind]); has {
-			res, err := vm.callDunder(li, cmpDunder[kind], []Value{r})
-			if err != nil {
-				return false, err
-			}
-			return vm.truth(res)
-		}
-		return false, vm.orderTypeError(kind, l, r)
-	}
-	if _, ok := r.(*Instance); ok {
-		return false, vm.orderTypeError(kind, l, r)
+		equal, err := vm.eqBuiltin(l, r)
+		return !equal, err
 	}
 	c, ordered, err := vm.cmp3(l, r, kind)
 	if err != nil {
@@ -726,6 +913,12 @@ func (vm *VM) orderTypeError(kind string, l, r Value) error {
 // cmp3 orders two non-instance values; ordered=false means an unordered
 // float comparison (NaN involved).
 func (vm *VM) cmp3(l, r Value, kind string) (c int, ordered bool, err error) {
+	if _, ok := l.(*DictView); ok {
+		return vm.viewOrder(l, r, kind)
+	}
+	if _, ok := r.(*DictView); ok {
+		return vm.viewOrder(l, r, kind)
+	}
 	if isNumber(l) && isNumber(r) {
 		if _, ok := l.(complex128); ok {
 			return 0, false, vm.orderTypeError(kind, l, r)
@@ -758,9 +951,10 @@ func (vm *VM) cmp3(l, r Value, kind string) (c int, ordered bool, err error) {
 		if b, ok := r.(*Tuple); ok {
 			return vm.cmpSeq(a.Items, b.Items, kind)
 		}
-	case *Set:
-		if b, ok := r.(*Set); ok {
-			return vm.cmpSets(a, b, kind)
+	case *Set, *FrozenSet:
+		leftSet, _ := setValue(l)
+		if b, ok := setValue(r); ok {
+			return vm.cmpSets(leftSet, b, kind)
 		}
 	}
 	return 0, false, vm.orderTypeError(kind, l, r)
@@ -798,8 +992,14 @@ func (vm *VM) cmpSeq(a, b []Value, kind string) (int, bool, error) {
 
 // cmpSets implements subset/superset ordering for < <= > >=.
 func (vm *VM) cmpSets(a, b *Set, kind string) (int, bool, error) {
-	sub := setIsSubset(a, b)
-	sup := setIsSubset(b, a)
+	sub, err := setIsSubset(a, b)
+	if err != nil {
+		return 0, false, err
+	}
+	sup, err := setIsSubset(b, a)
+	if err != nil {
+		return 0, false, err
+	}
 	switch {
 	case sub && sup:
 		return 0, true, nil
@@ -813,13 +1013,14 @@ func (vm *VM) cmpSets(a, b *Set, kind string) (int, bool, error) {
 	return 0, false, nil
 }
 
-func setIsSubset(a, b *Set) bool {
+func setIsSubset(a, b *Set) (bool, error) {
 	for _, e := range a.entries {
-		if _, ok := b.index[e.hk]; !ok {
-			return false
+		present, err := b.hasHK(e.hk, e.key)
+		if err != nil || !present {
+			return false, err
 		}
 	}
-	return true
+	return true, nil
 }
 
 func isIdentical(l, r Value) bool {
@@ -863,27 +1064,26 @@ func isIdentical(l, r Value) bool {
 }
 
 func (vm *VM) eq(l, r Value) (bool, error) {
-	if li, ok := l.(*Instance); ok {
-		if _, has := li.Class.Lookup("__eq__"); has {
-			res, err := vm.callDunder(li, "__eq__", []Value{r})
-			if err != nil {
-				return false, err
-			}
-			return vm.truth(res)
+	if _, ok := l.(*Instance); !ok {
+		if _, ok := r.(*Instance); !ok {
+			return vm.eqBuiltin(l, r)
 		}
-		if ri, ok := r.(*Instance); ok {
-			if _, has := ri.Class.Lookup("__eq__"); has {
-				res, err := vm.callDunder(ri, "__eq__", []Value{l})
-				if err != nil {
-					return false, err
-				}
-				return vm.truth(res)
-			}
-		}
-		return isIdentical(l, r), nil
 	}
-	if _, ok := r.(*Instance); ok {
-		return vm.eq(r, l)
+	return vm.compare("eq", l, r)
+}
+
+func (vm *VM) eqBuiltin(l, r Value) (bool, error) {
+	if _, ok := l.(*DictView); ok {
+		return vm.viewEqual(l, r)
+	}
+	if _, ok := r.(*DictView); ok {
+		return vm.viewEqual(l, r)
+	}
+	if d, ok := l.(*classDict); ok {
+		l = d.snapshot()
+	}
+	if d, ok := r.(*classDict); ok {
+		r = d.snapshot()
 	}
 	if isNumber(l) && isNumber(r) {
 		_, lc := l.(complex128)
@@ -927,7 +1127,10 @@ func (vm *VM) eq(l, r Value) (bool, error) {
 			return false, nil
 		}
 		for _, e := range a.entries {
-			bi, ok := b.lookupEntry(&e)
+			bi, ok, err := b.lookupEntry(&e)
+			if err != nil {
+				return false, err
+			}
 			if !ok {
 				return false, nil
 			}
@@ -941,12 +1144,19 @@ func (vm *VM) eq(l, r Value) (bool, error) {
 			}
 		}
 		return true, nil
-	case *Set:
-		b, ok := r.(*Set)
-		if !ok || a.Len() != b.Len() {
+	case *Set, *FrozenSet:
+		leftSet, _ := setValue(l)
+		b, ok := setValue(r)
+		if !ok || leftSet.Len() != b.Len() {
 			return false, nil
 		}
-		return setIsSubset(a, b), nil
+		return setIsSubset(leftSet, b)
+	case *Slice:
+		b, ok := r.(*Slice)
+		if !ok {
+			return false, nil
+		}
+		return vm.eqSeq([]Value{a.Lower, a.Upper, a.Step}, []Value{b.Lower, b.Upper, b.Step})
 	case *Range:
 		b, ok := r.(*Range)
 		if !ok {
@@ -1040,8 +1250,19 @@ func (vm *VM) contains(container, item Value) (bool, error) {
 	case *Dict:
 		_, ok, err := c.Get(item)
 		return ok, err
+	case *classDict:
+		if name, ok := item.(string); ok {
+			_, found := c.cls.NS[name]
+			return found, nil
+		}
+		_, err := hashKey(item)
+		return false, err
 	case *Set:
 		return c.Has(item)
+	case *FrozenSet:
+		return c.set.Has(item)
+	case *DictView:
+		return vm.viewContains(c, item)
 	case *Range:
 		n, ok := asInt(item)
 		if !ok {
@@ -1125,8 +1346,14 @@ func (vm *VM) truth(v Value) (bool, error) {
 		return len(t.Items) > 0, nil
 	case *Dict:
 		return t.Len() > 0, nil
+	case *classDict:
+		return len(t.cls.NS) != 0, nil
 	case *Set:
 		return t.Len() > 0, nil
+	case *FrozenSet:
+		return t.set.Len() > 0, nil
+	case *DictView:
+		return t.length() != 0, nil
 	case *Range:
 		return t.Len() > 0, nil
 	case *big.Int:
@@ -1173,8 +1400,14 @@ func (vm *VM) diasporeLen(v Value) (int64, error) {
 		return int64(len(t.Items)), nil
 	case *Dict:
 		return int64(t.Len()), nil
+	case *classDict:
+		return int64(len(t.cls.NS)), nil
 	case *Set:
 		return int64(t.Len()), nil
+	case *FrozenSet:
+		return int64(t.set.Len()), nil
+	case *DictView:
+		return int64(t.length()), nil
 	case *Range:
 		return t.Len(), nil
 	case *Instance:
@@ -1310,6 +1543,15 @@ func (vm *VM) getIndex(o, k Value) (Value, error) {
 			return nil, newErrorArgs("KeyError", k)
 		}
 		return v, nil
+	case *classDict:
+		if name, ok := k.(string); ok {
+			if value, found := t.cls.NS[name]; found {
+				return value, nil
+			}
+		} else if _, err := hashKey(k); err != nil {
+			return nil, err
+		}
+		return nil, newErrorArgs("KeyError", k)
 	case *Range:
 		if sl, ok := k.(*Slice); ok {
 			return sliceRange(t, sl)

@@ -171,6 +171,8 @@ func reprNoVM(v Value) string {
 	switch t := v.(type) {
 	case NoneType:
 		return "None"
+	case NotImplementedType:
+		return "NotImplemented"
 	case bool:
 		if t {
 			return "True"
@@ -205,13 +207,15 @@ func reprNoVM(v Value) string {
 
 func (vm *VM) repr(v Value) (string, error) {
 	switch v.(type) {
-	case *List, *Tuple, *Dict:
+	case *List, *Tuple, *Dict, *DictView:
 		if vm.repring[v] {
 			switch v.(type) {
 			case *List:
 				return "[...]", nil
 			case *Tuple:
 				return "(...)", nil
+			case *DictView:
+				return "...", nil
 			default:
 				return "{...}", nil
 			}
@@ -224,6 +228,11 @@ func (vm *VM) repr(v Value) (string, error) {
 		return "None", nil
 	case EllipsisType:
 		return "Ellipsis", nil
+	case NotImplementedType:
+		return "NotImplemented", nil
+	case *classDict:
+		s, err := vm.repr(t.snapshot())
+		return "mappingproxy(" + s + ")", err
 	case bool:
 		if t {
 			return "True", nil
@@ -270,6 +279,18 @@ func (vm *VM) repr(v Value) (string, error) {
 			parts = append(parts, ks+": "+vs)
 		}
 		return "{" + strings.Join(parts, ", ") + "}", nil
+	case *DictView:
+		parts, err := vm.reprAll(t.elements())
+		if err != nil {
+			return "", err
+		}
+		return "dict_" + t.kind + "([" + strings.Join(parts, ", ") + "])", nil
+	case *FrozenSet:
+		if t.set.Len() == 0 {
+			return "frozenset()", nil
+		}
+		s, err := vm.repr(t.set)
+		return "frozenset(" + s + ")", err
 	case *Set:
 		if t.Len() == 0 {
 			return "set()", nil
@@ -429,6 +450,9 @@ func (vm *VM) excStr(inst *Instance) (string, error) {
 	if _, ok := inst.Class.Lookup("__str__"); ok {
 		return vm.str(inst)
 	}
+	if message, ok := unicodeErrorStr(inst); ok {
+		return message, nil
+	}
 	args := excArgs(inst)
 	if inst.Class.IsSub(excClasses["KeyError"]) && len(args) == 1 {
 		return vm.repr(args[0])
@@ -440,6 +464,56 @@ func (vm *VM) excStr(inst *Instance) (string, error) {
 		return vm.str(args[0])
 	}
 	return vm.repr(&Tuple{Items: args})
+}
+
+func unicodeErrorStr(inst *Instance) (string, bool) {
+	encoding, hasEncoding := inst.D["encoding"].(string)
+	reason, hasReason := inst.D["reason"].(string)
+	start, hasStart := asInt(inst.D["start"])
+	end, hasEnd := asInt(inst.D["end"])
+	if !hasEncoding || !hasReason || !hasStart || !hasEnd || start < 0 || end <= start {
+		return "", false
+	}
+	if inst.Class.IsSub(excClasses["UnicodeEncodeError"]) {
+		text, ok := inst.D["object"].(string)
+		if !ok {
+			return "", false
+		}
+		if end > start+1 {
+			return fmt.Sprintf("'%s' codec can't encode characters in position %d-%d: %s",
+				encoding, start, end-1, reason), true
+		}
+		index := int64(0)
+		for _, r := range text {
+			if index == start {
+				var escaped string
+				switch {
+				case r <= 0xff:
+					escaped = fmt.Sprintf("\\x%02x", r)
+				case r <= 0xffff:
+					escaped = fmt.Sprintf("\\u%04x", r)
+				default:
+					escaped = fmt.Sprintf("\\U%08x", r)
+				}
+				return fmt.Sprintf("'%s' codec can't encode character '%s' in position %d: %s",
+					encoding, escaped, start, reason), true
+			}
+			index++
+		}
+	}
+	if inst.Class.IsSub(excClasses["UnicodeDecodeError"]) {
+		data, ok := inst.D["object"].([]byte)
+		if !ok || start >= int64(len(data)) {
+			return "", false
+		}
+		if end > start+1 {
+			return fmt.Sprintf("'%s' codec can't decode bytes in position %d-%d: %s",
+				encoding, start, end-1, reason), true
+		}
+		return fmt.Sprintf("'%s' codec can't decode byte 0x%02x in position %d: %s",
+			encoding, data[start], start, reason), true
+	}
+	return "", false
 }
 
 type fmtSpec struct {

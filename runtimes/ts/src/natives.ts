@@ -11,12 +11,15 @@ import {
   DiasporeList,
   DiasporeFile,
   NativeModule,
+  NativeObject,
+  BuiltinType,
   Builtin,
   typeName,
   asIndex,
   asFloat,
   intFromFloat,
   strLen,
+  strCmp,
   diasporeErr,
   DiasporeError,
   makeExc,
@@ -25,8 +28,8 @@ import {
 import { reprString, round6 } from "./format.ts";
 import { jsonDumps, jsonLoads } from "./json.ts";
 import { iterToArray } from "./iter.ts";
-import { argCount, needArgs, wantStr } from "./helpers.ts";
-import { bi } from "./builtins.ts";
+import { argCount, needArgs, wantStr, noKw } from "./helpers.ts";
+import { bi, readStdinSync } from "./builtins.ts";
 import { decodeBytes } from "./methods.ts";
 import { makeReModule } from "./re.ts";
 import type { Interp } from "./interp.ts";
@@ -39,6 +42,7 @@ export function makeNativeModules(I: Interp): Map<string, NativeModule> {
     ["json", makeJSONModule()],
     ["random", makeRandomModule(I)],
     ["sys", makeSysModule(I)],
+    ["_os", makeOSModule()],
     ["net", makeStubModule("net", ["listen", "connect", "accept", "recv", "send", "close", "peer"])],
     ["re", makeReModule(I)],
     ["tasks", makeStubModule("tasks", ["spawn", "channel", "lock"])],
@@ -312,16 +316,24 @@ class Rng {
   }
 }
 
-function makeRandomModule(I: Interp): NativeModule {
-  let rng = new Rng(I.deterministic ? 0 : Date.now() >>> 0);
+function makeRandomMethods(I: Interp, seed: Value, scope: string): Map<string, Builtin> {
+  const initial = seed instanceof PyNoneT ? null : asIndex(seed);
+  if (!(seed instanceof PyNoneT) && initial === null) {
+    throw diasporeErr("TypeError", "seed must be an integer or None in diaspore");
+  }
+  let rng = new Rng(initial === null ? (I.deterministic ? 0 : Date.now() >>> 0) : Number(BigInt.asUintN(32, initial)));
   const seedFn = bi("seed", function* (_I, args): G<Value> {
-    argCount("seed", args, 1, 1);
-    const n = asIndex(args[0]);
-    if (n === null) throw diasporeErr("TypeError", "seed must be an integer in diaspore");
-    rng = new Rng(Number(BigInt.asUintN(32, n)));
+    argCount("seed", args, 0, 1);
+    const value = args[0] ?? NONE;
+    const n = value instanceof PyNoneT ? null : asIndex(value);
+    if (!(value instanceof PyNoneT) && n === null) {
+      throw diasporeErr("TypeError", "seed must be an integer or None in diaspore");
+    }
+    rng = new Rng(n === null ? (I.deterministic ? 0 : Date.now() >>> 0) : Number(BigInt.asUintN(32, n)));
     return NONE;
   });
-  const randomFn = bi("random", function* (): G<Value> {
+  const randomFn = bi("random", function* (_I, args): G<Value> {
+    argCount("random", args, 0, 0);
     return rng.random();
   });
   const randintFn = bi("randint", function* (_I, args): G<Value> {
@@ -356,23 +368,72 @@ function makeRandomModule(I: Interp): NativeModule {
       yield* doShuffle();
       return NONE;
     }
-    const order = yield* I2.effect("random", "shuffle", doShuffle);
+    const order = yield* I2.effect(scope, "shuffle", doShuffle);
     if (!(order instanceof DiasporeList)) {
       throw diasporeErr("TypeError", "shuffle journal entry is not a list");
     }
     l.items = [...order.items];
     return NONE;
   });
-  return new NativeModule(
-    "random",
-    new Map<string, Value>([
-      ["seed", I.journaled("random", "seed", seedFn)],
-      ["random", I.journaled("random", "random", randomFn)],
-      ["randint", I.journaled("random", "randint", randintFn)],
-      ["choice", I.journaled("random", "choice", choiceFn)],
-      ["shuffle", shuffleFn],
-    ]),
-  );
+  return new Map([
+    ["seed", I.journaled(scope, "seed", seedFn)],
+    ["random", I.journaled(scope, "random", randomFn)],
+    ["randint", I.journaled(scope, "randint", randintFn)],
+    ["choice", I.journaled(scope, "choice", choiceFn)],
+    ["shuffle", shuffleFn],
+  ]);
+}
+
+function makeRandomModule(I: Interp): NativeModule {
+  let instance = 0;
+  const randomType = new BuiltinType("Random", function* (I2, args, kw): G<Value> {
+    noKw("Random", kw);
+    argCount("Random", args, 0, 1);
+    return new NativeObject("Random", makeRandomMethods(I2, args[0] ?? NONE, "random.Random." + instance++));
+  });
+  I.types.set("Random", randomType);
+  const ns = new Map<string, Value>(makeRandomMethods(I, NONE, "random"));
+  ns.set("Random", randomType);
+  return new NativeModule("random", ns);
+}
+
+function makeSysStream(kind: "stdin" | "stdout" | "stderr"): NativeObject {
+  const methods = new Map<string, Builtin>();
+  if (kind === "stdin") {
+    for (const name of ["read", "readline"]) {
+      methods.set(name, bi(name, function* (I, args, kw): G<Value> {
+        noKw(name, kw);
+        argCount(name, args, 0, 1);
+        const size = args.length === 0 || args[0] instanceof PyNoneT ? -1n : asIndex(args[0]);
+        if (size === null) throw diasporeErr("TypeError", `'${typeName(args[0])}' object cannot be interpreted as an integer`);
+        if (size < -(1n << 63n) || size >= 1n << 63n) {
+          throw diasporeErr("OverflowError", "Python int too large to convert to C ssize_t");
+        }
+        if (!I.durable) return readStdinSync(Number(size), name === "readline");
+        return yield* I.effect("sys.stdin", name, function* (): G<Value> {
+          return readStdinSync(Number(size), name === "readline");
+        });
+      }));
+    }
+  } else {
+    methods.set("write", bi("write", function* (I, args, kw): G<Value> {
+      noKw("write", kw);
+      argCount("write", args, 1, 1);
+      const text = wantStr("write() argument", args[0]);
+      if (!I.replaying) {
+        if (kind === "stdout") I.write(text);
+        else I.ewrite(text);
+      }
+      return BigInt(strLen(text));
+    }));
+  }
+  methods.set("flush", bi("flush", function* (_I, args, kw): G<Value> {
+    noKw("flush", kw);
+    argCount("flush", args, 0, 0);
+    // Writes go straight to the configured sink; the interpreter has no output buffer.
+    return NONE;
+  }));
+  return new NativeObject("TextIOWrapper", methods);
 }
 
 // --------------------------------------------------------------------------
@@ -384,6 +445,28 @@ function makeSysModule(I: Interp): NativeModule {
     new Map<string, Value>([
       ["argv", new DiasporeList(I.argv.map((a) => a as Value))],
       ["platform", "diaspore-ts"],
+      ["stdin", makeSysStream("stdin")],
+      ["stdout", makeSysStream("stdout")],
+      ["stderr", makeSysStream("stderr")],
+      ["getrecursionlimit", bi("getrecursionlimit", function* (I2, args): G<Value> {
+        argCount("getrecursionlimit", args, 0, 0);
+        return BigInt(I2.maxDepth);
+      })],
+      ["setrecursionlimit", bi("setrecursionlimit", function* (I2, args): G<Value> {
+        argCount("setrecursionlimit", args, 1, 1);
+        const limit = asIndex(args[0]);
+        if (limit === null) throw diasporeErr("TypeError", `'${typeName(args[0])}' object cannot be interpreted as an integer`);
+        if (limit < -(1n << 31n) || limit >= 1n << 31n) {
+          throw diasporeErr("OverflowError", "Python int too large to convert to C int");
+        }
+        if (limit < 1n) throw diasporeErr("ValueError", "recursion limit must be greater or equal than 1");
+        const effective = Math.min(Number(limit), I2.depthCap);
+        if (effective <= I2.depth) {
+          throw diasporeErr("RecursionError", `cannot set the recursion limit to ${limit} at the recursion depth ${I2.depth}: the limit is too low`);
+        }
+        I2.maxDepth = effective;
+        return NONE;
+      })],
       [
         "exit",
         bi("exit", function* (_I, args): G<Value> {
@@ -435,6 +518,64 @@ function makeFlowModule(): NativeModule {
 // --------------------------------------------------------------------------
 // open() and file methods (capability "fs")
 
+function makeOSModule(): NativeModule {
+  const ns = new Map<string, Value>();
+  ns.set("getcwd", bi("getcwd", function* (I, args): G<Value> {
+    argCount("getcwd", args, 0, 0);
+    I.requireCap("fs");
+    try {
+      return process.cwd();
+    } catch (error) {
+      throw filesystemError(error, ".");
+    }
+  }));
+  ns.set("realpath", bi("realpath", function* (I, args): G<Value> {
+    argCount("realpath", args, 1, 1);
+    return I.requireFS("read", wantStr("path", args[0]));
+  }));
+  ns.set("kind", bi("kind", function* (I, args): G<Value> {
+    argCount("kind", args, 1, 1);
+    const path = wantStr("path", args[0]);
+    const real = I.requireFS("read", path);
+    try {
+      const stat = nodeFs.statSync(real);
+      if (stat.isFile()) return "file";
+      if (stat.isDirectory()) return "dir";
+      return "other";
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return NONE;
+      throw filesystemError(error, path);
+    }
+  }));
+  ns.set("listdir", bi("listdir", function* (I, args): G<Value> {
+    argCount("listdir", args, 1, 1);
+    const path = wantStr("path", args[0]);
+    const real = I.requireFS("read", path);
+    try {
+      return new DiasporeList(nodeFs.readdirSync(real).sort(strCmp));
+    } catch (error) {
+      throw filesystemError(error, path);
+    }
+  }));
+  return new NativeModule("_os", ns);
+}
+
+function filesystemError(error: unknown, path: string): DiasporeError {
+  const err = error as NodeJS.ErrnoException;
+  switch (err.code) {
+    case "ENOENT":
+      return diasporeErr("FileNotFoundError", `[Errno 2] No such file or directory: ${reprString(path)}`);
+    case "ENOTDIR":
+      return diasporeErr("NotADirectoryError", `[Errno 20] Not a directory: ${reprString(path)}`);
+    case "EACCES":
+    case "EPERM":
+      return diasporeErr("PermissionError", `[Errno 13] Permission denied: ${reprString(path)}`);
+    default:
+      return diasporeErr("OSError", err.message);
+  }
+}
+
 /** Open a file after enforcing the interpreter's filesystem policy. */
 export function* biOpen(I: Interp, args: Value[], kw: KwArgs): G<Value> {
   argCount("open", args, 1, 2);
@@ -445,6 +586,16 @@ export function* biOpen(I: Interp, args: Value[], kw: KwArgs): G<Value> {
   if (kv !== undefined) mode = wantStr("mode", kv);
   if (!["r", "w", "a", "rb", "wb"].includes(mode)) {
     throw diasporeErr("ValueError", `invalid mode: '${mode}'`);
+  }
+  const encoding = kw.get("encoding");
+  if (encoding !== undefined && !(encoding instanceof PyNoneT)) {
+    const name = wantStr("encoding", encoding).toLowerCase().replace(/_/g, "-");
+    if (mode.includes("b")) {
+      throw diasporeErr("ValueError", "binary mode doesn't take an encoding argument");
+    }
+    if (name !== "utf-8" && name !== "utf8") {
+      throw diasporeErr("NotImplementedError", "only UTF-8 text is supported");
+    }
   }
   const kind = mode === "r" || mode === "rb" ? "read" : "write";
   const real = I.requireFS(kind, path);

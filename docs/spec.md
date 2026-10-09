@@ -47,10 +47,16 @@ shims in `src/diaspore/stdlib`. The other runtimes are in `runtimes/go`,
 The Python compiler API `compile_bundle(entry, search_paths=(...))` searches
 the entry directory, supplied import roots in order, then the bundled standard
 library. Pass `stdlib=False` to omit that final search root. The self-hosted
-compiler accepts repeated `--path DIR` arguments and searches the entry
-directory before those roots. These are compile-time source lookup paths;
-the VM imports modules from the resulting bundle rather than searching the
-host filesystem.
+compiler accepts repeated `--path DIR` arguments and one `--stdlib DIR`, and
+searches the entry directory, the `--path` roots in order, then the stdlib
+root. These are compile-time source lookup paths; the VM imports modules from
+the resulting bundle rather than searching the host filesystem.
+
+A module's `file` is its path relative to the compiler's working directory
+(absolute when outside it). Standard library modules are named
+`<stdlib>/NAME.py` (for example `<stdlib>/collections/__init__.py`) by every
+compiler, so a bundle does not depend on where Diaspore was installed. The
+runtime exposes `file` as the module's `__file__`.
 
 Every node is a JSON object with an `"op"` field. Statement nodes carry
 `"ln"` (1-based source line) for tracebacks. Fields that are optional are
@@ -68,12 +74,14 @@ either absent or `null`; VMs must treat both identically.
 | `bytes`   | Immutable byte string. |
 | `NoneType`| `None`. |
 | `list`, `tuple`, `dict`, `set` | `dict` preserves insertion order (as in CPython). `set` iteration order is unspecified and VM-dependent (as in CPython, whose sets are hash-ordered) - programs must not depend on it; the conformance corpus always sorts sets before printing. |
+| `frozenset` | Immutable, hashable set; compares equal to a `set` with the same members. Iteration order is unspecified. |
 | `range`   | Lazy; `range(start, stop, step)`. |
 | function, bound method, class, instance, module, generator, file | See below. |
 
 Hashable (usable as dict key / set member): `int`, `float`, `bool`, `str`,
-`bytes`, `None`, `tuple` of hashables. Numeric keys unify like Python:
-`1`, `1.0`, and `True` are the same key. Class instances hash by identity.
+`bytes`, `None`, `tuple` of hashables, `frozenset`. Numeric keys unify like Python:
+`1`, `1.0`, and `True` are the same key. User instances use `__hash__` and
+`__eq__` for dictionary keys and set membership (section 6).
 
 ### 2.1 Constants
 
@@ -214,6 +222,14 @@ the evaluated bases (default `object`). Multiple inheritance uses the C3 MRO
   MRO class dicts. Plain functions found on a
   class bind as methods (`self` prepended). `staticmethod(f)` / `classmethod(f)`
   wrappers are supported as builtins.
+  This also applies to functions assigned to a class after its definition.
+- Classes expose `__bases__` and a live read-only `__dict__` namespace view.
+  `setattr` and `delattr` update class-owned attributes; deleting an inherited
+  attribute raises `AttributeError`.
+- Instance assignment and deletion dispatch inherited `__setattr__` and
+  `__delattr__` hooks, including calls through `setattr` and `delattr`.
+  `object.__setattr__` and `object.__delattr__` bypass overrides while honoring
+  property setters/deleters; `super()` can delegate to these base methods.
 - Instantiation `C(...)` creates the instance then calls `C.__init__` if defined
   (must return `None`).
 - `super()` (zero-arg, inside a method) and `super(C, obj)` both work: lookup
@@ -223,12 +239,33 @@ the evaluated bases (default `object`). Multiple inheritance uses the C3 MRO
   `__add__ __radd__ __sub__ __rsub__ __mul__ __rmul__ __truediv__ __floordiv__ __mod__`
   `__matmul__ __rmatmul__` - and for augmented assignment, `__iadd__ __isub__
   __imul__ __imatmul__` etc. (`__i<op>__` tried first, falling back to the
-  plain operator; there is no `NotImplemented` protocol) -
+  plain operator when absent or returning `NotImplemented`) -
   `__neg__ __len__ __getitem__ __setitem__ __delitem__ __contains__ __iter__ __next__`
-  `__call__ __bool__ __hash__`(ignored - identity hashing) `__enter__ __exit__ __getattr__`.
-  `__eq__` falls back to identity; ordering ops without hooks raise `TypeError`.
-  `x != y` uses `__ne__`, else negated `__eq__`. `in` uses `__contains__`, else iteration.
+  `__call__ __bool__ __hash__ __enter__ __exit__ __getattr__ __setattr__ __delattr__`.
+  Binary arithmetic and comparisons honor the `NotImplemented` singleton:
+  reflected hooks are tried in Python's order, with subclass priority.
+  Unsupported arithmetic and ordering raise `TypeError`; exhausted equality
+  and inequality comparisons fall back to identity and its negation.
+  A missing `__ne__` delegates to `__eq__`, negating a supported result.
+  `in` uses `__contains__`, else iteration.
   `str(x)` uses `__str__`, else `__repr__`, else `<ClassName object>`.
+- `hash`, dictionaries, and sets dispatch user-defined `__hash__`. Hashes must
+  be integers; `-1` is normalized to `-2`. Collisions compare keys using
+  `__eq__`, including comparisons against builtin keys and nested tuple keys.
+  `__hash__ = None` makes instances unhashable. Defining `__eq__` without
+  `__hash__` sets `__hash__` to `None`; explicit `object.__hash__` restores
+  identity hashing.
+
+Annotated assignments in module and class scopes populate `__annotations__`
+in definition order. The compiler initializes the scope's dictionary before
+its body when that scope contains annotated assignments, including assignments
+inside control flow but excluding nested scopes. A simple name annotation
+stores its evaluated expression after the value assignment, if any.
+With `from __future__ import annotations`, the stored value is the annotation's
+CPython `ast.unparse`-normalized source string instead. Repeated annotations
+replace values without changing key order. Non-simple targets do not add
+dictionary entries. Function annotations and function-local annotations remain
+stripped.
 
 Class keywords are carried in `kwargs`; `n: null` expands a mapping. An
 explicit metaclass is called with `(name, bases, namespace)` and class keywords.
@@ -275,6 +312,7 @@ BaseException
    |- ArithmeticError -- ZeroDivisionError, OverflowError
    |- AssertionError
    |- AttributeError
+   |- EOFError
    |- LookupError -- IndexError, KeyError
    |- NameError -- UnboundLocalError
    |- OSError -- PermissionError
@@ -309,22 +347,30 @@ verbatim (e.g. `division by zero`, `list index out of range`,
 (1 iterable or 2+ args; optional `key=`, `default=`), `any`, `all`, `abs`,
 `round(x, nd=None)` (banker's rounding; `round(2.5) == 2`; with `nd` returns float),
 `divmod`, `pow(a, b)`, `int(x, base=10)`, `float`, `str`, `bool`, `bytes`,
-`list`, `tuple`, `dict`, `set`, `ord`, `chr`, `hex`, `bin`, `oct`, `repr`,
+`list`, `tuple`, `dict`, `set`, `frozenset`, `ord`, `chr`, `hex`, `bin`, `oct`, `repr`,
 `type` (1-arg inspection or 3-arg class construction), `isinstance`, `issubclass`, `callable`, `hash`,
-`iter` (1-arg), `next(it, default?)`, `getattr(o, n, default?)`, `setattr`,
+`iter` (1-arg), `next(it, default?)`, `getattr(o, n, default?)`, `setattr`, `delattr`,
 `hasattr`, `id`, `input(prompt?)`, `open(path, mode="r")` (section 11.7),
 `staticmethod`, `classmethod`, `property`, `super`, `exit(code=0)`, `ascii(v)`
 (repr with non-ASCII backslash-escaped; also the f-string `!a` conversion),
 `format(v, spec="")` (the section 10 format engine), `object` (universal base:
 every class ends its MRO with it; `isinstance(x, object)` is `True` for every
-value), `Ellipsis` - plus every exception class from section 8, and the builtin type
+value), `Ellipsis`, `NotImplemented` - plus every exception class from section 8, and the builtin type
 objects (`type(1) is int`, `print(type(1))` -> `<class 'int'>`).
+`slice` is a builtin type with `start`, `stop`, and `step` attributes, usable
+in `isinstance` and as a subscript key.
 
 Every module executes with `__name__` bound in its globals: `"__main__"` for
-the entry module, the module's own name otherwise.
+the entry module, the module's own name otherwise. Compiled modules also expose
+`__file__`, the string stored in that module's bundle `file` field, including
+the entry module.
 
 `bool(x)`: `False` for `None`, `False`, numeric zero, empty str/bytes/
 containers/range; user classes via `__bool__` then `__len__`; else `True`.
+
+`input` writes its optional prompt and reads one line, stripping the trailing
+newline. End of input raises `EOFError("EOF when reading a line")` on runtimes
+with standard-input support.
 
 ### 9.1 Methods on builtin types (the pinned reflection surface)
 
@@ -341,18 +387,24 @@ with CPython semantics.
   3-tuple (`(s, "", "")` on no match; `rpartition` -> `("", "", s)`).
 - list: `append extend insert pop remove clear index count reverse sort copy`
   (`sort(key=None, reverse=False)`, stable).
-- dict: `get keys values items pop update setdefault clear copy` -
-  `keys()/values()/items()` return lists (documented deviation from CPython's
-  views; `items()` is a list of tuples).
+- dict: `get keys values items pop update setdefault clear copy`.
+  `keys()`, `values()`, and `items()` return live views with insertion-order
+  iteration, reversed iteration, length, membership, and CPython-style repr.
+  Key and item views compare as sets and support `- & | ^` with any iterable,
+  returning a set, plus `isdisjoint`. Value views compare by identity.
 - set: `add remove discard clear copy union intersection difference
   symmetric_difference issubset issuperset` (the `| & - ^` operators work too).
+- frozenset: `copy union intersection difference symmetric_difference issubset
+  issuperset isdisjoint`; `| & - ^` preserve the left operand's set type.
+  Methods returning sets return frozen sets; `copy` may return the same value.
 - tuple: `count index`.
 - bytes: `decode(encoding="utf-8") find split strip lstrip rstrip replace
   startswith endswith upper lower`.
 - generator: `send`, `throw`, `close`; iterators support the iterator protocol.
 
 `str(bytes)` is the repr (`b'...'`). `str.encode`/`bytes.decode` support
-`"utf-8"` and `"latin-1"`.
+`"utf-8"`, `"latin-1"`, and strict `"ascii"`. Non-ASCII input raises
+`UnicodeEncodeError` or `UnicodeDecodeError` for ASCII conversion.
 
 ## 10. Formatting (exact-parity requirements)
 
@@ -385,9 +437,15 @@ etc. If a bundled user module shares a name, the bundle wins.
   (`, ` and `: `; with indent: `,` + newline). Keys must be str; values map
   to diaspore types (`loads` numbers: int if integral literal else float).
 - 11.4 `random` - `seed(n)`, `random()`, `randint(a, b)`, `choice(seq)`,
-  `shuffle(list)`. *Sequences are VM-specific* - excluded from conformance.
+  `shuffle(list)`, and `Random(seed=None)` with independent generator state and
+  the same methods. Sequences are VM-specific; conformance checks invariants
+  and isolation rather than matching generated values.
 - 11.5 `sys` - `argv` (list[str]: program name then args after `--`),
   `exit(code=0)`, `platform` (`"diaspore-py"`, `"diaspore-go"`, `"diaspore-ts"`, or `"diaspore-lua"`), `stderr_write(s)`.
+  `stdin` supports `read(size=-1)` and `readline(size=-1)`; `stdout` and
+  `stderr` support `write(str)` (returning characters written) and `flush()`.
+  `getrecursionlimit()` and `setrecursionlimit(n)` expose the effective
+  language recursion limit, bounded by the host's cap (section 13.2).
 - 11.6 `net` (TCP) -
   `listen(host, port) -> int` (listener id; SO_REUSEADDR),
   `connect(host, port) -> int` (outbound; connection id),
@@ -399,7 +457,9 @@ etc. If a bundled user module shares a name, the bundle wins.
   against the scoped net policy (section 13.1) when one is set.
 - 11.7 `fs` is *not* a module - file I/O goes through builtin `open`:
   modes `r w a rb wb`; methods `read(n=-1) readline() write(data) close()`;
-  usable as a context manager; text mode is UTF-8.
+  usable as a context manager; text mode is UTF-8. The `encoding` keyword
+  accepts `None` and UTF-8 aliases; a non-None encoding in binary mode raises
+  `ValueError`. Other text encodings raise `NotImplementedError`.
 - 11.8 `re` - a *validated portable subset* of Python regular expressions
   (chosen so RE2 engines implement it exactly; patterns outside it raise
   `ValueError` on the runtimes rather than silently diverging).
@@ -433,6 +493,48 @@ etc. If a bundled user module shares a name, the bundle wins.
   Programs are responsible for their own determinism; the conformance corpus
   uses join ordering and channel causality (concurrency programs are pinned
   with committed `.expected` files, since CPython has no `tasks`).
+- `_os` is an internal native module backing filesystem operations in the
+  `os`, `os.path`, and `pathlib` shims. `getcwd()` returns the current directory
+  and requires `fs`; `kind(path)` returns `"file"`, `"dir"`, `"other"`, or `None`
+  for a missing path; `listdir(path)` returns sorted entry names; and
+  `realpath(path)` resolves symlinks. The latter three enforce the filesystem
+  read policy. Sorted directory listings deliberately replace CPython's
+  arbitrary listing order. With an in-memory filesystem overlay, the current
+  directory is `/`, paths normalize lexically, and directories are inferred
+  from file-key prefixes without consulting the host filesystem.
+  Lua uses `PWD`, lexical real paths, and file-handle-based kind detection;
+  directory listing raises `NotImplementedError` (see its runtime README).
+
+### 11.10 Standard library
+
+The pure-subset modules in `src/diaspore/stdlib` are compiled into bundles,
+not imported from the host Python installation. The Python CLI,
+`diaspore-go build`, `diaspore-ts build`, and browser compiler all ship these
+sources. Shims match CPython for the operations they implement and raise for
+unsupported requests; the table identifies restricted surfaces and deliberate
+compatibility differences. Native capability requirements still apply.
+
+| Modules | Supported surface and limits |
+|---|---|
+| `ast` | Syntax trees from `_pyparse`, the parser shared with `dspc`; line numbers only, no column or end positions. No `type_comments` or `feature_version`. `unparse` supports expressions. |
+| `base64`, `binascii` | Standard, URL-safe, and line-wrapped base64, base16, and binary encoding helpers. |
+| `hashlib` | Incremental SHA-256, SHA-1, and MD5. |
+| `zlib`, `gzip` | One-shot full DEFLATE decompression and checksum validation; compression emits stored blocks, so sizes differ from CPython. No streaming or file APIs; `zlib` has no preset dictionaries. |
+| `dataclasses` | Initialization, repr, equality, hashing, freezing, fields, defaults/factories, and `replace`. No inheritance, ordering, slots, keyword-only fields, `ClassVar`/`InitVar`, custom metadata, `unsafe_hash`, or recursive conversion helpers. |
+| `pathlib` | POSIX lexical paths and file read/write helpers through `open`; no metadata, traversal, resolution, filesystem mutation, Windows paths, glob matching, or URI conversion. |
+| `collections` | `namedtuple`, `OrderedDict`, `defaultdict`, `Counter`, and `deque`. |
+| `collections.abc` | Names for annotations and explicit inheritance; nominal checks only. No structural checks, virtual registration, abstract-method enforcement, generic aliases, or mixins. |
+| `threading`, `queue` | Threads, non-reentrant locks, conditions, events, and FIFO queues on `tasks` (section 11.9). Daemon threads only; no `RLock` or thread identities. Untimed waits and supported polling operations only; targets must handle their own exceptions. Requires `spawn`. |
+| `socket` | Blocking IPv4 TCP on `net` (section 11.6), using dotted-decimal addresses. `bind` records the address; `listen` reserves the port. Backlog is advisory. No timed/nonblocking I/O, descriptor APIs, or other families/types. Requires `net`. |
+| `asyncio` | Cooperative tasks with FIFO scheduling and logical-clock sleeps. |
+| `contextlib`, `copy` | Generator-based context managers and context helpers; shallow and deep copying. |
+| `functools`, `itertools`, `operator` | Functional programming, iterator, and callable-operator helpers. |
+| `fractions`, `string` | Rational arithmetic; string constants and `Template`. |
+| `io`, `types` | In-memory text/byte streams; type aliases, `SimpleNamespace`, and live read-only mapping proxies. |
+| `os`, `os.path` | Deterministic OS helpers and lexical path operations, without filesystem or process access. |
+| `unittest` | Test cases, assertions, and a deterministic text runner. |
+| `gc` | Compatibility helpers without control over VM memory management. |
+| `weakref` | References and containers retain their targets. `finalize` supports explicit invocation at most once, `detach`, `peek`, `alive`, and a stored `atexit` flag; it never runs automatically on collection or process exit. |
 
 ## 12. Deliberate deviations and exclusions
 
@@ -451,8 +553,6 @@ Unsupported or restricted features include:
 - Host threads; use the `tasks` API where available (section 11.9).
 - General user-defined descriptor protocols and `__slots__` storage semantics.
   Builtin `property` is supported, but is not a general descriptor implementation.
-- Custom instance hashing in the reference VM: dictionary and set keys use
-  identity for user instances.
 - `str.format`; use f-strings.
 - Positional class patterns in `match`; keyword class patterns are supported.
 - Percent-formatting on strings and bytes. It raises `TypeError` with
@@ -521,7 +621,9 @@ forbidden. For record/replay determinism with real effects, use durable flows
   hostile tenants, pair it with OS-level memory/time limits on the VM process.
 - Recursion depth - `--max-depth N` (default 1000 diaspore frames): exceeding
   it raises `RecursionError: maximum recursion depth exceeded` (catchable,
-  like Python).
+  like Python). `sys.setrecursionlimit(n)` validates a positive integer and
+  sets the effective limit to `min(n, host_cap)`; `getrecursionlimit()` returns
+  that effective limit. Sandbox code cannot raise the host-configured cap.
 - Wall-clock - hosts embed their own timeouts around `Run` (not a VM flag).
 
 Embedded VMs expose the same knobs programmatically.

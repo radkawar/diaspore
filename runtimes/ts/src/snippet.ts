@@ -38,7 +38,7 @@ export function compileSnippet(source: string, filename: string, mode: string): 
     const chunks: string[] = [];
     const errChunks: string[] = [];
     const vm = new Interp(dspcBundle(), {
-      argv: ["dspc", file, "--path", STDLIB_DIR],
+      argv: ["dspc", file, "--stdlib", STDLIB_DIR],
       caps: ["fs"],
       policy: { fs: { read: [dir, file, STDLIB_DIR], write: [] } },
       maxDepth: 3000,

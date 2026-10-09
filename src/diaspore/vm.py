@@ -20,6 +20,12 @@ import sys as _hostsys
 import threading
 import time as _hosttime
 import weakref
+from types import MappingProxyType
+
+_DICT_KEYS = type({}.keys())
+_DICT_VALUES = type({}.values())
+_DICT_ITEMS = type({}.items())
+_DICT_VIEWS = (_DICT_KEYS, _DICT_VALUES, _DICT_ITEMS)
 
 
 class BreakSig(Exception):
@@ -96,6 +102,8 @@ class DiasporeClass:
             if not isinstance(b, DiasporeClass):
                 self.prim = b
         self.ns = ns
+        if "__eq__" in ns and "__hash__" not in ns:
+            ns["__hash__"] = None
         self.mro = c3_mro(self)
         if _OBJECT is not None and _OBJECT not in self.mro:
             self.mro.append(_OBJECT)
@@ -137,13 +145,33 @@ def c3_mro(cls):
 class DiasporeInstance:
     """Store a sandbox instance's class, attributes, and primitive backing."""
 
-    __slots__ = ("cls", "d", "prim")
+    __slots__ = ("cls", "d", "prim", "interp")
 
-    def __init__(self, cls):
+    def __init__(self, cls, interp=None):
         """Initialize an instance with an empty attribute dictionary."""
         self.cls = cls
         self.prim = None
         self.d = {}
+        self.interp = interp
+
+    def __hash__(self):
+        """Dispatch sandbox hashing for host-backed dictionaries and sets."""
+        method = self.cls.lookup("__hash__")
+        if method is None:
+            raise DiasporeError(make_exc(
+                "TypeError", f"unhashable type: '{self.cls.name}'"))
+        if method is _MISSING or method is object.__hash__ or self.interp is None:
+            return object.__hash__(self)
+        value = self.interp.call_dunder(self, "__hash__", [])
+        if not isinstance(value, int):
+            raise DiasporeError(make_exc("TypeError", "__hash__ method should return an integer"))
+        return hash(value)
+
+    def __eq__(self, other):
+        """Dispatch sandbox equality when host containers compare keys."""
+        if self.interp is None:
+            return self is other
+        return self.interp.diaspore_eq(self, other)
 
 
 class DiasporeFunction:
@@ -493,6 +521,7 @@ EXC_TREE = [
     ("OverflowError", "ArithmeticError"),
     ("AssertionError", "Exception"),
     ("AttributeError", "Exception"),
+    ("EOFError", "Exception"),
     ("ImportError", "Exception"),
     ("ModuleNotFoundError", "ImportError"),
     ("LookupError", "Exception"),
@@ -545,6 +574,11 @@ def _exc_init(self, *args):
 
 OBJECT = DiasporeClass("object", [], {})
 _OBJECT = OBJECT
+_OBJECT_SETATTR = object()
+_OBJECT_DELATTR = object()
+OBJECT.ns["__setattr__"] = _OBJECT_SETATTR
+OBJECT.ns["__delattr__"] = _OBJECT_DELATTR
+OBJECT.ns["__hash__"] = object.__hash__
 
 
 def _build_exc_classes():
@@ -636,6 +670,8 @@ DICT_METHODS = {"get", "keys", "values", "items", "pop", "update", "setdefault",
                 "clear", "copy"}
 SET_METHODS = {"add", "remove", "discard", "clear", "copy", "union", "intersection",
                "difference", "symmetric_difference", "issubset", "issuperset"}
+FROZENSET_METHODS = {"copy", "union", "intersection", "difference",
+                     "symmetric_difference", "issubset", "issuperset", "isdisjoint"}
 TUPLE_METHODS = {"count", "index"}
 BYTES_METHODS = {"decode", "find", "split", "strip", "lstrip", "rstrip", "replace",
                  "startswith", "endswith", "upper", "lower"}
@@ -666,8 +702,6 @@ _DUNDER_BIN = {
 }
 _CMPOPS = {"eq": _op.eq, "ne": _op.ne, "lt": _op.lt, "le": _op.le,
            "gt": _op.gt, "ge": _op.ge}
-_CMP_DUNDER = {"eq": "__eq__", "ne": "__ne__", "lt": "__lt__", "le": "__le__",
-               "gt": "__gt__", "ge": "__ge__"}
 _CMP_SYM = {"lt": "<", "le": "<=", "gt": ">", "ge": ">="}
 
 
@@ -742,6 +776,7 @@ class Interp:
         }
         self.max_steps = max_steps
         self.max_depth = max_depth
+        self.recursion_limit = max_depth
         self.steps = 0
         self.depth = 0
         self.stdout = stdout or _hostsys.stdout
@@ -880,6 +915,7 @@ class Interp:
                           None, "<module>", name)
             frame.globals = frame.vars
             frame.vars["__name__"] = "__main__" if name == self.bundle["main"] else name
+            frame.vars["__file__"] = m["file"]
             mod = DiasporeModule(name, frame)
             self.modules[name] = mod
             try:
@@ -1419,12 +1455,7 @@ class Interp:
                     except Exception as e:
                         raise host_exc_to_diaspore(e) from None
             elif op == "attr":
-                o = self.ev(t["o"], fr)
-                if isinstance(o, DiasporeInstance) and t["n"] in o.d:
-                    del o.d[t["n"]]
-                else:
-                    raise DiasporeError(make_exc(
-                        "AttributeError", f"'{type_name(o)}' object has no attribute '{t['n']}'"))
+                self.del_attr(self.ev(t["o"], fr), t["n"])
             else:
                 raise DiasporeError(make_exc("TypeError", "cannot delete this target"))
 
@@ -1498,12 +1529,27 @@ class Interp:
                 if inplace and isinstance(l, DiasporeInstance):
                     iname = "__i" + left[2:]
                     if l.cls.lookup(iname) is not _MISSING:
-                        return self.call_dunder(l, iname, [r])
+                        result = self.call_dunder(l, iname, [r])
+                        if result is not NotImplemented:
+                            return result
+                right_first = (
+                    isinstance(l, DiasporeInstance) and isinstance(r, DiasporeInstance)
+                    and r.cls is not l.cls and r.cls.issub(l.cls)
+                    and r.cls.lookup(right) is not l.cls.lookup(right))
+                if right_first and r.cls.lookup(right) is not _MISSING:
+                    result = self.call_dunder(r, right, [l])
+                    if result is not NotImplemented:
+                        return result
                 if isinstance(l, DiasporeInstance) and l.cls.lookup(left) is not _MISSING:
-                    return self.call_dunder(l, left, [r])
-                if (right and isinstance(r, DiasporeInstance)
+                    result = self.call_dunder(l, left, [r])
+                    if result is not NotImplemented:
+                        return result
+                if (not right_first and isinstance(r, DiasporeInstance)
+                        and (not isinstance(l, DiasporeInstance) or l.cls is not r.cls)
                         and r.cls.lookup(right) is not _MISSING):
-                    return self.call_dunder(r, right, [l])
+                    result = self.call_dunder(r, right, [l])
+                    if result is not NotImplemented:
+                        return result
             sym = {"add": "+", "sub": "-", "mul": "*", "div": "/", "floordiv": "//",
                    "mod": "%", "pow": "**", "lshift": "<<", "rshift": ">>",
                    "bitand": "&", "bitor": "|", "bitxor": "^",
@@ -1577,13 +1623,14 @@ class Interp:
         if kind == "eq":
             return self.diaspore_eq(l, r)
         if kind == "ne":
-            if isinstance(l, DiasporeInstance) and l.cls.lookup("__ne__") is not _MISSING:
-                return self.truth(self.call_dunder(l, "__ne__", [r]))
+            if isinstance(l, DiasporeInstance) or isinstance(r, DiasporeInstance):
+                result = self._rich_compare(l, r, kind)
+                return l is not r if result is NotImplemented else self.truth(result)
             return not self.diaspore_eq(l, r)
         if isinstance(l, DiasporeInstance) or isinstance(r, DiasporeInstance):
-            d = _CMP_DUNDER[kind]
-            if isinstance(l, DiasporeInstance) and l.cls.lookup(d) is not _MISSING:
-                return self.truth(self.call_dunder(l, d, [r]))
+            result = self._rich_compare(l, r, kind)
+            if result is not NotImplemented:
+                return self.truth(result)
             raise DiasporeError(make_exc(
                 "TypeError",
                 f"'{_CMP_SYM[kind]}' not supported between instances of "
@@ -1593,16 +1640,34 @@ class Interp:
         except Exception as ex:
             raise host_exc_to_diaspore(ex) from None
 
+    def _rich_compare(self, l, r, kind):
+        reflected = {"eq": "eq", "ne": "ne", "lt": "gt", "le": "ge",
+                     "gt": "lt", "ge": "le"}[kind]
+        pairs = [(l, r, kind), (r, l, reflected)]
+        if (isinstance(l, DiasporeInstance) and isinstance(r, DiasporeInstance)
+                and r.cls is not l.cls and r.cls.issub(l.cls)):
+            pairs.reverse()
+        for obj, other, op in pairs:
+            if not isinstance(obj, DiasporeInstance):
+                continue
+            method = "__" + op + "__"
+            if obj.cls.lookup(method) is not _MISSING:
+                result = self.call_dunder(obj, method, [other])
+            elif op == "ne" and obj.cls.lookup("__eq__") is not _MISSING:
+                result = self.call_dunder(obj, "__eq__", [other])
+                if result is not NotImplemented:
+                    return not self.truth(result)
+            else:
+                continue
+            if result is not NotImplemented:
+                return result
+        return NotImplemented
+
     def diaspore_eq(self, l, r) -> bool:
         """Compare values structurally while honoring sandbox equality methods."""
-        if isinstance(l, DiasporeInstance):
-            if l.cls.lookup("__eq__") is not _MISSING:
-                return self.truth(self.call_dunder(l, "__eq__", [r]))
-            if isinstance(r, DiasporeInstance) and r.cls.lookup("__eq__") is not _MISSING:
-                return self.truth(self.call_dunder(r, "__eq__", [l]))
-            return l is r
-        if isinstance(r, DiasporeInstance):
-            return self.diaspore_eq(r, l)
+        if isinstance(l, DiasporeInstance) or isinstance(r, DiasporeInstance):
+            result = self._rich_compare(l, r, "eq")
+            return l is r if result is NotImplemented else self.truth(result)
         # Host equality would ignore sandbox __eq__ methods inside containers.
         # Container elements use identity-implies-equal, unlike top-level NaN.
         if isinstance(l, (list, tuple)) and type(l) is type(r):
@@ -1711,7 +1776,10 @@ class Interp:
 
     def e_set(self, e, fr):
         """Evaluate a set display."""
-        return set(self._eval_elts(e.get("elts", ()), fr))
+        try:
+            return set(self._eval_elts(e.get("elts", ()), fr))
+        except TypeError as exc:
+            raise host_exc_to_diaspore(exc) from None
 
     def _eval_elts(self, elts, fr):
         out = []
@@ -1733,17 +1801,14 @@ class Interp:
                         "TypeError", "argument after ** must be a mapping"))
                 out.update(v)
             else:
-                out[self.hashable(self.ev(entry["k"], fr))] = self.ev(entry["v"], fr)
+                key = self.ev(entry["k"], fr)
+                value = self.ev(entry["v"], fr)
+                try:
+                    out[key] = value
+                except TypeError as exc:
+                    raise host_exc_to_diaspore(exc) from None
         return out
 
-    def hashable(self, k):
-        """Require a hashable value and return it."""
-        try:
-            hash(k)
-        except Exception:
-            raise DiasporeError(make_exc(
-                "TypeError", f"unhashable type: '{type_name(k)}'")) from None
-        return k
 
     def e_fstring(self, e, fr):
         """Evaluate and format f-string components."""
@@ -1879,7 +1944,7 @@ class Interp:
         fr.self_ = frame_vars.get(p[0]) if p else None
         if fn.gen:
             return DiasporeGenerator(self, fn, fr)
-        if self.depth >= self.max_depth:
+        if self.depth >= min(self.max_depth, self.recursion_limit):
             raise DiasporeError(make_exc("RecursionError", "maximum recursion depth exceeded"))
         self.depth += 1
         try:
@@ -1973,7 +2038,7 @@ class Interp:
 
     def instantiate(self, cls: DiasporeClass, args, kwargs):
         """Construct a sandbox instance and invoke its initializer."""
-        inst = DiasporeInstance(cls)
+        inst = DiasporeInstance(cls, self)
         if cls.prim is not None:
             base = cls.prim.name
             # immutable primitives take their value from the constructor args
@@ -2022,6 +2087,7 @@ class Interp:
         if method in dunder:
             return dunder[method]
         allowed = {"dict": DICT_METHODS, "list": LIST_METHODS, "set": SET_METHODS,
+                   "frozenset": FROZENSET_METHODS,
                    "str": STR_METHODS, "tuple": TUPLE_METHODS,
                    "bytes": BYTES_METHODS}.get(tname)
         if allowed and method in allowed:
@@ -2056,6 +2122,10 @@ class Interp:
 
     def bind_attr(self, v, inst, cls):
         """Bind a descriptor to its instance or class."""
+        if v is _OBJECT_SETATTR:
+            return lambda n, value: self.object_setattr(inst, n, value)
+        if v is _OBJECT_DELATTR:
+            return lambda n: self.object_delattr(inst, n)
         if isinstance(v, DiasporeFunction):
             return BoundMethod(v, inst)
         if isinstance(v, StaticMethod):
@@ -2112,13 +2182,17 @@ class Interp:
                 if n == "__mro__":
                     return tuple(o.mro)
                 if n == "__bases__":
-                    return tuple(o.bases) if o.bases else (OBJECT,)
+                    return tuple(o.bases) if o.bases or o is OBJECT else (OBJECT,)
                 if n == "__dict__":
-                    return dict(o.ns)
+                    return MappingProxyType(o.ns)
                 if n == "__qualname__":
                     return o.name
                 raise DiasporeError(make_exc(
                     "AttributeError", f"type object '{o.name}' has no attribute '{n}'"))
+            if v is _OBJECT_SETATTR:
+                return self.object_setattr
+            if v is _OBJECT_DELATTR:
+                return self.object_delattr
             if isinstance(v, ClassMethod):
                 return BoundMethod(v.fn, o)
             if isinstance(v, StaticMethod):
@@ -2245,12 +2319,13 @@ class Interp:
         """Resolve an allowlisted attribute on a host primitive."""
         t = type(o)
         allowed = {str: STR_METHODS, list: LIST_METHODS, dict: DICT_METHODS,
-                   set: SET_METHODS, tuple: TUPLE_METHODS, bytes: BYTES_METHODS}.get(t)
+                   set: SET_METHODS, frozenset: FROZENSET_METHODS,
+                   tuple: TUPLE_METHODS, bytes: BYTES_METHODS}.get(t)
+        if t is MappingProxyType:
+            allowed = {"keys", "values", "items", "get", "copy"}
+        if t in (_DICT_KEYS, _DICT_ITEMS):
+            allowed = {"isdisjoint"}
         if allowed and n in allowed:
-            if t is dict and n in ("keys", "values", "items"):
-                return {"keys": lambda: list(o.keys()),
-                        "values": lambda: list(o.values()),
-                        "items": lambda: [tuple(kv) for kv in o.items()]}[n]
             if t is list and n == "sort":
                 return functools.partial(self._list_sort, o)
             if t in (list, tuple) and n in ("index", "count", "remove"):
@@ -2268,15 +2343,11 @@ class Interp:
                 o.attrs[n] = v
             return
         if isinstance(o, DiasporeInstance):
-            prop = o.cls.lookup(n)
-            if isinstance(prop, Property):
-                if prop.fset is None:
-                    raise DiasporeError(make_exc(
-                        "AttributeError", f"property '{n}' of "
-                        f"'{o.cls.name}' object has no setter"))
-                self.call(self.bind_attr(prop.fset, o, o.cls), [v], {})
+            hook = o.cls.lookup("__setattr__")
+            if hook is not _MISSING and hook is not _OBJECT_SETATTR:
+                self.call(self.bind_attr(hook, o, o.cls), [n, v], {})
                 return
-            o.d[n] = v
+            self.object_setattr(o, n, v)
             return
         if isinstance(o, DiasporeClass):
             o.ns[n] = v
@@ -2286,6 +2357,57 @@ class Interp:
             return
         raise DiasporeError(make_exc(
             "AttributeError", f"'{type_name(o)}' object has no attribute '{n}'"))
+
+    def object_setattr(self, o, n, v):
+        """Assign an instance attribute without invoking its override."""
+        if not isinstance(o, DiasporeInstance):
+            raise DiasporeError(make_exc("TypeError", "object.__setattr__ requires an instance"))
+        prop = o.cls.lookup(n)
+        if isinstance(prop, Property):
+            if prop.fset is None:
+                raise DiasporeError(make_exc(
+                    "AttributeError", f"property '{n}' of '{o.cls.name}' object has no setter"))
+            self.call(self.bind_attr(prop.fset, o, o.cls), [v], {})
+            return
+        o.d[n] = v
+
+    def object_delattr(self, o, n):
+        """Delete an instance attribute without invoking its override."""
+        if not isinstance(o, DiasporeInstance):
+            raise DiasporeError(make_exc("TypeError", "object.__delattr__ requires an instance"))
+        prop = o.cls.lookup(n)
+        if isinstance(prop, Property):
+            if prop.fdel is None:
+                raise DiasporeError(make_exc(
+                    "AttributeError", f"property '{n}' of '{o.cls.name}' object has no deleter"))
+            self.call(self.bind_attr(prop.fdel, o, o.cls), [], {})
+            return
+        if n not in o.d:
+            raise DiasporeError(make_exc(
+                "AttributeError", f"'{o.cls.name}' object has no attribute '{n}'"))
+        del o.d[n]
+
+    def del_attr(self, o, n):
+        """Delete an attribute through the instance hook or namespace."""
+        if isinstance(o, DiasporeInstance):
+            hook = o.cls.lookup("__delattr__")
+            if hook is not _MISSING and hook is not _OBJECT_DELATTR:
+                self.call(self.bind_attr(hook, o, o.cls), [n], {})
+                return
+            self.object_delattr(o, n)
+            return
+        if isinstance(o, DiasporeClass):
+            namespace = o.ns
+        elif isinstance(o, DiasporeFunction):
+            namespace = o.attrs
+        elif isinstance(o, DiasporeModule):
+            namespace = o.frame.vars
+        else:
+            namespace = {}
+        if n not in namespace:
+            raise DiasporeError(make_exc(
+                "AttributeError", f"'{type_name(o)}' object has no attribute '{n}'"))
+        del namespace[n]
 
 
     def get_index(self, o, k):
@@ -2299,8 +2421,6 @@ class Interp:
             return self.call_dunder_or_err(
                 o, "__getitem__", [k], f"'{o.cls.name}' object is not subscriptable")
         try:
-            if isinstance(o, dict) and not isinstance(k, slice):
-                self.hashable(k)
             return o[k]
         except DiasporeError:
             raise
@@ -2318,8 +2438,6 @@ class Interp:
                 f"'{o.cls.name}' object does not support item assignment")
             return
         try:
-            if isinstance(o, dict) and not isinstance(k, slice):
-                self.hashable(k)
             o[k] = v
         except DiasporeError:
             raise
@@ -2436,7 +2554,7 @@ class Interp:
         if isinstance(v, complex):
             return repr(v)  # CPython's complex repr is canonical: (3+4j), 1j
         if isinstance(v, (int, float, str, bytes, bool, range)) or v is None \
-                or v is Ellipsis:
+                or v is Ellipsis or v is NotImplemented:
             return repr(v)
         if isinstance(v, (list, tuple, dict)):
             if id(v) in self._repring:
@@ -2453,10 +2571,23 @@ class Interp:
                                        for k, x in v.items()) + "}"
             finally:
                 self._repring.discard(id(v))
+        if isinstance(v, _DICT_VIEWS):
+            if id(v) in self._repring:
+                return "..."
+            self._repring.add(id(v))
+            try:
+                return type(v).__name__ + "([" + ", ".join(
+                    self.diaspore_repr(x) for x in v) + "])"
+            finally:
+                self._repring.discard(id(v))
         if isinstance(v, set):
             if not v:
                 return "set()"
             return "{" + ", ".join(self.diaspore_repr(x) for x in v) + "}"
+        if isinstance(v, frozenset):
+            if not v:
+                return "frozenset()"
+            return "frozenset({" + ", ".join(self.diaspore_repr(x) for x in v) + "})"
         if isinstance(v, slice):
             parts = [
                 self.diaspore_repr(v.start),
@@ -2769,7 +2900,7 @@ def make_builtins(interp: Interp):
         return enumerate(I.as_host_iter(it), start)
 
     def _reversed(seq):
-        if isinstance(seq, (list, tuple, str, range, bytes)):
+        if isinstance(seq, (list, tuple, str, range, bytes)) or isinstance(seq, _DICT_VIEWS):
             return reversed(seq)
         raise DiasporeError(make_exc("TypeError", f"'{type_name(seq)}' object is not reversible"))
 
@@ -2866,12 +2997,18 @@ def make_builtins(interp: Interp):
             return TYPES["dict"]
         if isinstance(v, set):
             return TYPES["set"]
+        if isinstance(v, frozenset):
+            return TYPES["frozenset"]
+        if isinstance(v, slice):
+            return TYPES["slice"]
         if isinstance(v, range):
             return TYPES["range"]
         if isinstance(v, complex):
             return TYPES["complex"]
         if v is None:
             return TYPES["NoneType"]
+        if isinstance(v, _DICT_VIEWS):
+            return TYPES[type(v).__name__]
         return BuiltinType(type_name(v), (), lambda *a: None)
 
     def _getattr(o, n, *default):
@@ -2897,13 +3034,17 @@ def make_builtins(interp: Interp):
             (not isinstance(v, DiasporeInstance) and callable(v))
 
     def _hash(v):
-        if isinstance(v, DiasporeInstance):
-            return id(v) % (2**61)
         return hash(v)
 
-    def _open(path, mode="r"):
+    def _open(path, mode="r", *, encoding=None):
         if mode not in ("r", "w", "a", "rb", "wb"):
             raise DiasporeError(make_exc("ValueError", f"invalid mode: '{mode}'"))
+        if encoding is not None:
+            if "b" in mode:
+                raise DiasporeError(make_exc(
+                    "ValueError", "binary mode doesn't take an encoding argument"))
+            if encoding.lower().replace("_", "-") not in ("utf8", "utf-8"):
+                raise DiasporeError(make_exc("NotImplementedError", "only UTF-8 text is supported"))
         real = I.require_fs("read" if mode in ("r", "rb") else "write", path)
         if "b" in mode:
             return DiasporeFile(open(real, mode))
@@ -2950,7 +3091,7 @@ def make_builtins(interp: Interp):
         return []
 
     def _charge_sized(v):
-        if isinstance(v, (range, list, tuple, str, bytes, dict, set)):
+        if isinstance(v, (range, list, tuple, str, bytes, dict, set, frozenset)):
             I.fuel_n(len(v))
 
     def _list(v=None):
@@ -2971,6 +3112,12 @@ def make_builtins(interp: Interp):
         _charge_sized(v)
         return set(I.as_host_iter(v))
 
+    def _frozenset(v=()):
+        if isinstance(v, frozenset):
+            return v
+        _charge_sized(v)
+        return frozenset(I.as_host_iter(v))
+
     def _dict(*args, **kwargs):
         out = {}
         if len(args) > 1:
@@ -2983,11 +3130,11 @@ def make_builtins(interp: Interp):
                 out.update(raw)
             elif isinstance(v, DiasporeInstance) and v.cls.lookup("keys") is not _MISSING:
                 for k in I.call_dunder(v, "keys", []):
-                    out[I.hashable(k)] = I.get_index(v, k)
+                    out[k] = I.get_index(v, k)
             else:
                 for pair in I.as_host_iter(v):
                     k, val = list(I.as_host_iter(pair))
-                    out[I.hashable(k)] = val
+                    out[k] = val
         out.update(kwargs)
         return out
 
@@ -3068,7 +3215,7 @@ def make_builtins(interp: Interp):
             I.stdout.flush()
         line = _hostsys.stdin.readline()
         if not line:
-            raise DiasporeError(make_exc("RuntimeError", "EOF when reading a line"))
+            raise DiasporeError(make_exc("EOFError", "EOF when reading a line"))
         return line.rstrip("\n")
 
     def _input(prompt=""):
@@ -3090,6 +3237,11 @@ def make_builtins(interp: Interp):
         "tuple": BuiltinType("tuple", (tuple,), _tuple),
         "dict": BuiltinType("dict", (dict,), _dict),
         "set": BuiltinType("set", (set,), _set),
+        "frozenset": BuiltinType("frozenset", (frozenset,), _frozenset),
+        "slice": BuiltinType("slice", (slice,), _slice),
+        "dict_keys": BuiltinType("dict_keys", (_DICT_KEYS,), _DICT_KEYS),
+        "dict_values": BuiltinType("dict_values", (_DICT_VALUES,), _DICT_VALUES),
+        "dict_items": BuiltinType("dict_items", (_DICT_ITEMS,), _DICT_ITEMS),
         "range": BuiltinType("range", (range,), _range),
         "type": BuiltinType("type", (), _type),
         "NoneType": BuiltinType("NoneType", (type(None),), lambda: None),
@@ -3105,6 +3257,7 @@ def make_builtins(interp: Interp):
         "repr": _repr, "isinstance": _isinstance, "issubclass": _issubclass,
         "callable": _callable, "hash": _hash, "id": id, "iter": _iter, "next": _next,
         "getattr": _getattr, "setattr": lambda o, n, v: I.set_attr(o, n, v),
+        "delattr": I.del_attr,
         "hasattr": _hasattr, "input": _input, "open": _open, "exit": _exit,
         "staticmethod": StaticMethod, "classmethod": ClassMethod,
         "property": lambda fget=None, fset=None, fdel=None, doc=None:
@@ -3116,6 +3269,7 @@ def make_builtins(interp: Interp):
         "dir": lambda o=None: (_dir(o)),
         "compile": _compile, "exec": _exec, "eval": _eval,
         "Ellipsis": Ellipsis,
+        "NotImplemented": NotImplemented,
     }
 
     def _await_helper(x):
@@ -3133,7 +3287,7 @@ def make_builtins(interp: Interp):
 
     b[".await"] = _await_helper
     for name, t in TYPES.items():
-        if name != "NoneType":
+        if name not in ("NoneType", "dict_keys", "dict_values", "dict_items"):
             b[name] = t
     b.update(EXC_CLASSES)
     return b
@@ -3143,6 +3297,25 @@ def make_builtins(interp: Interp):
 def make_native_modules(interp: Interp):
     """Build native modules using the interpreter's capabilities and journal."""
     I = interp
+
+    def _os_getcwd():
+        I.require_cap("fs")
+        return os.getcwd()
+
+    def _os_kind(path):
+        real = I.require_fs("read", path)
+        if os.path.isfile(real):
+            return "file"
+        if os.path.isdir(real):
+            return "dir"
+        return "other" if os.path.exists(real) else None
+
+    os_mod = NativeModule("_os", {
+        "getcwd": _os_getcwd,
+        "kind": _os_kind,
+        "listdir": lambda path: sorted(os.listdir(I.require_fs("read", path))),
+        "realpath": lambda path: I.require_fs("read", path),
+    })
 
     if I.deterministic:
         _clock = [0.0]
@@ -3219,7 +3392,28 @@ def make_native_modules(interp: Interp):
             if I.durable else (rng.shuffle(lst), lst)[1]
         lst[:] = order
 
+    def _random_instance(seed=None):
+        instance = _hostrandom.Random(seed)
+
+        def shuffle(values):
+            if not isinstance(values, list):
+                raise DiasporeError(make_exc("TypeError", "shuffle() requires a list"))
+            order = I.effect("random.Random", "shuffle",
+                             lambda: (instance.shuffle(values), list(values))[1]) \
+                if I.durable else (instance.shuffle(values), values)[1]
+            values[:] = order
+
+        return NativeObject("Random", {
+            "seed": I.journaled("random.Random", "seed", lambda n=None: instance.seed(n)),
+            "random": I.journaled("random.Random", "random", instance.random),
+            "randint": I.journaled("random.Random", "randint", instance.randint),
+            "choice": I.journaled("random.Random", "choice",
+                                  lambda seq: instance.choice(list(I.as_host_iter(seq)))),
+            "shuffle": shuffle,
+        })
+
     random_mod = NativeModule("random", {
+        "Random": _random_instance,
         "seed": I.journaled("random", "seed", lambda n=None: rng.seed(n)),
         "random": I.journaled("random", "random", rng.random),
         "randint": I.journaled("random", "randint", rng.randint),
@@ -3234,11 +3428,42 @@ def make_native_modules(interp: Interp):
         if not I.replaying:
             I.stderr.write(s)
 
+    def _stream_write(stream, text):
+        if not isinstance(text, str):
+            raise DiasporeError(make_exc("TypeError", "write() argument must be str"))
+        if not I.replaying:
+            stream.write(text)
+        return len(text)
+
+    def _setrecursionlimit(limit):
+        if not isinstance(limit, int):
+            raise DiasporeError(make_exc("TypeError", "an integer is required"))
+        if limit < 1:
+            raise DiasporeError(make_exc(
+                "ValueError", "recursion limit must be greater or equal than 1"))
+        if limit <= I.depth:
+            raise DiasporeError(make_exc("RecursionError", "recursion limit is too low"))
+        I.recursion_limit = min(limit, I.max_depth)
+
     sys_mod = NativeModule("sys", {
         "argv": list(I.argv),
         "exit": _sys_exit,
         "platform": "diaspore-py",
         "stderr_write": _stderr_write,
+        "stdout": NativeObject("TextIOWrapper", {
+            "write": lambda text: _stream_write(I.stdout, text),
+            "flush": lambda: I.stdout.flush(),
+        }),
+        "stderr": NativeObject("TextIOWrapper", {
+            "write": lambda text: _stream_write(I.stderr, text),
+            "flush": lambda: I.stderr.flush(),
+        }),
+        "stdin": NativeObject("TextIOWrapper", {
+            "read": lambda size=-1: _hostsys.stdin.read(size),
+            "readline": lambda size=-1: _hostsys.stdin.readline(size),
+        }),
+        "getrecursionlimit": lambda: I.recursion_limit,
+        "setrecursionlimit": _setrecursionlimit,
     })
 
     sockets: dict[int, _socket.socket] = {}
@@ -3312,7 +3537,7 @@ def make_native_modules(interp: Interp):
 
     return {"time": time_mod, "math": math_mod, "json": json_mod,
             "random": random_mod, "sys": sys_mod, "net": net_mod,
-            "flow": flow_mod,
+            "flow": flow_mod, "_os": os_mod,
             "re": make_re_module(I), "tasks": make_tasks_module(I)}
 
 

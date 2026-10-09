@@ -869,6 +869,7 @@ func (c *compiler) compileClass(s node) execFn {
 	return func(fr *frame) error {
 		var bases []*Class
 		var primBase *BuiltinType
+		primIndex := 0
 		checkBase := func(bv Value) error {
 			switch cls := bv.(type) {
 			case *Class:
@@ -877,6 +878,7 @@ func (c *compiler) compileClass(s node) execFn {
 			case *BuiltinType:
 				if subclassablePrim(cls.Name) {
 					primBase = cls
+					primIndex = len(bases)
 					return nil
 				}
 			}
@@ -944,7 +946,7 @@ func (c *compiler) compileClass(s node) execFn {
 		if err := bodyFn(cf); err != nil {
 			return err
 		}
-		cls, err := vm.buildClass(name, bases, cf.vars, cf.varOrder, metaclass, kwargs, primBase)
+		cls, err := vm.buildClass(name, bases, cf.vars, cf.varOrder, metaclass, kwargs, primBase, primIndex)
 		if err != nil {
 			return err
 		}
@@ -1648,14 +1650,7 @@ func (c *compiler) compileDelete(t node) execFn {
 			if err != nil {
 				return err
 			}
-			if inst, ok := o.(*Instance); ok {
-				if _, ok := inst.D[name]; ok {
-					delete(inst.D, name)
-					return nil
-				}
-			}
-			return newErrorf("AttributeError", "'%s' object has no attribute '%s'",
-				typeName(o), name)
+			return vm.delAttr(o, name)
 		}
 	}
 	c.fail("diaspore: cannot delete %q target", nStr(t, "op"))
@@ -2222,11 +2217,7 @@ func (c *compiler) compileCompare(e node) evalFn {
 					}
 				}
 			}
-			ok, err := vm.compare(kind, l, r)
-			if err != nil {
-				return nil, err
-			}
-			return ok, nil
+			return vm.compareValue(kind, l, r)
 		}
 	}
 	return func(fr *frame) (Value, error) {
@@ -2239,12 +2230,19 @@ func (c *compiler) compileCompare(e node) evalFn {
 			if err != nil {
 				return nil, err
 			}
-			ok, err := vm.compare(kind, left, right)
+			result, err := vm.compareValue(kind, left, right)
+			if err != nil {
+				return nil, err
+			}
+			if i == len(ops)-1 {
+				return result, nil
+			}
+			ok, err := vm.truth(result)
 			if err != nil {
 				return nil, err
 			}
 			if !ok {
-				return false, nil
+				return result, nil
 			}
 			left = right
 		}
@@ -2543,9 +2541,7 @@ func (c *compiler) compileDict(e node) evalFn {
 					return nil, newError("TypeError", "argument after ** must be a mapping")
 				}
 				for _, de := range d.entries {
-					if de.str {
-						out.SetStr(de.hk, de.val)
-					} else if err := out.Set(de.key, de.val); err != nil {
+					if err := out.Set(de.key, de.val); err != nil {
 						return nil, err
 					}
 				}

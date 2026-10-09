@@ -40,9 +40,15 @@ func (vm *VM) getIter(v Value) (Iterator, error) {
 	case *Range:
 		return &rangeIter{cur: t.Start, step: t.Step, left: t.Len()}, nil
 	case *Dict:
-		return &seqIter{items: t.Keys()}, nil
+		return (&DictView{dict: t, kind: "keys"}).iterator(false), nil
+	case *classDict:
+		return &seqIter{items: t.snapshot().Keys()}, nil
 	case *Set:
 		return &seqIter{items: t.Elems()}, nil
+	case *FrozenSet:
+		return &seqIter{items: t.set.Elems()}, nil
+	case *DictView:
+		return t.iterator(false), nil
 	case *NativeObject:
 		if t.iterFn != nil {
 			return t.iterFn(), nil
@@ -83,6 +89,10 @@ func (vm *VM) iterToSlice(v Value) ([]Value, error) {
 		return append([]Value{}, t.Items...), nil
 	case *Tuple:
 		return append([]Value{}, t.Items...), nil
+	case *DictView:
+		return t.elements(), nil
+	case *Dict:
+		return t.Keys(), nil
 	}
 	it, err := vm.getIter(v)
 	if err != nil {

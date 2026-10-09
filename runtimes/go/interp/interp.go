@@ -22,6 +22,7 @@ type VM struct {
 	caps            map[string]bool
 	maxSteps        int64 // 0 = unlimited
 	maxDepth        int
+	depthCap        int
 	steps           int64 // guarded by the gil / handoff ordering
 	depth           int
 	gil             sync.Mutex // the interpreter lock (spec 11.9)
@@ -152,6 +153,7 @@ func New(bundle map[string]any, opts ...Option) *VM {
 	for _, o := range opts {
 		o(vm)
 	}
+	vm.depthCap = vm.maxDepth
 	if vm.durable && len(vm.caps) > 0 {
 		vm.badBundle = errors.New("durable mode forbids capabilities; route I/O through host bindings")
 		return vm
@@ -231,7 +233,7 @@ func (vm *VM) addModules(mods map[string]any) (err error) {
 			return compileErr
 		}
 		meta := moduleMeta{file: name}
-		if f, ok := mn["file"].(string); ok && f != "" {
+		if f, ok := mn["file"].(string); ok {
 			meta.file = f
 		}
 		if raw, ok := mn["src"].([]any); ok {
@@ -467,6 +469,12 @@ func (vm *VM) importModule(name string) (Value, error) {
 		} else {
 			nameCell.v = name
 		}
+		fileCell, ok := cells["__file__"]
+		if !ok {
+			fileCell = &cell{}
+			cells["__file__"] = fileCell
+		}
+		fileCell.v = vm.modMeta[name].file
 		mod := &Module{Name: name, frame: fr}
 		vm.modules[name] = mod
 		if err := code(fr); err != nil {
@@ -825,7 +833,7 @@ func (vm *VM) instantiate(cls *Class, args []Value, kwargs []KwArg) (Value, erro
 	if cls.Prim != nil {
 		base := cls.Prim.Name
 		switch base {
-		case "str", "bytes", "int", "float", "tuple", "bool":
+		case "str", "bytes", "int", "float", "tuple", "frozenset", "bool":
 			// Immutable primitives take their value from the constructor args.
 			if len(args) > 0 || len(kwargs) > 0 {
 				pv, err := cls.Prim.ctor(vm, args, kwargs)
@@ -876,6 +884,8 @@ func primEmpty(base string) Value {
 		return &List{}
 	case "set":
 		return NewSet()
+	case "frozenset":
+		return &FrozenSet{set: NewSet()}
 	case "tuple":
 		return &Tuple{}
 	case "str":
@@ -945,9 +955,6 @@ func (vm *VM) getAttr(o Value, n string) (Value, error) {
 		if n == "__class__" {
 			return t.Class, nil
 		}
-		if v, ok := t.D[n]; ok {
-			return v, nil
-		}
 		v, found := t.Class.Lookup(n)
 		if prop, ok := v.(*Property); ok {
 			if prop.Fget == nil {
@@ -956,7 +963,24 @@ func (vm *VM) getAttr(o Value, n string) (Value, error) {
 			}
 			return vm.call(vm.bindAttr(prop.Fget, t, t.Class), nil, nil)
 		}
+		if descriptor, ok := v.(*Instance); ok {
+			_, sets := descriptor.Class.Lookup("__set__")
+			_, deletes := descriptor.Class.Lookup("__delete__")
+			if sets || deletes {
+				if _, gets := descriptor.Class.Lookup("__get__"); gets {
+					return vm.callDunder(descriptor, "__get__", []Value{t, t.Class})
+				}
+			}
+		}
+		if value, ok := t.D[n]; ok {
+			return value, nil
+		}
 		if found {
+			if descriptor, ok := v.(*Instance); ok {
+				if _, has := descriptor.Class.Lookup("__get__"); has {
+					return vm.callDunder(descriptor, "__get__", []Value{t, t.Class})
+				}
+			}
 			return vm.bindAttr(v, t, t.Class), nil
 		}
 		if t.Prim != nil {
@@ -982,20 +1006,12 @@ func (vm *VM) getAttr(o Value, n string) (Value, error) {
 				}
 				return &Tuple{Items: items}, nil
 			case "__bases__":
-				if len(t.Bases) == 0 {
+				if len(t.Bases) == 0 && t.directPrim == nil && t != objectClass {
 					return &Tuple{Items: []Value{objectClass}}, nil
 				}
-				items := make([]Value, len(t.Bases))
-				for i, c := range t.Bases {
-					items[i] = c
-				}
-				return &Tuple{Items: items}, nil
+				return &Tuple{Items: baseValues(t.Bases, t.directPrim, t.primIndex)}, nil
 			case "__dict__":
-				d := NewDict()
-				for k, val := range t.NS {
-					d.SetStr(k, val)
-				}
-				return d, nil
+				return &classDict{cls: t}, nil
 			}
 			return nil, newErrorf("AttributeError", "type object '%s' has no attribute '%s'",
 				t.Name, n)
@@ -1005,6 +1021,10 @@ func (vm *VM) getAttr(o Value, n string) (Value, error) {
 			return &BoundMethod{Fn: w.Fn, Recv: t}, nil
 		case *StaticMethod:
 			return w.Fn, nil
+		case *Instance:
+			if _, has := w.Class.Lookup("__get__"); has {
+				return vm.callDunder(w, "__get__", []Value{None, t})
+			}
 		}
 		return v, nil
 	case *Super:
@@ -1281,20 +1301,23 @@ func (vm *VM) setAttr(o Value, n string, v Value) error {
 		t.attrs[n] = v
 		return nil
 	case *Instance:
-		if prop, ok := t.Class.Lookup(n); ok {
-			if p, isProp := prop.(*Property); isProp {
-				if p.Fset == nil {
-					return newErrorf("AttributeError",
-						"property '%s' of '%s' object has no setter", n, t.Class.Name)
-				}
-				_, err := vm.call(vm.bindAttr(p.Fset, t, t.Class), []Value{v}, nil)
-				return err
-			}
+		t.Class.attributeHooks()
+		if hook := t.Class.setattrHook; hook != nil {
+			_, err := vm.call(vm.bindAttr(hook, t, t.Class), []Value{n, v}, nil)
+			return err
 		}
-		t.D[n] = v
-		return nil
+		return vm.baseSetAttr(t, n, v)
 	case *Class:
+		if t == objectClass || excClasses[t.Name] == t {
+			return newErrorf("TypeError", "cannot set attributes of immutable type '%s'", t.Name)
+		}
+		if _, ok := t.NS[n]; !ok {
+			t.dictOrder = append(t.dictOrder, n)
+		}
 		t.NS[n] = v
+		if n == "__setattr__" || n == "__delattr__" {
+			t.invalidateAttributeHooks()
+		}
 		return nil
 	case *Module:
 		c, ok := t.frame.cells[n]
@@ -1308,12 +1331,103 @@ func (vm *VM) setAttr(o Value, n string, v Value) error {
 	return newErrorf("AttributeError", "'%s' object has no attribute '%s'", typeName(o), n)
 }
 
+func (vm *VM) baseSetAttr(t *Instance, n string, v Value) error {
+	if descriptor, ok := t.Class.Lookup(n); ok {
+		switch p := descriptor.(type) {
+		case *Property:
+			if p.Fset == nil {
+				return newErrorf("AttributeError",
+					"property '%s' of '%s' object has no setter", n, t.Class.Name)
+			}
+			_, err := vm.call(vm.bindAttr(p.Fset, t, t.Class), []Value{v}, nil)
+			return err
+		case *Instance:
+			if _, ok := p.Class.Lookup("__set__"); ok {
+				_, err := vm.callDunder(p, "__set__", []Value{t, v})
+				return err
+			}
+			if _, ok := p.Class.Lookup("__delete__"); ok {
+				return newError("AttributeError", "__set__")
+			}
+		}
+	}
+	t.D[n] = v
+	return nil
+}
+
+func (vm *VM) baseDelAttr(t *Instance, n string) error {
+	if descriptor, ok := t.Class.Lookup(n); ok {
+		switch p := descriptor.(type) {
+		case *Property:
+			if p.Fdel == nil {
+				return newErrorf("AttributeError",
+					"property '%s' of '%s' object has no deleter", n, t.Class.Name)
+			}
+			_, err := vm.call(vm.bindAttr(p.Fdel, t, t.Class), nil, nil)
+			return err
+		case *Instance:
+			if _, ok := p.Class.Lookup("__delete__"); ok {
+				_, err := vm.callDunder(p, "__delete__", []Value{t})
+				return err
+			}
+			if _, ok := p.Class.Lookup("__set__"); ok {
+				return newError("AttributeError", "__delete__")
+			}
+		}
+	}
+	if _, ok := t.D[n]; ok {
+		delete(t.D, n)
+		return nil
+	}
+	return newErrorf("AttributeError", "'%s' object has no attribute '%s'", t.Class.Name, n)
+}
+
+func (vm *VM) delAttr(o Value, n string) error {
+	switch t := o.(type) {
+	case *Instance:
+		t.Class.attributeHooks()
+		if hook := t.Class.delattrHook; hook != nil {
+			_, err := vm.call(vm.bindAttr(hook, t, t.Class), []Value{n}, nil)
+			return err
+		}
+		return vm.baseDelAttr(t, n)
+	case *Class:
+		if t == objectClass || excClasses[t.Name] == t {
+			return newErrorf("TypeError", "cannot delete attributes of immutable type '%s'", t.Name)
+		}
+		if _, ok := t.NS[n]; ok {
+			delete(t.NS, n)
+			for i, name := range t.dictOrder {
+				if name == n {
+					t.dictOrder = append(t.dictOrder[:i], t.dictOrder[i+1:]...)
+					break
+				}
+			}
+			if n == "__setattr__" || n == "__delattr__" {
+				t.invalidateAttributeHooks()
+			}
+			return nil
+		}
+	case *Function:
+		if _, ok := t.attrs[n]; ok {
+			delete(t.attrs, n)
+			return nil
+		}
+	case *Module:
+		if c, ok := t.frame.cells[n]; ok && c.v != nil {
+			c.v = nil
+			return nil
+		}
+	}
+	return newErrorf("AttributeError", "'%s' object has no attribute '%s'", typeName(o), n)
+}
+
 // buildClass is CPython-shaped class creation (reference: vm.py). An
 // explicit callable metaclass (not `type`, not a hook-less plain class) is
 // called as metaclass(name, bases_tuple, ns_dict, **kwargs); otherwise class
 // kwargs dispatch to the nearest base's __init_subclass__.
 func (vm *VM) buildClass(name string, bases []*Class, ns map[string]Value,
-	nsOrder []string, metaclass Value, kwargs []KwArg, primBase *BuiltinType) (Value, error) {
+	nsOrder []string, metaclass Value, kwargs []KwArg, primBase *BuiltinType, primIndex int) (Value, error) {
 	plainMeta := metaclass == nil
 	if bt, ok := metaclass.(*BuiltinType); ok && bt.Name == "type" {
 		plainMeta = true
@@ -1327,10 +1441,7 @@ func (vm *VM) buildClass(name string, bases []*Class, ns map[string]Value,
 		}
 	}
 	if !plainMeta {
-		baseVals := make([]Value, len(bases))
-		for i, b := range bases {
-			baseVals[i] = b
-		}
+		baseVals := baseValues(bases, primBase, primIndex)
 		nsDict := NewDict()
 		for _, k := range nsOrder {
 			nsDict.SetStr(k, ns[k])
@@ -1346,7 +1457,14 @@ func (vm *VM) buildClass(name string, bases []*Class, ns map[string]Value,
 		return nil, newErrorf("TypeError", "metaclass returned %s, not a class",
 			typeName(result))
 	}
-	cls := &Class{Name: name, Bases: bases, NS: ns, Prim: primBase}
+	if _, definesEq := ns["__eq__"]; definesEq {
+		if _, definesHash := ns["__hash__"]; !definesHash {
+			ns["__hash__"] = None
+			nsOrder = append(nsOrder, "__hash__")
+		}
+	}
+	cls := &Class{Name: name, Bases: bases, NS: ns, Prim: primBase, vm: vm,
+		directPrim: primBase, primIndex: primIndex}
 	if cls.Prim == nil {
 		for _, b := range bases {
 			if b.Prim != nil {
@@ -1370,6 +1488,12 @@ func (vm *VM) buildClass(name string, bases []*Class, ns map[string]Value,
 		mro = append(mro, objectClass)
 	}
 	cls.MRO = mro
+	cls.dictOrder = nsOrder
+	for _, base := range bases {
+		if base != objectClass && excClasses[base.Name] != base {
+			base.subclasses = append(base.subclasses, cls)
+		}
+	}
 	for _, v := range cls.NS {
 		switch t := v.(type) {
 		case *Function:

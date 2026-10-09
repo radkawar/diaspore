@@ -6,10 +6,15 @@ import {
   type G,
   PyNoneT,
   PyEllipsisT,
+  NOT_IMPLEMENTED,
   DiasporeList,
   DiasporeTuple,
   DiasporeDict,
+  DiasporeDictView,
+  isSetView,
+  DiasporeMappingProxy,
   DiasporeSet,
+  DiasporeFrozenSet,
   DiasporeRange,
   DiasporeSlice,
   DiasporeClass,
@@ -23,6 +28,7 @@ import {
   NativeObject,
   DiasporeFile,
   DiasporeIterBase,
+  storedHashKey,
   Complex,
   typeName,
   asIndex,
@@ -62,6 +68,7 @@ const BIN_SYM: Record<string, string> = {
   bitor: "|",
   bitxor: "^",
   matmul: "@",
+  divmod: "divmod()",
 };
 
 const BIN_DUNDER: Record<string, [string, string]> = {
@@ -78,6 +85,7 @@ const BIN_DUNDER: Record<string, [string, string]> = {
   bitand: ["__and__", "__rand__"],
   bitor: ["__or__", "__ror__"],
   bitxor: ["__xor__", "__rxor__"],
+  divmod: ["__divmod__", "__rdivmod__"],
 };
 
 function binopTypeError(kind: string, l: Value, r: Value): DiasporeError {
@@ -111,26 +119,76 @@ export function* binop(I: Interp, kind: string, l: Value, r: Value, inplace = fa
       }
     }
   }
-  const lInst = l instanceof DiasporeInstance;
-  const rInst = r instanceof DiasporeInstance;
-  if (lInst || rInst) {
+  if (l instanceof DiasporeInstance || r instanceof DiasporeInstance) {
     const names = BIN_DUNDER[kind];
     if (names !== undefined) {
-      if (inplace && lInst) {
-        // augmented assignment: __i<op>__ tried before the plain operator
+      if (inplace && l instanceof DiasporeInstance) {
         const iname = "__i" + names[0].slice(2);
-        if ((l as DiasporeInstance).cls.lookup(iname) !== undefined) {
-          return yield* I.callDunder(l as DiasporeInstance, iname, [r]);
+        if (l.cls.lookup(iname) !== undefined) {
+          const result = yield* I.callDunder(l, iname, [r]);
+          if (result !== NOT_IMPLEMENTED) return result;
+          inplace = false;
         }
       }
-      if (lInst && (l as DiasporeInstance).cls.lookup(names[0]) !== undefined) {
-        return yield* I.callDunder(l as DiasporeInstance, names[0], [r]);
+      const lm = l instanceof DiasporeInstance ? l.cls.lookup(names[0]) : undefined;
+      const rm = r instanceof DiasporeInstance ? r.cls.lookup(names[1]) : undefined;
+      const sameType = l instanceof DiasporeInstance && r instanceof DiasporeInstance && l.cls === r.cls;
+      const rightFirst = rm !== undefined && r instanceof DiasporeInstance &&
+        (l instanceof DiasporeInstance
+          ? !sameType && r.cls.issub(l.cls) && rm !== l.cls.lookup(names[1])
+          : r.cls.prim?.name === typeName(l));
+      if (rightFirst) {
+        const result = yield* I.callDunder(r as DiasporeInstance, names[1], [l]);
+        if (result !== NOT_IMPLEMENTED) return result;
       }
-      if (names[1] !== "" && rInst && (r as DiasporeInstance).cls.lookup(names[1]) !== undefined) {
-        return yield* I.callDunder(r as DiasporeInstance, names[1], [l]);
+      const lp = l instanceof DiasporeInstance ? l.prim : l;
+      const rp = r instanceof DiasporeInstance ? r.prim : r;
+      const numeric = lp !== null && rp !== null && isNumber(lp) && isNumber(rp);
+      const integral = lp !== null && rp !== null && asIndex(lp) !== null && asIndex(rp) !== null;
+      const complex = lp !== null && rp !== null &&
+        (isNumber(lp) || lp instanceof Complex) && (isNumber(rp) || rp instanceof Complex);
+      const leftSequence = typeof lp === "string" || lp instanceof Uint8Array ||
+        lp instanceof DiasporeList || lp instanceof DiasporeTuple;
+      const rightSequence = typeof rp === "string" || rp instanceof Uint8Array ||
+        rp instanceof DiasporeList || rp instanceof DiasporeTuple;
+      const bitwise = kind === "lshift" || kind === "rshift" ||
+        kind === "bitand" || kind === "bitor" || kind === "bitxor";
+      const builtin = kind !== "matmul" && (
+        (bitwise ? integral : numeric) ||
+        ((kind === "add" || kind === "sub" || kind === "mul" || kind === "div" || kind === "pow") && complex) ||
+        (kind === "add" && leftSequence && typeName(lp as Value) === typeName(rp as Value)) ||
+        (kind === "mul" && ((leftSequence && rp !== null && asIndex(rp) !== null) ||
+          (rightSequence && lp !== null && asIndex(lp) !== null))) ||
+        ((kind === "bitor" || kind === "bitand" || kind === "bitxor" || kind === "sub") &&
+          lp instanceof DiasporeSet && rp instanceof DiasporeSet));
+      if (lm !== undefined) {
+        const result = yield* I.callDunder(l as DiasporeInstance, names[0], [r]);
+        if (result !== NOT_IMPLEMENTED) return result;
+      }
+      if (lm === undefined && builtin) {
+        return yield* binop(I, kind, lp as Value, rp as Value, inplace);
+      }
+      if (rm !== undefined && !rightFirst && !sameType) {
+        const result = yield* I.callDunder(r as DiasporeInstance, names[1], [l]);
+        if (result !== NOT_IMPLEMENTED) return result;
+      }
+      if (!sameType && rm === undefined && builtin) {
+        return yield* binop(I, kind, lp as Value, rp as Value, inplace);
       }
     }
+    if ((isSetView(l) || isSetView(r)) &&
+        (kind === "sub" || kind === "bitand" || kind === "bitor" || kind === "bitxor")) {
+      return yield* viewSetOp(I, kind, l, r);
+    }
     throw binopTypeError(kind, l, r);
+  }
+  if ((isSetView(l) || isSetView(r)) &&
+      (kind === "sub" || kind === "bitand" || kind === "bitor" || kind === "bitxor")) {
+    return yield* viewSetOp(I, kind, l, r);
+  }
+  if (kind === "divmod") {
+    if (!isNumber(l) || !isNumber(r)) throw binopTypeError(kind, l, r);
+    return new DiasporeTuple([yield* binop(I, "floordiv", l, r), yield* binop(I, "mod", l, r)]);
   }
   if (kind === "matmul") {
     throw binopTypeError(kind, l, r); // dunder-only: no builtin type supports @
@@ -309,21 +367,74 @@ export function setOp(kind: string, a: DiasporeSet, b: DiasporeSet): DiasporeSet
   const out = new DiasporeSet();
   switch (kind) {
     case "bitor":
-      for (const [hk, v] of a.map) out.addHK(hk, v);
-      for (const [hk, v] of b.map) out.addHK(hk, v);
+      for (const [hk, v] of a.map) out.addHK(storedHashKey(a.map, hk), v);
+      for (const [hk, v] of b.map) out.addHK(storedHashKey(b.map, hk), v);
       break;
     case "bitand":
-      for (const [hk, v] of a.map) if (b.map.has(hk)) out.addHK(hk, v);
+      for (const [hk, v] of a.map) {
+        const hash = storedHashKey(a.map, hk);
+        if (b.hasHK(hash, v)) out.addHK(hash, v);
+      }
       break;
     case "sub":
-      for (const [hk, v] of a.map) if (!b.map.has(hk)) out.addHK(hk, v);
+      for (const [hk, v] of a.map) {
+        const hash = storedHashKey(a.map, hk);
+        if (!b.hasHK(hash, v)) out.addHK(hash, v);
+      }
       break;
     case "bitxor":
-      for (const [hk, v] of a.map) if (!b.map.has(hk)) out.addHK(hk, v);
-      for (const [hk, v] of b.map) if (!a.map.has(hk)) out.addHK(hk, v);
+      for (const [hk, v] of a.map) {
+        const hash = storedHashKey(a.map, hk);
+        if (!b.hasHK(hash, v)) out.addHK(hash, v);
+      }
+      for (const [hk, v] of b.map) {
+        const hash = storedHashKey(b.map, hk);
+        if (!a.hasHK(hash, v)) out.addHK(hash, v);
+      }
       break;
   }
-  return out;
+  return a instanceof DiasporeFrozenSet ? new DiasporeFrozenSet(out.map) : out;
+}
+
+function* viewSetOp(I: Interp, kind: string, left: Value, right: Value): G<Value> {
+  if (kind === "bitand") {
+    const view = isSetView(left) ? left : right;
+    const iterable = view === left ? right : left;
+    const out = new DiasporeSet();
+    const it = yield* getIter(I, iterable);
+    for (;;) {
+      I.fuel();
+      const [item, ok] = yield* it.next();
+      if (!ok) return out;
+      if (yield* contains(I, view, item)) out.add(item);
+    }
+  }
+  if (kind === "bitxor" && left instanceof DiasporeDictView && right instanceof DiasporeDictView &&
+      left.kind === "items" && right.kind === "items") {
+    const out = new DiasporeSet();
+    for (const item of yield* iterToArray(I, left)) {
+      if (!(yield* contains(I, right, item))) out.add(item);
+    }
+    for (const item of yield* iterToArray(I, right)) {
+      if (!(yield* contains(I, left, item))) out.add(item);
+    }
+    return out;
+  }
+  const a = new DiasporeSet();
+  const b = new DiasporeSet();
+  for (const item of yield* iterToArray(I, left)) a.add(item);
+  for (const item of yield* iterToArray(I, right)) b.add(item);
+  return setOp(kind, a, b);
+}
+
+function* viewSubset(I: Interp, left: DiasporeDictView | DiasporeSet, right: DiasporeDictView | DiasporeSet): G<boolean> {
+  const it = yield* getIter(I, left);
+  for (;;) {
+    I.fuel();
+    const [item, ok] = yield* it.next();
+    if (!ok) return true;
+    if (!(yield* contains(I, right, item))) return false;
+  }
 }
 
 function intBinop(I: Interp, kind: string, a: bigint, b: bigint): Value {
@@ -481,10 +592,57 @@ const CMP_DUNDER: Record<string, string> = {
   le: "__le__",
   gt: "__gt__",
   ge: "__ge__",
+  eq: "__eq__",
+  ne: "__ne__",
 };
 
+const CMP_REFLECTED: Record<string, string> = {
+  lt: "gt", le: "ge", gt: "lt", ge: "le", eq: "eq", ne: "ne",
+};
+
+function* richCompare(I: Interp, kind: string, l: Value, r: Value): G<Value> {
+  const rightFirst = r instanceof DiasporeInstance &&
+    (l instanceof DiasporeInstance
+      ? l.cls !== r.cls && r.cls.issub(l.cls)
+      : r.cls.prim?.name === typeName(l));
+  for (let i = 0; i < 2; i++) {
+    const reflected = rightFirst ? i === 0 : i === 1;
+    const self = reflected ? r : l;
+    const other = reflected ? l : r;
+    const op = reflected ? CMP_REFLECTED[kind] : kind;
+    const name = CMP_DUNDER[op];
+    if (self instanceof DiasporeInstance) {
+      if (self.cls.lookup(name) !== undefined) {
+        const result = yield* I.callDunder(self, name, [other]);
+        if (result !== NOT_IMPLEMENTED) return result;
+        continue;
+      }
+      if (op === "ne" && self.cls.lookup("__eq__") !== undefined) {
+        const result = yield* I.callDunder(self, "__eq__", [other]);
+        if (result !== NOT_IMPLEMENTED) return !(yield* I.truth(result));
+        continue;
+      }
+    }
+    const a = self instanceof DiasporeInstance ? self.prim : self;
+    const b = other instanceof DiasporeInstance ? other.prim : other;
+    if (a === null || b === null) continue;
+    const equality = op === "eq" || op === "ne";
+    const supported = (isNumber(a) && isNumber(b)) ||
+      (typeof a === "string" && typeof b === "string") ||
+      (a instanceof Uint8Array && b instanceof Uint8Array) ||
+      (a instanceof DiasporeList && b instanceof DiasporeList) ||
+      (a instanceof DiasporeTuple && b instanceof DiasporeTuple) ||
+      ((a instanceof DiasporeSet || isSetView(a)) && (b instanceof DiasporeSet || isSetView(b))) ||
+      (equality && (
+        (toComplex(a) !== null && toComplex(b) !== null) ||
+        (a instanceof DiasporeDict && b instanceof DiasporeDict) ||
+        (a instanceof DiasporeRange && b instanceof DiasporeRange)));
+    if (supported) return yield* compare(I, op, a, b);
+  }
+  return NOT_IMPLEMENTED;
+}
 /** Evaluate a comparison using Python value semantics. */
-export function* compare(I: Interp, kind: string, l: Value, r: Value): G<boolean> {
+export function* compare(I: Interp, kind: string, l: Value, r: Value): G<Value> {
   switch (kind) {
     case "is":
       return isIdentical(l, r);
@@ -494,23 +652,17 @@ export function* compare(I: Interp, kind: string, l: Value, r: Value): G<boolean
       return yield* contains(I, r, l);
     case "notin":
       return !(yield* contains(I, r, l));
-    case "eq":
-      return yield* eq(I, l, r);
-    case "ne": {
-      if (l instanceof DiasporeInstance && l.cls.lookup("__ne__") !== undefined) {
-        return yield* I.truth(yield* I.callDunder(l, "__ne__", [r]));
-      }
-      return !(yield* eq(I, l, r));
-    }
   }
-  // ordering
-  if (l instanceof DiasporeInstance) {
-    if (l.cls.lookup(CMP_DUNDER[kind]) !== undefined) {
-      return yield* I.truth(yield* I.callDunder(l, CMP_DUNDER[kind], [r]));
-    }
-    throw orderTypeError(kind, l, r);
+  const instance = l instanceof DiasporeInstance || r instanceof DiasporeInstance;
+  if (instance) {
+    const result = yield* richCompare(I, kind, l, r);
+    if (result !== NOT_IMPLEMENTED) return result;
   }
-  if (r instanceof DiasporeInstance) throw orderTypeError(kind, l, r);
+  if (kind === "eq" || kind === "ne") {
+    const same = instance ? isIdentical(l, r) : yield* eq(I, l, r);
+    return kind === "eq" ? same : !same;
+  }
+  if (instance) throw orderTypeError(kind, l, r);
   const [c, ordered] = yield* cmp3(I, l, r, kind);
   if (!ordered) return false; // NaN / incomparable sets
   switch (kind) {
@@ -546,6 +698,15 @@ export function numCmp(l: Value, r: Value): number {
 }
 
 function* cmp3(I: Interp, l: Value, r: Value, kind: string): G<[number, boolean]> {
+  if ((isSetView(l) || isSetView(r)) &&
+      (isSetView(l) || l instanceof DiasporeSet) && (isSetView(r) || r instanceof DiasporeSet)) {
+    const sub = yield* viewSubset(I, l, r);
+    const sup = yield* viewSubset(I, r, l);
+    if (sub && sup) return [0, true];
+    if (sub) return [-1, true];
+    if (sup) return [1, true];
+    return [0, false];
+  }
   if (isNumber(l) && isNumber(r)) {
     if (typeof l === "number" && Number.isNaN(l)) return [0, false];
     if (typeof r === "number" && Number.isNaN(r)) return [0, false];
@@ -575,7 +736,7 @@ function* cmpSeq(I: Interp, a: Value[], b: Value[]): G<[number, boolean]> {
   for (let i = 0; i < n; i++) {
     const same = yield* eqElem(I, a[i], b[i]);
     if (!same) {
-      const lt = yield* compare(I, "lt", a[i], b[i]);
+      const lt = yield* I.truth(yield* compare(I, "lt", a[i], b[i]));
       return [lt ? -1 : 1, true];
     }
   }
@@ -586,8 +747,8 @@ function* cmpSeq(I: Interp, a: Value[], b: Value[]): G<[number, boolean]> {
 
 /** Test subset membership using canonical sandbox hash keys. */
 export function setIsSubset(a: DiasporeSet, b: DiasporeSet): boolean {
-  for (const hk of a.map.keys()) {
-    if (!b.map.has(hk)) return false;
+  for (const [hk, v] of a.map) {
+    if (!b.hasHK(storedHashKey(a.map, hk), v)) return false;
   }
   return true;
 }
@@ -619,16 +780,13 @@ export function isIdentical(l: Value, r: Value): boolean {
 
 /** Compare values for equality, including user-defined overloads. */
 export function* eq(I: Interp, l: Value, r: Value): G<boolean> {
-  if (l instanceof DiasporeInstance) {
-    if (l.cls.lookup("__eq__") !== undefined) {
-      return yield* I.truth(yield* I.callDunder(l, "__eq__", [r]));
-    }
-    if (r instanceof DiasporeInstance && r.cls.lookup("__eq__") !== undefined) {
-      return yield* I.truth(yield* I.callDunder(r, "__eq__", [l]));
-    }
-    return isIdentical(l, r);
+  if (l instanceof DiasporeInstance || r instanceof DiasporeInstance) {
+    return yield* I.truth(yield* compare(I, "eq", l, r));
   }
-  if (r instanceof DiasporeInstance) return yield* eq(I, r, l);
+  if (isSetView(l) || isSetView(r)) {
+    if (!(isSetView(l) || l instanceof DiasporeSet) || !(isSetView(r) || r instanceof DiasporeSet)) return false;
+    return l.size === r.size && (yield* viewSubset(I, l, r));
+  }
   if (l instanceof Complex || r instanceof Complex) {
     const lc = toComplex(l);
     const rc = toComplex(r);
@@ -654,9 +812,9 @@ export function* eq(I: Interp, l: Value, r: Value): G<boolean> {
   if (l instanceof DiasporeDict) {
     if (!(r instanceof DiasporeDict) || l.size !== r.size) return false;
     for (const [hk, e] of l.map) {
-      const bv = r.map.get(hk);
+      const bv = r.getHashed(storedHashKey(l.map, hk), e.key);
       if (bv === undefined) return false;
-      if (!(yield* eqElem(I, e.val, bv.val))) return false;
+      if (!(yield* eqElem(I, e.val, bv))) return false;
     }
     return true;
   }
@@ -728,6 +886,15 @@ export function* contains(I: Interp, container: Value, item: Value): G<boolean> 
     }
     return false;
   }
+  if (container instanceof DiasporeDictView) {
+    if (container.kind === "keys") return container.dict.has(item);
+    if (container.kind === "items") {
+      if (!(item instanceof DiasporeTuple) || item.items.length !== 2) return false;
+      const value = container.dict.get(item.items[0]);
+      return value !== undefined && (yield* eqElem(I, value, item.items[1]));
+    }
+    return yield* iterContains(I, container, item);
+  }
   if (container instanceof DiasporeDict) return container.has(item);
   if (container instanceof DiasporeSet) return container.has(item);
   if (container instanceof DiasporeRange) {
@@ -779,6 +946,7 @@ export function* truth(I: Interp, v: Value): G<boolean> {
   if (v instanceof DiasporeList) return v.items.length > 0;
   if (v instanceof DiasporeTuple) return v.items.length > 0;
   if (v instanceof DiasporeDict) return v.size > 0;
+  if (v instanceof DiasporeDictView) return v.size > 0;
   if (v instanceof DiasporeSet) return v.size > 0;
   if (v instanceof DiasporeRange) return v.len() > 0n;
   if (v instanceof DiasporeInstance) {
@@ -811,6 +979,7 @@ export function* diasporeLen(I: Interp, v: Value): G<bigint> {
   if (v instanceof DiasporeList) return BigInt(v.items.length);
   if (v instanceof DiasporeTuple) return BigInt(v.items.length);
   if (v instanceof DiasporeDict) return BigInt(v.size);
+  if (v instanceof DiasporeDictView) return BigInt(v.size);
   if (v instanceof DiasporeSet) return BigInt(v.size);
   if (v instanceof DiasporeRange) return v.len();
   if (v instanceof DiasporeInstance) {
@@ -1104,6 +1273,15 @@ function sliceRange(r: DiasporeRange, sl: DiasporeSlice): DiasporeRange {
 
 /** Render repr with recursion protection for containers. */
 export function* reprOf(I: Interp, v: Value): G<string> {
+  if (v instanceof DiasporeDictView) {
+    if (I.repring.has(v)) return "...";
+    I.repring.add(v);
+    try {
+      return typeName(v) + "([" + (yield* reprJoin(I, yield* iterToArray(I, v))) + "])";
+    } finally {
+      I.repring.delete(v);
+    }
+  }
   if (v instanceof DiasporeList || v instanceof DiasporeTuple || v instanceof DiasporeDict) {
     if (I.repring.has(v)) {
       if (v instanceof DiasporeList) return "[...]";
@@ -1123,7 +1301,8 @@ export function* reprOf(I: Interp, v: Value): G<string> {
       for (const [key, val] of v.entries()) {
         parts.push((yield* reprOf(I, key)) + ": " + (yield* reprOf(I, val)));
       }
-      return "{" + parts.join(", ") + "}";
+      const text = "{" + parts.join(", ") + "}";
+      return v instanceof DiasporeMappingProxy ? "mappingproxy(" + text + ")" : text;
     } finally {
       I.repring.delete(v);
     }
@@ -1141,11 +1320,13 @@ export function* reprOf(I: Interp, v: Value): G<string> {
   if (v instanceof Complex) return complexRepr(v);
   if (v instanceof PyNoneT) return "None";
   if (v instanceof PyEllipsisT) return "Ellipsis";
+  if (v === NOT_IMPLEMENTED) return "NotImplemented";
   if (v instanceof Uint8Array) return reprBytes(v);
   if (v instanceof DiasporeRange) return reprRange(v);
   if (v instanceof DiasporeSet) {
-    if (v.size === 0) return "set()";
-    return "{" + (yield* reprJoin(I, v.elems())) + "}";
+    if (v.size === 0) return v instanceof DiasporeFrozenSet ? "frozenset()" : "set()";
+    const items = "{" + (yield* reprJoin(I, v.elems())) + "}";
+    return v instanceof DiasporeFrozenSet ? "frozenset(" + items + ")" : items;
   }
   if (v instanceof DiasporeSlice) {
     const l = yield* reprOf(I, v.lower);
@@ -1232,6 +1413,33 @@ export function* asciiOf(I: Interp, v: Value): G<string> {
 export function* excStr(I: Interp, inst: DiasporeInstance): G<string> {
   if (inst.cls.lookup("__str__") !== undefined) return yield* strOf(I, inst);
   const args = excArgs(inst);
+  const encode = inst.cls.issub(EXC_CLASSES.get("UnicodeEncodeError") as DiasporeClass);
+  const decode = inst.cls.issub(EXC_CLASSES.get("UnicodeDecodeError") as DiasporeClass);
+  if ((encode || decode) && args.length === 5) {
+    const encoding = inst.d.get("encoding") ?? args[0];
+    const object = inst.d.get("object") ?? args[1];
+    const start = asIndex(inst.d.get("start") ?? args[2]);
+    const end = asIndex(inst.d.get("end") ?? args[3]);
+    const reason = inst.d.get("reason") ?? args[4];
+    if (typeof encoding === "string" && typeof reason === "string" && start !== null && end !== null) {
+      const action = encode ? "encode" : "decode";
+      if (end > start + 1n) {
+        return `'${encoding}' codec can't ${action} ${encode ? "characters" : "bytes"} in position ${start}-${end - 1n}: ${reason}`;
+      }
+      if (encode && typeof object === "string") {
+        const ch = chars(object)[Number(start)];
+        if (ch !== undefined) {
+          const code = ch.codePointAt(0) as number;
+          const escaped = code <= 0xff ? "\\x" + code.toString(16).padStart(2, "0") :
+            code <= 0xffff ? "\\u" + code.toString(16).padStart(4, "0") : "\\U" + code.toString(16).padStart(8, "0");
+          return `'${encoding}' codec can't encode character '${escaped}' in position ${start}: ${reason}`;
+        }
+      }
+      if (decode && object instanceof Uint8Array && Number(start) < object.length) {
+        return `'${encoding}' codec can't decode byte 0x${object[Number(start)].toString(16).padStart(2, "0")} in position ${start}: ${reason}`;
+      }
+    }
+  }
   const keyError = EXC_CLASSES.get("KeyError") as DiasporeClass;
   if (inst.cls.issub(keyError) && args.length === 1) {
     return yield* reprOf(I, args[0]);
@@ -1286,7 +1494,7 @@ export function* sortValues(
   let useKey = key !== null;
   if (key instanceof PyNoneT) useKey = false;
   const less = function* (a: Value, b: Value): G<boolean> {
-    return yield* compare(I, "lt", a, b);
+    return yield* I.truth(yield* compare(I, "lt", a, b));
   };
   if (reverse) items.reverse();
   if (useKey) {

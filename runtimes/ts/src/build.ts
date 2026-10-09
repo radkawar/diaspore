@@ -36,15 +36,14 @@ function runDspc(entry: string, debug: boolean, paths: string[]): { text: string
   const compiler = loadEmbeddedCompiler();
   let entryDir = nodePath.dirname(entry);
   if (entryDir === "") entryDir = ".";
-  const roots = [...paths, STDLIB_DIR];
-  const argv = ["dspc", entry];
+  const argv = ["dspc", entry, "--stdlib", STDLIB_DIR];
   if (debug) argv.push("--debug");
-  for (const path of roots) argv.push("--path", path);
+  for (const path of paths) argv.push("--path", path);
   const chunks: string[] = [];
   const I = new Interp(compiler, {
     argv,
     caps: ["fs"],
-    policy: { fs: { read: [entryDir, entry, ...roots], write: [] } },
+    policy: { fs: { read: [entryDir, entry, ...paths, STDLIB_DIR], write: [] } },
     maxDepth: 3000,
     stdout: (s) => chunks.push(s),
   });

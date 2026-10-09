@@ -31,6 +31,11 @@ export class PyEllipsisT {}
 /** The shared Ellipsis value. */
 export const ELLIPSIS = new PyEllipsisT();
 
+/** Runtime representation of the NotImplemented singleton. */
+export class PyNotImplementedT {}
+/** The shared result for unsupported binary operations. */
+export const NOT_IMPLEMENTED = new PyNotImplementedT();
+
 /** Mutable, ordered sandbox sequence. */
 export class DiasporeList {
   items: Value[];
@@ -84,6 +89,122 @@ interface DictEntry {
   val: Value;
 }
 
+interface KeyIndex {
+  buckets: Map<string, string[]>;
+  hashes: Map<string, string>;
+}
+
+// Primitive-only containers keep their direct encoded-key lookup.
+const keyIndexes = new WeakMap<object, KeyIndex>();
+let collisionKey = 0;
+
+function keyRuntime(v: Value): Interp | null {
+  if (v instanceof DiasporeInstance) return v.cls.runtime;
+  if (v instanceof DiasporeTuple || v instanceof DiasporeFrozenSet) {
+    const items = v instanceof DiasporeTuple ? v.items : v.map.values();
+    for (const item of items) {
+      const runtime = keyRuntime(item);
+      if (runtime !== null) return runtime;
+    }
+  }
+  if (v instanceof DiasporeSlice) {
+    return keyRuntime(v.lower) ?? keyRuntime(v.upper) ?? keyRuntime(v.step);
+  }
+  return null;
+}
+
+function needsKeyEquality(v: Value): boolean {
+  if (v instanceof DiasporeInstance || v instanceof DiasporeFrozenSet) return true;
+  if (v instanceof DiasporeTuple) return v.items.some(needsKeyEquality);
+  if (v instanceof DiasporeSlice) {
+    return needsKeyEquality(v.lower) || needsKeyEquality(v.upper) || needsKeyEquality(v.step);
+  }
+  return false;
+}
+
+function keysEqual(a: Value, b: Value): boolean {
+  if (a === b) return true;
+  const runtime = keyRuntime(a) ?? keyRuntime(b);
+  if (runtime !== null) return runtime.drive(runtime.eqElem(a, b));
+  if (a instanceof DiasporeTuple && b instanceof DiasporeTuple) {
+    return a.items.length === b.items.length && a.items.every((item, i) => keysEqual(item, b.items[i]));
+  }
+  if (a instanceof DiasporeFrozenSet || b instanceof DiasporeFrozenSet) {
+    if (!(a instanceof DiasporeFrozenSet && b instanceof DiasporeFrozenSet) || a.size !== b.size) return false;
+    for (const [slot, item] of a.map) {
+      if (!b.hasHK(storedHashKey(a.map, slot), item)) return false;
+    }
+    return true;
+  }
+  return hashKey(a) === hashKey(b);
+}
+
+function resolveHashKey(
+  map: ReadonlyMap<string, unknown>, hk: string, key: Value, dict: boolean, insert = false,
+): string | undefined {
+  if (map instanceof NamespaceMap) keyIndexes.delete(map);
+  let index = keyIndexes.get(map);
+  if (index === undefined && !hk.startsWith("u")) {
+    return insert || map.has(hk) ? hk : undefined;
+  }
+  if (index === undefined) {
+    index = { buckets: new Map(), hashes: new Map() };
+    for (const [slot, entry] of map) {
+      const k = dict ? (entry as DictEntry).key : entry as Value;
+      const hash = hashValue(k).toString();
+      const bucket = index.buckets.get(hash);
+      if (bucket === undefined) index.buckets.set(hash, [slot]);
+      else bucket.push(slot);
+      index.hashes.set(slot, hash);
+    }
+    keyIndexes.set(map, index);
+  }
+  const hash = hk.startsWith("u") ? hk.slice(1) : hashValue(key).toString();
+  const bucket = index.buckets.get(hash);
+  if (bucket !== undefined) {
+    for (const slot of bucket) {
+      const entry = map.get(slot);
+      if (entry === undefined) continue;
+      const stored = dict ? (entry as DictEntry).key : entry as Value;
+      if (keysEqual(stored, key)) return slot;
+    }
+  }
+  if (!insert) return undefined;
+  const slot = map.has(hk) ? "\0" + ++collisionKey : hk;
+  if (bucket === undefined) index.buckets.set(hash, [slot]);
+  else bucket.push(slot);
+  index.hashes.set(slot, hash);
+  return slot;
+}
+
+function removeHashSlot(map: ReadonlyMap<string, unknown>, slot: string): void {
+  const index = keyIndexes.get(map);
+  if (index === undefined) return;
+  const hash = index.hashes.get(slot);
+  if (hash === undefined) return;
+  index.hashes.delete(slot);
+  const bucket = index.buckets.get(hash) as string[];
+  bucket.splice(bucket.indexOf(slot), 1);
+  if (bucket.length === 0) index.buckets.delete(hash);
+  if (index.hashes.size === 0) keyIndexes.delete(map);
+}
+
+function copyKeyIndex(source: object, target: object): void {
+  const index = keyIndexes.get(source);
+  if (index !== undefined) {
+    keyIndexes.set(target, {
+      buckets: new Map([...index.buckets].map(([hash, slots]) => [hash, [...slots]])),
+      hashes: new Map(index.hashes),
+    });
+  }
+}
+
+/** Reuse a stored key's hash without invoking user code again. */
+export function storedHashKey(map: object, slot: string): string {
+  const hash = keyIndexes.get(map)?.hashes.get(slot);
+  return hash === undefined ? slot : "u" + hash;
+}
+
 /** Insertion-ordered dict with Python key unification (1, 1.0, True alike). */
 export class DiasporeDict {
   map: Map<string, DictEntry> = new Map();
@@ -94,28 +215,34 @@ export class DiasporeDict {
     return this.map.get(hk)?.val;
   }
   setHK(hk: string, key: Value, val: Value): void {
-    const e = this.map.get(hk);
+    const slot = resolveHashKey(this.map, hk, key, true, true) as string;
+    const e = this.map.get(slot);
     if (e !== undefined) {
       e.val = val;
     } else {
-      this.map.set(hk, { key, val });
+      this.map.set(slot, { key, val });
     }
   }
   get(k: Value): Value | undefined {
-    return this.map.get(hashKey(k))?.val;
+    return this.getHashed(hashKey(k), k);
+  }
+  getHashed(hk: string, key: Value): Value | undefined {
+    const slot = resolveHashKey(this.map, hk, key, true);
+    return slot === undefined ? undefined : this.map.get(slot)?.val;
   }
   set(k: Value, v: Value): void {
     this.setHK(hashKey(k), k, v);
   }
   delete(k: Value): Value | undefined {
-    const hk = hashKey(k);
-    const e = this.map.get(hk);
-    if (e === undefined) return undefined;
-    this.map.delete(hk);
+    const slot = resolveHashKey(this.map, hashKey(k), k, true);
+    if (slot === undefined) return undefined;
+    const e = this.map.get(slot) as DictEntry;
+    this.map.delete(slot);
+    removeHashSlot(this.map, slot);
     return e.val;
   }
   has(k: Value): boolean {
-    return this.map.has(hashKey(k));
+    return resolveHashKey(this.map, hashKey(k), k, true) !== undefined;
   }
   keys(): Value[] {
     return [...this.map.values()].map((e) => e.key);
@@ -129,31 +256,112 @@ export class DiasporeDict {
   copy(): DiasporeDict {
     const d = new DiasporeDict();
     for (const [hk, e] of this.map) d.map.set(hk, { key: e.key, val: e.val });
+    copyKeyIndex(this.map, d.map);
     return d;
   }
   clear(): void {
     this.map.clear();
+    keyIndexes.delete(this.map);
+  }
+}
+
+/** A live projection of a dictionary's keys, values, or items. */
+export class DiasporeDictView {
+  dict: DiasporeDict;
+  kind: "keys" | "values" | "items";
+  constructor(dict: DiasporeDict, kind: "keys" | "values" | "items") {
+    this.dict = dict;
+    this.kind = kind;
+  }
+  get size(): number {
+    return this.dict.size;
+  }
+}
+
+/** Identify dictionary views with set-like comparison and operator semantics. */
+export function isSetView(v: Value): v is DiasporeDictView {
+  return v instanceof DiasporeDictView && v.kind !== "values";
+}
+
+class NamespaceMap extends Map<string, DictEntry> {
+  private ns: Map<string, Value>;
+  constructor(ns: Map<string, Value>) {
+    super();
+    this.ns = ns;
+  }
+  override get size(): number {
+    return this.ns.size;
+  }
+  override get(hk: string): DictEntry | undefined {
+    if (!hk.startsWith("s")) return undefined;
+    const key = hk.slice(1);
+    const val = this.ns.get(key);
+    return val === undefined ? undefined : { key, val };
+  }
+  override has(hk: string): boolean {
+    return hk.startsWith("s") && this.ns.has(hk.slice(1));
+  }
+  override *entries(): MapIterator<[string, DictEntry]> {
+    for (const [key, val] of this.ns) yield ["s" + key, { key, val }];
+  }
+  override *keys(): MapIterator<string> {
+    for (const key of this.ns.keys()) yield "s" + key;
+  }
+  override *values(): MapIterator<DictEntry> {
+    for (const [key, val] of this.ns) yield { key, val };
+  }
+  override [Symbol.iterator](): MapIterator<[string, DictEntry]> {
+    return this.entries();
+  }
+}
+
+/** A read-only, live view of a class namespace. */
+export class DiasporeMappingProxy extends DiasporeDict {
+  constructor(ns: Map<string, Value>) {
+    super();
+    this.map = new NamespaceMap(ns);
+  }
+  override setHK(_hk: string, _key: Value, _val: Value): void {
+    throw diasporeErr("TypeError", "'mappingproxy' object does not support item assignment");
+  }
+  override delete(_key: Value): Value | undefined {
+    throw diasporeErr("TypeError", "'mappingproxy' object does not support item deletion");
+  }
+  override clear(): void {
+    throw diasporeErr("AttributeError", "'mappingproxy' object has no attribute 'clear'");
   }
 }
 
 /** Insertion-ordered set. */
 export class DiasporeSet {
-  map: Map<string, Value> = new Map();
+  map: Map<string, Value>;
+  constructor(map: Map<string, Value> = new Map()) {
+    this.map = map;
+  }
   get size(): number {
     return this.map.size;
   }
   add(v: Value): void {
-    const hk = hashKey(v);
-    if (!this.map.has(hk)) this.map.set(hk, v);
+    this.addHK(hashKey(v), v);
   }
   addHK(hk: string, v: Value): void {
-    if (!this.map.has(hk)) this.map.set(hk, v);
+    const slot = resolveHashKey(this.map, hk, v, false, true) as string;
+    if (!this.map.has(slot)) this.map.set(slot, v);
   }
   has(v: Value): boolean {
-    return this.map.has(hashKey(v));
+    if (v instanceof DiasporeSet && !(v instanceof DiasporeFrozenSet)) v = new DiasporeFrozenSet(v.copy().map);
+    return this.hasHK(hashKey(v), v);
+  }
+  hasHK(hk: string, v: Value): boolean {
+    return resolveHashKey(this.map, hk, v, false) !== undefined;
   }
   discard(v: Value): boolean {
-    return this.map.delete(hashKey(v));
+    if (v instanceof DiasporeSet && !(v instanceof DiasporeFrozenSet)) v = new DiasporeFrozenSet(v.copy().map);
+    const slot = resolveHashKey(this.map, hashKey(v), v, false);
+    if (slot === undefined) return false;
+    this.map.delete(slot);
+    removeHashSlot(this.map, slot);
+    return true;
   }
   elems(): Value[] {
     return [...this.map.values()];
@@ -161,10 +369,32 @@ export class DiasporeSet {
   copy(): DiasporeSet {
     const s = new DiasporeSet();
     for (const [hk, v] of this.map) s.map.set(hk, v);
+    copyKeyIndex(this.map, s.map);
     return s;
   }
   clear(): void {
     this.map.clear();
+    keyIndexes.delete(this.map);
+  }
+}
+
+/** Immutable set owning its storage; element hashes are retained on construction. */
+export class DiasporeFrozenSet extends DiasporeSet {
+  cachedHash: bigint | null = null;
+  override copy(): DiasporeFrozenSet {
+    return this;
+  }
+  override add(_v: Value): void {
+    throw diasporeErr("AttributeError", "'frozenset' object has no attribute 'add'");
+  }
+  override addHK(_hk: string, _v: Value): void {
+    throw diasporeErr("AttributeError", "'frozenset' object has no attribute 'add'");
+  }
+  override discard(_v: Value): boolean {
+    throw diasporeErr("AttributeError", "'frozenset' object has no attribute 'discard'");
+  }
+  override clear(): void {
+    throw diasporeErr("AttributeError", "'frozenset' object has no attribute 'clear'");
   }
 }
 
@@ -174,8 +404,10 @@ let objectBase: DiasporeClass | undefined;
 export class DiasporeClass {
   name: string;
   bases: DiasporeClass[];
+  declaredBases: (DiasporeClass | BuiltinType)[];
   ns: Map<string, Value>;
   mro: DiasporeClass[];
+  runtime: Interp | null = null;
   /** The BuiltinType this class (transitively) subclasses, else null.
    * A builtin base (dict/list/...) is recorded here and dropped from `bases`;
    * instances carry an underlying primitive that unoverridden ops act on. */
@@ -187,6 +419,7 @@ export class DiasporeClass {
     prim: BuiltinType | null = null,
   ) {
     this.name = name;
+    this.declaredBases = bases;
     this.bases = bases.filter((b): b is DiasporeClass => b instanceof DiasporeClass);
     this.prim = prim;
     if (this.prim === null) {
@@ -201,6 +434,7 @@ export class DiasporeClass {
       if (b instanceof BuiltinType) this.prim = b;
     }
     this.ns = ns;
+    if (ns.has("__eq__") && !ns.has("__hash__")) ns.set("__hash__", NONE);
     this.mro = c3mro(this);
     if (objectBase !== undefined && !this.mro.includes(objectBase)) this.mro.push(objectBase);
   }
@@ -474,11 +708,13 @@ export type Value =
   | Uint8Array
   | PyNoneT
   | PyEllipsisT
+  | PyNotImplementedT
   | DiasporeList
   | DiasporeTuple
   | DiasporeRange
   | DiasporeSlice
   | DiasporeDict
+  | DiasporeDictView
   | DiasporeSet
   | DiasporeClass
   | DiasporeInstance
@@ -570,6 +806,7 @@ const EXC_TREE: [string, string | null][] = [
   ["OverflowError", "ArithmeticError"],
   ["AssertionError", "Exception"],
   ["AttributeError", "Exception"],
+  ["EOFError", "Exception"],
   ["ImportError", "Exception"],
   ["ModuleNotFoundError", "ImportError"],
   ["LookupError", "Exception"],
@@ -616,6 +853,31 @@ const EXC_TREE: [string, string | null][] = [
 /** The universal base class: every class's MRO ends with it. */
 export const OBJECT: DiasporeClass = new DiasporeClass("object", [], new Map());
 objectBase = OBJECT;
+
+OBJECT.ns.set("__setattr__", new Builtin("__setattr__", function* (I, args): G<Value> {
+  if (args.length !== 3) throw diasporeErr("TypeError", "object.__setattr__() takes 3 arguments");
+  if (!(args[0] instanceof DiasporeInstance)) {
+    throw diasporeErr("TypeError", "object.__setattr__() requires an instance");
+  }
+  if (typeof args[1] !== "string") throw diasporeErr("TypeError", "attribute name must be string");
+  yield* I.setAttrBase(args[0], args[1], args[2]);
+  return NONE;
+}));
+OBJECT.ns.set("__delattr__", new Builtin("__delattr__", function* (I, args): G<Value> {
+  if (args.length !== 2) throw diasporeErr("TypeError", "object.__delattr__() takes 2 arguments");
+  if (!(args[0] instanceof DiasporeInstance)) {
+    throw diasporeErr("TypeError", "object.__delattr__() requires an instance");
+  }
+  if (typeof args[1] !== "string") throw diasporeErr("TypeError", "attribute name must be string");
+  yield* I.delAttrBase(args[0], args[1]);
+  return NONE;
+}));
+OBJECT.ns.set("__hash__", new Builtin("__hash__", function* (_I, args): G<Value> {
+  if (args.length !== 1 || typeof args[0] !== "object") {
+    throw diasporeErr("TypeError", "object.__hash__() requires an object");
+  }
+  return BigInt(objId(args[0]));
+}));
 
 /** Builtin exception classes indexed by Python name. */
 export const EXC_CLASSES: Map<string, DiasporeClass> = (() => {
@@ -708,6 +970,20 @@ export function diasporeErr(name: string, msg: string): DiasporeError {
   return new DiasporeError(makeExc(name, msg));
 }
 
+/** Construct a codec exception with Python's structured error attributes. */
+export function unicodeCodecError(
+  kind: "UnicodeEncodeError" | "UnicodeDecodeError", encoding: string,
+  object: string | Uint8Array, start: number, end: number, reason: string,
+): DiasporeError {
+  const value = makeExc(kind, encoding, object, BigInt(start), BigInt(end), reason);
+  value.d.set("encoding", encoding);
+  value.d.set("object", object);
+  value.d.set("start", BigInt(start));
+  value.d.set("end", BigInt(end));
+  value.d.set("reason", reason);
+  return new DiasporeError(value);
+}
+
 /** Read the positional arguments stored on an exception instance. */
 export function excArgs(inst: DiasporeInstance): Value[] {
   const a = inst.d.get("args");
@@ -738,9 +1014,13 @@ export function typeName(v: Value): string {
   if (v instanceof Uint8Array) return "bytes";
   if (v instanceof PyNoneT) return "NoneType";
   if (v instanceof PyEllipsisT) return "ellipsis";
+  if (v instanceof PyNotImplementedT) return "NotImplementedType";
   if (v instanceof DiasporeList) return "list";
   if (v instanceof DiasporeTuple) return "tuple";
+  if (v instanceof DiasporeMappingProxy) return "mappingproxy";
   if (v instanceof DiasporeDict) return "dict";
+  if (v instanceof DiasporeDictView) return "dict_" + v.kind;
+  if (v instanceof DiasporeFrozenSet) return "frozenset";
   if (v instanceof DiasporeSet) return "set";
   if (v instanceof DiasporeRange) return "range";
   if (v instanceof DiasporeSlice) return "slice";
@@ -849,9 +1129,13 @@ export function hashKey(v: Value): string {
     case "string":
       return "s" + v;
   }
+  if (needsKeyEquality(v)) {
+    return "u" + hashValue(v);
+  }
   if (v instanceof Uint8Array) return "b" + bytesToBinStr(v);
   if (v instanceof PyNoneT) return "N";
   if (v instanceof PyEllipsisT) return "E";
+  if (v instanceof PyNotImplementedT) return "NI";
   if (v instanceof Complex) {
     // im==0 hashes like the equal real number (hash(1+0j) == hash(1)).
     if (v.im === 0) return hashKey(v.re);
@@ -872,8 +1156,8 @@ export function hashKey(v: Value): string {
     return out;
   }
   if (v instanceof DiasporeRange) return `r${v.start},${v.stop},${v.step}`;
+  if (v instanceof DiasporeDictView && v.kind === "values") return "p" + objId(v);
   if (
-    v instanceof DiasporeInstance ||
     v instanceof DiasporeClass ||
     v instanceof BuiltinType ||
     v instanceof DiasporeFunction ||
@@ -889,6 +1173,67 @@ export function hashKey(v: Value): string {
     return "p" + objId(v);
   }
   throw diasporeErr("TypeError", `unhashable type: '${typeName(v)}'`);
+}
+
+/** Deterministic hashing for nonnumeric builtin values. */
+export function fnvHash(s: string): bigint {
+  let h = 0xcbf29ce484222325n;
+  for (let i = 0; i < s.length; i++) {
+    h ^= BigInt(s.charCodeAt(i));
+    h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return h & 0x7fffffffffffffffn;
+}
+
+/** Python hash protocol, including user methods and compound keys. */
+export function hashValue(v: Value): bigint {
+  if (v instanceof DiasporeInstance) {
+    const hook = v.cls.lookup("__hash__");
+    if (hook instanceof PyNoneT) {
+      throw diasporeErr("TypeError", `unhashable type: '${v.cls.name}'`);
+    }
+    if (v.prim !== null && !v.cls.mro.some(c => c !== OBJECT && c.ns.has("__hash__"))) {
+      return hashValue(v.prim);
+    }
+    if (hook === undefined || hook === OBJECT.ns.get("__hash__")) return BigInt(objId(v));
+    const runtime = v.cls.runtime as Interp;
+    const result = runtime.drive(runtime.callDunder(v, "__hash__", []));
+    let n = asIndex(result);
+    if (n === null) throw diasporeErr("TypeError", "__hash__ method should return an integer");
+    if (n < -(1n << 63n) || n >= 1n << 63n) n %= (1n << 61n) - 1n;
+    return n === -1n ? -2n : n;
+  }
+  if (v instanceof DiasporeFrozenSet) {
+    if (v.cachedHash !== null) return v.cachedHash;
+    let hash = 0n;
+    for (const [slot, item] of v.map) {
+      const token = storedHashKey(v.map, slot);
+      const h = BigInt.asUintN(64, token.startsWith("u") ? BigInt(token.slice(1)) : hashValue(item));
+      hash ^= BigInt.asUintN(64, ((h ^ 89869747n) ^ (h << 16n)) * 3644798167n);
+    }
+    hash = BigInt.asUintN(64, hash ^ (BigInt(v.size) + 1n) * 1927868237n);
+    hash ^= (hash >> 11n) ^ (hash >> 25n);
+    hash = BigInt.asIntN(64, hash * 69069n + 907133923n);
+    v.cachedHash = hash === -1n ? 590923713n : hash;
+    return v.cachedHash;
+  }
+  if (v instanceof DiasporeTuple || v instanceof DiasporeSlice) {
+    const items = v instanceof DiasporeTuple ? v.items : [v.lower, v.upper, v.step];
+    let acc = 2870177450012600261n;
+    for (const item of items) {
+      acc = BigInt.asUintN(64, acc + BigInt.asUintN(64, hashValue(item)) * 14029467366897019727n);
+      acc = BigInt.asUintN(64, (acc << 31n) | (acc >> 33n));
+      acc = BigInt.asUintN(64, acc * 11400714785074694791n);
+    }
+    acc = BigInt.asIntN(64, acc + (BigInt(items.length) ^ (2870177450012600261n ^ 3527539n)));
+    return acc === -1n ? 1546275796n : acc;
+  }
+  const hk = hashKey(v);
+  if (hk.startsWith("i")) {
+    const n = BigInt(hk.slice(1)) % ((1n << 61n) - 1n);
+    return n === -1n ? -2n : n;
+  }
+  return fnvHash(hk);
 }
 
 // --------------------------------------------------------------------------
