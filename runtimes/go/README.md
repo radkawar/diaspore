@@ -11,20 +11,21 @@ make to generate the embedded compiler; the resulting binary needs no Python.
 
 ## Usage
 
-Build from the repository root:
+Download a binary from the
+[releases page](https://github.com/radkawar/diaspore/releases), or build from
+the repository root with `uv sync && make build`:
 
 ```sh
-uv sync
-make build
-./build/diaspore-go build app.py -o build/app.dsp.json
-./build/diaspore-go run build/app.dsp.json --max-steps 1000000 -- arg1
-./build/diaspore-go run build/app.dsp.json --durable --snapshot build/app.flow.json
-./build/diaspore-go resume build/app.dsp.json build/app.flow.json --send '"approved"'
+diaspore-go build app.py -o app.dsp.json
+diaspore-go run app.dsp.json --max-steps 1000000 -- arg1
+diaspore-go run app.dsp.json --durable --snapshot app.flow.json
+diaspore-go resume app.dsp.json app.flow.json --send '"approved"'
 ```
 
-`make build` is the supported installation path. Direct
-`go install github.com/radkawar/diaspore/runtimes/go/cmd/diaspore-go@latest`
-cannot generate the required `dspc/dspc.dsp.json.gz` artifact.
+The embedding library installs with
+`go get github.com/radkawar/diaspore/runtimes/go@latest`. The `dspc` package
+and the CLI embed a generated compiler bundle, so `go install` of the CLI does
+not work; use a release binary or `make build`.
 
 Repeat `--path DIR` to add import search directories, for example
 `./build/diaspore-go build app.py --path lib --path vendor -o build/app.dsp.json`.

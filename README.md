@@ -55,8 +55,10 @@ diaspore build main.py -o main.dsp.json
 diaspore run main.dsp.json
 ```
 
-The other runtimes live in this repository. Building them needs Go 1.26+; Node
-23.6+ and Lua 5.4 are needed only for their runtimes.
+Prebuilt `diaspore-go` binaries are on the
+[releases page](https://github.com/radkawar/diaspore/releases), and the
+TypeScript runtime is `npm install diaspore`. To build everything from source
+you need Go 1.26+; Node 23.6+ and Lua 5.4 are needed only for their runtimes.
 
 ```sh
 git clone https://github.com/radkawar/diaspore && cd diaspore
