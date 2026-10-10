@@ -17,7 +17,7 @@ func traceBundle(t *testing.T, source string) map[string]any {
 	if err := os.WriteFile(path, []byte(source), 0600); err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := dspc.CompileFile(path, true, nil)
+	compiled, err := dspc.CompileFile(path, dspc.CompileOptions{Debug: true})
 	if err != nil || compiled.Code != 0 {
 		t.Fatalf("compile: %v %s", err, compiled.Stderr)
 	}

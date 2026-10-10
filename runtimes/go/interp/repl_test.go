@@ -26,7 +26,7 @@ exec(compile("print(x)", "<stdin>", "single"))`, "42\n2\n", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			compiled, err := dspc.CompileSource("/src/main.py", tc.source)
+			compiled, err := dspc.CompileSource("/src/main.py", tc.source, dspc.CompileOptions{})
 			if err != nil || compiled.Code != 0 {
 				t.Fatalf("compile: %v %s", err, compiled.Stderr)
 			}

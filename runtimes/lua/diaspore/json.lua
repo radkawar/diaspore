@@ -4,9 +4,10 @@
 -- conversion) for json.loads:
 --   object -> table  key -> raw value, plus [json.ORDER] = array of keys
 --   array  -> plain array table, plus [json.ARRAY] = true
---   null   -> values.NULL     numbers -> Lua int (integral literal) or float
+--   null   -> values.NULL     numbers -> arbitrary integer or Lua float
 
 local values = require("diaspore.values")
+local bigint = require("diaspore.bigint")
 
 local M = {}
 
@@ -83,12 +84,15 @@ function Parser:number()
     end
   end
   local text = s:sub(start, self.i - 1)
+  if not is_float then
+    if not text:match("^%-?%d+$") then fail("Expecting value") end
+    local native = tonumber(text)
+    if math.type(native) == "integer" then return native end
+    return bigint.parse(text, 10)
+  end
   local v = tonumber(text)
   if v == nil then fail("Expecting value") end
-  if is_float then return v + 0.0 end
-  local iv = math.tointeger(v)
-  if iv ~= nil then return iv end
-  return v + 0.0 -- integer literal beyond int64: keep as float
+  return v * 1.0
 end
 
 function Parser:parse_string()
@@ -257,8 +261,8 @@ local function py_float_str(f)
   return format.py_float_str(f)
 end
 
---- CPython json's default ensure_ascii=True escaping.
-function M.escape_string(s)
+--- Escape JSON strings; false preserves Unicode but escapes surrogate codepoints.
+function M.escape_string(s, ensure_ascii)
   local b = { '"' }
   for _, cp in utf8.codes(s, true) do
     if cp == 0x22 then
@@ -277,8 +281,10 @@ function M.escape_string(s)
       b[#b + 1] = "\\f"
     elseif cp < 0x20 then
       b[#b + 1] = string.format("\\u%04x", cp)
-    elseif cp < 0x80 then
+    elseif cp < 0x7F then
       b[#b + 1] = string.char(cp)
+    elseif ensure_ascii == false and (cp < 0xD800 or cp > 0xDFFF) then
+      b[#b + 1] = utf8.char(cp)
     elseif cp > 0xFFFF then
       local v = cp - 0x10000
       b[#b + 1] = string.format("\\u%04x\\u%04x", 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF))
@@ -316,6 +322,10 @@ local function write_value(b, v, indent, has_indent, depth)
   end
   if t == "string" then
     b[#b + 1] = M.escape_string(v)
+    return
+  end
+  if bigint.is_bigint(v) then
+    b[#b + 1] = bigint.tostring(v)
     return
   end
   local k = v.kind
@@ -378,6 +388,69 @@ function M.dumps(v, indent_v)
   local b = {}
   write_value(b, v, indent, has_indent, 0)
   return table.concat(b)
+end
+
+--- Serialize raw bundle data, including fields added after JSON parsing.
+-- ARRAY preserves empty arrays; ORDER identifies objects but never filters keys.
+-- Unmarked dense numeric tables are arrays; other unmarked tables are objects.
+-- ensure_ascii defaults to true; false produces canonical UTF-8-safe strings.
+function M.stringify_raw(value, ensure_ascii)
+  local output, active = {}, {}
+  local function emit(item)
+    if item == values.NULL then output[#output + 1] = "null"; return end
+    local item_type = type(item)
+    if item_type == "string" then
+      output[#output + 1] = M.escape_string(item, ensure_ascii)
+      return
+    end
+    if item_type == "number" or item_type == "boolean" or bigint.is_bigint(item) then
+      write_value(output, item, 0, false, 0)
+      return
+    end
+    if item_type ~= "table" then
+      values.throw("TypeError", "cannot serialize raw JSON value of type " .. item_type)
+    end
+    if active[item] then values.throw("ValueError", "Circular reference detected") end
+    active[item] = true
+    local keys, count, last = {}, 0, 0
+    for key in next, item do
+      if key ~= M.ARRAY and key ~= M.ORDER then
+        if type(key) == "string" then keys[#keys + 1] = key
+        elseif type(key) == "number" and math.type(key) == "integer" and key > 0 then
+          count = count + 1
+          if key > last then last = key end
+        else
+          values.throw("TypeError", "raw JSON keys must be strings or positive array indices")
+        end
+      end
+    end
+    local array = rawget(item, M.ARRAY) == true
+      or (rawget(item, M.ORDER) == nil and #keys == 0 and count > 0)
+    if array then
+      if #keys > 0 then values.throw("TypeError", "raw JSON arrays cannot contain object fields") end
+      if count ~= last then values.throw("TypeError", "raw JSON arrays cannot contain holes") end
+      output[#output + 1] = "["
+      for index = 1, last do
+        if index > 1 then output[#output + 1] = "," end
+        emit(rawget(item, index))
+      end
+      output[#output + 1] = "]"
+    else
+      if count > 0 then values.throw("TypeError", "raw JSON object keys must be strings") end
+      table.sort(keys)
+      output[#output + 1] = "{"
+      for index, key in ipairs(keys) do
+        if index > 1 then output[#output + 1] = "," end
+        output[#output + 1] = M.escape_string(key, ensure_ascii)
+        output[#output + 1] = ":"
+        emit(rawget(item, key))
+      end
+      output[#output + 1] = "}"
+    end
+    active[item] = nil
+  end
+  emit(value)
+  return table.concat(output)
 end
 
 return M

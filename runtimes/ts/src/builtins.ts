@@ -5,6 +5,11 @@ import { StringDecoder } from "node:string_decoder";
 
 import {
   type Value,
+  type PyString,
+  isPyString,
+  strText,
+  strKey,
+  strFromKey,
   type G,
   type KwArgs,
   NONE,
@@ -48,14 +53,15 @@ import {
   storedHashKey,
   objId,
   chars,
+  strCmp,
   diasporeErr,
   DiasporeError,
   makeExc,
-  unicodeCodecError,
   excIsA,
   OBJECT,
   EXC_CLASSES,
 } from "./values.ts";
+import { functionFromCode } from "./introspection.ts";
 import {
   reprString,
   roundFloatDigits,
@@ -64,24 +70,80 @@ import {
 import {
   getIter,
   iterToArray,
+  reverseSequenceIterator,
   DiasporeGenerator,
   InstIter,
   SeqIter,
   DictViewIter,
+  RangeIter,
   MapIter,
   FilterIter,
   ZipIter,
   EnumIter,
 } from "./iter.ts";
-import { argCount, needArgs, chargeSized, wantStr } from "./helpers.ts";
+import { argCount, needArgs, chargeSized, wantStr, lookupSpecial } from "./helpers.ts";
 import { parseComplex, complexRepr } from "./format.ts";
-import { asciiOf } from "./ops.ts";
+import { asciiOf, getIndex } from "./ops.ts";
 import type { Interp } from "./interp.ts";
 import { biOpen } from "./natives.ts";
+import { makeBufferClasses, bufferBytes, indexInteger } from "./buffers.ts";
+import { textCodec } from "./codecs.ts";
+import { unionType } from "./type-alias.ts";
+import { installOSErrorProtocol } from "./os-errors.ts";
+import { decimalValue } from "./methods.ts";
 
 /** Wrap an implementation as a sandbox builtin. */
 export function bi(name: string, fn: (I: Interp, args: Value[], kw: KwArgs) => G<Value>): Builtin {
   return new Builtin(name, fn);
+}
+
+function* biImport(I: Interp, args: Value[], kw: KwArgs): G<Value> {
+  argCount("__import__", args, 0, 5);
+  const names = ["name", "globals", "locals", "fromlist", "level"];
+  const supplied = args.slice();
+  for (const [key, value] of kw) {
+    const index = names.indexOf(key);
+    if (index < 0) throw diasporeErr("TypeError", `__import__() got an unexpected keyword argument '${key}'`);
+    if (index < args.length) throw diasporeErr("TypeError", `__import__() got multiple values for argument '${key}'`);
+    supplied[index] = value;
+  }
+  const requested = supplied[0];
+  if (!isPyString(requested)) throw diasporeErr("TypeError", "__import__() argument 1 must be str");
+  const requestedName = strKey(requested);
+  let name = requestedName;
+  const level = asIndex(supplied[4] ?? 0n);
+  if (level === null) throw diasporeErr("TypeError", "level must be an integer");
+  if (level < 0n) throw diasporeErr("ValueError", "level must be >= 0");
+  if (level > 0n) {
+    const globals = supplied[1];
+    if (!(globals instanceof DiasporeDict)) throw diasporeErr("TypeError", "globals must be a dict");
+    let packageName = globals.get("__package__");
+    if (packageName === undefined || packageName instanceof PyNoneT) {
+      packageName = globals.get("__name__");
+      if (isPyString(packageName) && !globals.has("__path__")) {
+        const parentName = strKey(packageName);
+        packageName = strFromKey(parentName.slice(0, Math.max(0, parentName.lastIndexOf("."))));
+      }
+    }
+    if (!isPyString(packageName) || !packageName) throw diasporeErr("ImportError", "attempted relative import with no known parent package");
+    const parts = strKey(packageName).split(".");
+    if (level > BigInt(parts.length)) throw diasporeErr("ImportError", "attempted relative import beyond top-level package");
+    name = parts.slice(0, parts.length - Number(level) + 1).join(".") + (name ? "." + name : "");
+  }
+  if (!name) throw diasporeErr("ValueError", "Empty module name");
+  const module = yield* I.importModule(name);
+  const fromlist = supplied[3] ?? NONE;
+  if (yield* I.truth(fromlist)) {
+    for (const member of yield* iterToArray(I, fromlist)) {
+      if (!isPyString(member)) throw diasporeErr("TypeError", "Item in from list must be str");
+      const child = name + "." + strKey(member);
+      if (I.moduleCode(child) !== undefined || I.natives.has(child) || I.bindings.has(child)) yield* I.importModule(child);
+    }
+    return module;
+  }
+  if (level === 0n) return yield* I.importModule(name.split(".")[0]);
+  if (!requestedName) return module;
+  return yield* I.importModule(name.slice(0, name.length - requestedName.length + requestedName.split(".")[0].length));
 }
 
 const MISSING = Symbol("missing");
@@ -90,12 +152,13 @@ const MISSING = Symbol("missing");
 
 /** Construct the builtin namespace for an interpreter. */
 export function makeBuiltins(I: Interp): Map<string, Value> {
+  installOSErrorProtocol();
   const types = new Map<string, BuiltinType>([
     ["int", new BuiltinType("int", ctorInt)],
     ["float", new BuiltinType("float", ctorFloat)],
     ["bool", new BuiltinType("bool", ctorBool)],
     ["str", new BuiltinType("str", ctorStr)],
-    ["bytes", new BuiltinType("bytes", ctorBytes)],
+    ["bytes", new BuiltinType("bytes", bytesFromArguments)],
     ["list", new BuiltinType("list", ctorList)],
     ["tuple", new BuiltinType("tuple", ctorTuple)],
     ["dict", new BuiltinType("dict", ctorDict)],
@@ -124,6 +187,11 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
     b.set(name, bi(name, fn));
 
   add("print", biPrint);
+  add("__import__", biImport);
+  add("_typing_union", function* (I, args): G<Value> {
+    argCount("_typing_union", args, 2, 2);
+    return unionType(I, args[0], args[1]) ?? NOT_IMPLEMENTED;
+  });
   add("len", function* (I, args): G<Value> {
     argCount("len", args, 1, 1);
     return yield* I.diasporeLen(args[0]);
@@ -163,7 +231,8 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
   add("id", biID);
   add("iter", function* (I, args): G<Value> {
     argCount("iter", args, 1, 1);
-    return yield* getIter(I, args[0]);
+    const iterator = yield* getIter(I, args[0]);
+    return iterator instanceof InstIter ? iterator.obj : iterator;
   });
   add("next", biNext);
   add("getattr", biGetattr);
@@ -192,19 +261,19 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
   add("input", biInput);
   add("open", biOpen);
   add("exit", biExit);
-  add("staticmethod", function* (_I, args): G<Value> {
+  types.set("staticmethod", new BuiltinType("staticmethod", function* (_I, args): G<Value> {
     argCount("staticmethod", args, 1, 1);
     return new StaticMethodV(args[0]);
-  });
-  add("classmethod", function* (_I, args): G<Value> {
+  }));
+  types.set("classmethod", new BuiltinType("classmethod", function* (_I, args): G<Value> {
     argCount("classmethod", args, 1, 1);
     return new ClassMethodV(args[0]);
-  });
+  }));
   add("format", function* (I, args): G<Value> {
     argCount("format", args, 1, 2);
-    let spec = "";
+    let spec: PyString = "";
     if (args.length === 2) {
-      if (typeof args[1] !== "string") {
+      if (!isPyString(args[1])) {
         throw diasporeErr("TypeError", `format() argument 2 must be str, not ${typeName(args[1])}`);
       }
       spec = args[1];
@@ -232,7 +301,7 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
       throw diasporeErr("TypeError", `object ${typeName(x)} can't be used in 'await' expression`);
     }),
   );
-  add("property", function* (_I, args, kw): G<Value> {
+  types.set("property", new BuiltinType("property", function* (_I, args, kw): G<Value> {
     argCount("property", args, 0, 4);
     const get = (i: number, name: string): Value | null => {
       const kv = kw.get(name);
@@ -240,8 +309,10 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
       if (i < args.length) return args[i] instanceof PyNoneT ? null : args[i];
       return null;
     };
-    return new Property(get(0, "fget"), get(1, "fset"), get(2, "fdel"), get(3, "doc"));
-  });
+    const fget = get(0, "fget");
+    const doc = get(3, "doc") ?? (fget instanceof DiasporeFunction ? fget.metadata.get("__doc__") ?? NONE : null);
+    return new Property(fget, get(1, "fset"), get(2, "fdel"), doc, get(3, "doc") === null);
+  }));
   add("globals", function* (): G<Value> {
     throw diasporeErr("RuntimeError", "globals() unsupported here"); // frame-special-cased
   });
@@ -250,11 +321,24 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
   });
   add("vars", biVars);
   add("dir", biDir);
-  add("compile", function* (I, args): G<Value> {
+  add("compile", function* (I, args, kw): G<Value> {
     needArgs("compile", args, 1, 6);
-    const filename = args.length > 1 && typeof args[1] === "string" ? args[1] : "<string>";
-    const mode = args.length > 2 && typeof args[2] === "string" ? args[2] : "exec";
-    return I.compileSnippet(args[0], filename, mode);
+    const filename = args[1] ?? kw.get("filename") ?? "<string>";
+    const mode = args[2] ?? kw.get("mode") ?? "exec";
+    const flags = asIndex(args[3] ?? kw.get("flags") ?? 0n);
+    if (!isPyString(filename) || !isPyString(mode) || flags === null) {
+      throw diasporeErr("TypeError", "invalid compile() arguments");
+    }
+    if ((flags & 1024n) !== 0n) {
+      if (!I.moduleCode("_ast") && !I.natives.has("_ast")) throw diasporeErr("LookupError", "AST compilation requires a bundled provider (bundle it with `import ast`)");
+      const module = yield* I.importModule("_ast");
+      return yield* I.invoke(yield* I.getAttr(module, "_compile"), [args[0], filename, mode], new Map([
+        ["flags", flags], ["dont_inherit", args[4] ?? kw.get("dont_inherit") ?? false],
+        ["optimize", args[5] ?? kw.get("optimize") ?? -1n],
+        ["_feature_version", kw.get("_feature_version") ?? -1n],
+      ]));
+    }
+    return I.compileSnippet(args[0], strText(filename), strText(mode));
   });
   add("exec", function* (I, args): G<Value> {
     needArgs("exec", args, 1, 3);
@@ -268,6 +352,32 @@ export function makeBuiltins(I: Interp): Map<string, Value> {
     if (name !== "NoneType" && name !== "NotImplementedType" && name !== "type") b.set(name, t);
   }
   for (const [name, cls] of EXC_CLASSES) b.set(name, cls);
+  for (const name of ["UnicodeEncodeError", "UnicodeDecodeError", "UnicodeTranslateError"]) {
+    const cls = EXC_CLASSES.get(name)!;
+    cls.ns.set("__init__", bi("__init__", function* (I, args, kw): G<Value> {
+      const translate = name === "UnicodeTranslateError";
+      argCount(name, args, translate ? 5 : 6, translate ? 5 : 6);
+      if (kw.size) throw diasporeErr("TypeError", `${name}() takes no keyword arguments`);
+      const error = args[0] as DiasporeInstance;
+      let index = 1;
+      if (!translate) error.exc.set("encoding", wantStr("encoding", args[index++]));
+      const original = args[index++];
+      let object: Value;
+      if (name === "UnicodeDecodeError") {
+        const bytes = bufferBytes(original);
+        if (bytes === null) throw diasporeErr("TypeError", "a bytes-like object is required");
+        object = original instanceof Uint8Array ? original : bytes.slice();
+      } else object = wantStr("object", original);
+      error.exc.set("object", object);
+      for (const field of ["start", "end"]) {
+        error.exc.set(field, yield* indexInteger(I, args[index++]));
+      }
+      error.exc.set("reason", wantStr("reason", args[index]));
+      error.exc.set("args", new DiasporeTuple(args.slice(1)));
+      return NONE;
+    }));
+  }
+  for (const [name, cls] of makeBufferClasses(I)) b.set(name, cls);
   return b;
 }
 
@@ -276,22 +386,14 @@ function arg(args: Value[], i: number): Value | null {
   return args[i] instanceof PyNoneT ? null : args[i];
 }
 
-function* biVars(_I: Interp, args: Value[]): G<Value> {
-  if (args.length === 0) throw diasporeErr("TypeError", "vars() with no argument unsupported here");
-  const o = args[0];
-  const d = new DiasporeDict();
-  if (o instanceof DiasporeInstance) {
-    for (const [k, v] of o.d) d.setHK("s" + k, k, v);
-    return d;
+function* biVars(I: Interp, args: Value[]): G<Value> {
+  argCount("vars", args, 1, 1);
+  try {
+    return yield* I.getAttr(args[0], "__dict__");
+  } catch (error) {
+    if (!(error instanceof DiasporeError && excIsA(error.value, "AttributeError"))) throw error;
+    throw diasporeErr("TypeError", "vars() argument must have __dict__");
   }
-  if (o instanceof DiasporeModule) {
-    for (const [k, v] of o.frame.vars) d.setHK("s" + k, k, v);
-    return d;
-  }
-  if (o instanceof DiasporeClass) {
-    return new DiasporeMappingProxy(o.ns);
-  }
-  throw diasporeErr("TypeError", "vars() argument must have __dict__");
 }
 
 function* biDir(_I: Interp, args: Value[]): G<Value> {
@@ -299,7 +401,8 @@ function* biDir(_I: Interp, args: Value[]): G<Value> {
   const o = args[0];
   const names = new Set<string>();
   if (o instanceof DiasporeInstance) {
-    for (const k of o.d.keys()) names.add(k);
+    const dictionary = o.peekDict();
+    if (dictionary !== undefined) for (const k of dictionary.keys()) names.add(k);
     for (const c of o.cls.mro) for (const k of c.ns.keys()) names.add(k);
   } else if (o instanceof DiasporeModule) {
     for (const k of o.frame.vars.keys()) names.add(k);
@@ -308,27 +411,27 @@ function* biDir(_I: Interp, args: Value[]): G<Value> {
   } else if (o instanceof NativeModule) {
     for (const k of o.ns.keys()) names.add(k);
   }
-  const sorted = [...names].sort();
-  return new DiasporeList(sorted.map((s) => s as Value));
+  const sorted = [...names].map(strFromKey).sort(strCmp);
+  return new DiasporeList(sorted);
 }
 
 // --------------------------------------------------------------------------
 // output & input
 
 function* biPrint(I: Interp, args: Value[], kw: KwArgs): G<Value> {
-  let sep = " ";
-  let end = "\n";
+  let sep: PyString = " ";
+  let end: PyString = "\n";
   for (const [k, v] of kw) {
     if (k === "sep") {
       if (!(v instanceof PyNoneT)) {
-        if (typeof v !== "string") {
+        if (!isPyString(v)) {
           throw diasporeErr("TypeError", `sep must be None or a string, not ${typeName(v)}`);
         }
         sep = v;
       }
     } else if (k === "end") {
       if (!(v instanceof PyNoneT)) {
-        if (typeof v !== "string") {
+        if (!isPyString(v)) {
           throw diasporeErr("TypeError", `end must be None or a string, not ${typeName(v)}`);
         }
         end = v;
@@ -472,19 +575,21 @@ function* biFilter(I: Interp, args: Value[]): G<Value> {
 function* biReversed(I: Interp, args: Value[]): G<Value> {
   argCount("reversed", args, 1, 1);
   const v = args[0];
+  const method = yield* lookupSpecial(I, v, "__reversed__");
+  if (method !== undefined) {
+    if (method instanceof PyNoneT) throw diasporeErr("TypeError", `'${typeName(v)}' object is not reversible`);
+    return yield* I.invoke(method, [], new Map());
+  }
   if (v instanceof DiasporeDictView) return new DictViewIter(v, true);
   if (v instanceof DiasporeDict) return new DictViewIter(new DiasporeDictView(v, "keys"), true);
   let items: Value[];
-  if (v instanceof DiasporeList) items = [...v.items];
+  if (v instanceof DiasporeList) return yield* reverseSequenceIterator(I, v);
   else if (v instanceof DiasporeTuple) items = [...v.items];
-  else if (typeof v === "string") items = chars(v).slice();
+  else if (isPyString(v)) items = chars(v).slice();
   else if (v instanceof Uint8Array) items = [...v].map((c) => BigInt(c));
-  else if (v instanceof DiasporeRange) {
-    items = [];
-    const n = v.len();
-    for (let i = 0n; i < n; i++) items.push(v.start + i * v.step);
-  } else {
-    throw diasporeErr("TypeError", `'${typeName(v)}' object is not reversible`);
+  else if (v instanceof DiasporeRange) return new RangeIter(v, true);
+  else {
+    return yield* reverseSequenceIterator(I, v);
   }
   items.reverse();
   return new SeqIter(items, "reversed");
@@ -606,12 +711,14 @@ function* biAll(I: Interp, args: Value[]): G<Value> {
 
 function* biAbs(I: Interp, args: Value[]): G<Value> {
   argCount("abs", args, 1, 1);
-  const n = asIndex(args[0]);
-  if (n !== null) return n < 0n ? -n : n;
-  if (typeof args[0] === "number") return Math.abs(args[0]);
-  if (args[0] instanceof Complex) return Math.hypot(args[0].re, args[0].im);
-  if (args[0] instanceof DiasporeInstance && args[0].cls.lookup("__abs__") !== undefined) {
-    return yield* I.callDunder(args[0], "__abs__", []);
+  const method = yield* lookupSpecial(I, args[0], "__abs__");
+  if (method !== undefined) return yield* I.invoke(method, [], new Map());
+  const value = args[0] instanceof DiasporeInstance ? args[0].prim : args[0];
+  if (value !== null) {
+    const n = asIndex(value);
+    if (n !== null) return n < 0n ? -n : n;
+    if (typeof value === "number") return Math.abs(value);
+    if (value instanceof Complex) return Math.hypot(value.re, value.im);
   }
   throw diasporeErr("TypeError", `bad operand type for abs(): '${typeName(args[0])}'`);
 }
@@ -668,7 +775,7 @@ function* biDivmod(I: Interp, args: Value[]): G<Value> {
 
 function* biPow(I: Interp, args: Value[]): G<Value> {
   argCount("pow", args, 2, 3);
-  if (args.length === 3) {
+  if (args.length === 3 && !(args[2] instanceof PyNoneT)) {
     const a = asIndex(args[0]);
     const bb = asIndex(args[1]);
     const m = asIndex(args[2]);
@@ -703,7 +810,7 @@ function modPow(base: bigint, exp: bigint, mod: bigint): bigint {
 function* biOrd(_I: Interp, args: Value[]): G<Value> {
   argCount("ord", args, 1, 1);
   const v = args[0];
-  if (typeof v === "string") {
+  if (isPyString(v)) {
     const rs = chars(v);
     if (rs.length !== 1) {
       throw diasporeErr(
@@ -765,7 +872,7 @@ function valueMatchesType(v: Value, bt: BuiltinType): boolean {
     case "float":
       return typeof v === "number";
     case "str":
-      return typeof v === "string";
+      return isPyString(v);
     case "bytes":
       return v instanceof Uint8Array;
     case "list":
@@ -794,12 +901,10 @@ function valueMatchesType(v: Value, bt: BuiltinType): boolean {
     case "dict_values":
     case "dict_items":
       return v instanceof DiasporeDictView && "dict_" + v.kind === bt.name;
-    case "Random":
-      return v instanceof NativeObject && v.kind === "Random";
     case "type":
       return v instanceof DiasporeClass || v instanceof BuiltinType;
   }
-  return false;
+  return typeName(v) === bt.name || (v instanceof NativeObject && v.kind.split(".").at(-1) === bt.name);
 }
 
 function* biIsinstance(_I: Interp, args: Value[]): G<Value> {
@@ -809,7 +914,13 @@ function* biIsinstance(_I: Interp, args: Value[]): G<Value> {
   for (const c of classes) {
     if (c === OBJECT) return true;
     if (c instanceof DiasporeClass) {
+      if ((v instanceof DiasporeInstance && v.cls === c) || (v instanceof DiasporeClass && v.metaclass === c)) return true;
+      if (c.metaclass instanceof DiasporeClass && c.metaclass.lookup("__instancecheck__") !== undefined) {
+        if (yield* _I.truth(yield* _I.invoke(yield* _I.getAttr(c, "__instancecheck__"), [v], new Map()))) return true;
+        continue;
+      }
       if (v instanceof DiasporeInstance && v.cls.issub(c)) return true;
+      if (v instanceof DiasporeClass && v.metaclass instanceof DiasporeClass && v.metaclass.issub(c)) return true;
     } else if (c instanceof BuiltinType) {
       if (c.name === "type") {
         if (v instanceof DiasporeClass || v instanceof BuiltinType) return true;
@@ -842,6 +953,11 @@ function* biIssubclass(_I: Interp, args: Value[]): G<Value> {
     if (c === OBJECT) return true;
   }
   for (const c of classes) {
+    if (c instanceof DiasporeClass && c.metaclass instanceof DiasporeClass && c.metaclass.lookup("__subclasscheck__") !== undefined) {
+      if (yield* _I.truth(yield* _I.invoke(yield* _I.getAttr(c, "__subclasscheck__"), [a], new Map()))) return true;
+      continue;
+    }
+    if (a instanceof DiasporeClass && c instanceof BuiltinType && a.prim?.name === c.name) return true;
     if (a instanceof DiasporeClass && c instanceof DiasporeClass && a.issub(c)) return true;
     if (a instanceof BuiltinType && c instanceof BuiltinType) {
       if (a.name === c.name || (a.name === "bool" && c.name === "int")) return true;
@@ -858,6 +974,7 @@ function* biCallable(_I: Interp, args: Value[]): G<Value> {
     v instanceof BoundMethod ||
     v instanceof DiasporeClass ||
     v instanceof BuiltinType ||
+    v instanceof StaticMethodV ||
     v instanceof Builtin
   ) {
     return true;
@@ -880,26 +997,28 @@ function* biID(_I: Interp, args: Value[]): G<Value> {
 
 function* biNext(I: Interp, args: Value[]): G<Value> {
   argCount("next", args, 1, 2);
-  let it: DiasporeIterBase | null = null;
   const v = args[0];
-  if (v instanceof DiasporeIterBase) it = v;
-  else if (v instanceof DiasporeInstance && v.cls.lookup("__next__") !== undefined) {
-    it = new InstIter(I, v);
+  if (!(v instanceof DiasporeIterBase)) {
+    const method = yield* lookupSpecial(I, v, "__next__");
+    if (method === undefined) throw diasporeErr("TypeError", `'${typeName(v)}' object is not an iterator`);
+    try {
+      return yield* I.invoke(method, [], new Map());
+    } catch (error) {
+      if (args.length === 2 && error instanceof DiasporeError && excIsA(error.value, "StopIteration")) return args[1];
+      throw error;
+    }
   }
-  if (it === null) {
-    throw diasporeErr("TypeError", `'${typeName(v)}' object is not an iterator`);
-  }
-  const [x, ok] = yield* it.next();
+  const [x, ok] = yield* v.next();
   if (ok) return x;
   if (args.length === 2) return args[1];
-  const rv = it.takeRetval();
+  const rv = v.takeRetval();
   throw new DiasporeError(
     rv instanceof PyNoneT ? makeExc("StopIteration") : makeExc("StopIteration", rv),
   );
 }
 
 function attrName(v: Value): string {
-  if (typeof v === "string") return v;
+  if (isPyString(v)) return strKey(v);
   throw diasporeErr("TypeError", `attribute name must be string, not '${typeName(v)}'`);
 }
 
@@ -931,7 +1050,7 @@ function* ctorInt(I: Interp, args: Value[]): G<Value> {
         `'${typeName(args[1])}' object cannot be interpreted as an integer`,
       );
     }
-    if (typeof v !== "string") {
+    if (!isPyString(v)) {
       throw diasporeErr("TypeError", "int() can't convert non-string with explicit base");
     }
     return parsePyInt(v, Number(base));
@@ -940,7 +1059,7 @@ function* ctorInt(I: Interp, args: Value[]): G<Value> {
     for (const d of ["__int__", "__index__", "__trunc__"]) {
       if (v.cls.lookup(d) !== undefined) return yield* I.callDunder(v, d, []);
     }
-    if (v.prim !== null && (typeof v.prim === "bigint" || typeof v.prim === "number" || typeof v.prim === "string")) {
+    if (v.prim !== null && (typeof v.prim === "bigint" || typeof v.prim === "number" || isPyString(v.prim))) {
       return yield* ctorInt(I, [v.prim]);
     }
     throw diasporeErr(
@@ -957,17 +1076,17 @@ function* ctorInt(I: Interp, args: Value[]): G<Value> {
     }
     return intFromFloat(v);
   }
-  if (typeof v === "string") return parsePyInt(v, 10);
+  if (isPyString(v)) return parsePyInt(v, 10);
   throw diasporeErr(
     "TypeError",
     `int() argument must be a string or a real number, not '${typeName(v)}'`,
   );
 }
 
-function parsePyInt(orig: string, base: number): bigint {
+function parsePyInt(orig: PyString, base: number): bigint {
   const fail = () =>
     diasporeErr("ValueError", `invalid literal for int() with base ${base}: ${reprString(orig)}`);
-  let s = orig.trim();
+  let s = strText(orig).trim();
   let sign = "";
   if (s.startsWith("+") || s.startsWith("-")) {
     sign = s[0];
@@ -983,8 +1102,8 @@ function parsePyInt(orig: string, base: number): bigint {
   let out = 0n;
   const bb = BigInt(base);
   for (const ch of cleaned) {
-    const d = digits.indexOf(ch);
-    if (d < 0) throw fail();
+    const d = decimalValue(ch) ?? digits.indexOf(ch);
+    if (d < 0 || d >= base) throw fail();
     out = out * bb + BigInt(d);
   }
   return sign === "-" ? -out : out;
@@ -1010,7 +1129,7 @@ function* ctorFloat(I: Interp, args: Value[]): G<Value> {
   if (typeof v === "number") return v;
   const n = asIndex(v);
   if (n !== null) return Number(n);
-  if (typeof v === "string") return parsePyFloat(v);
+  if (isPyString(v)) return parsePyFloat(v);
   if (v instanceof DiasporeInstance) {
     if (v.cls.lookup("__float__") !== undefined) return yield* I.callDunder(v, "__float__", []);
     if (v.prim !== null && (typeof v.prim === "bigint" || typeof v.prim === "number")) {
@@ -1036,7 +1155,7 @@ function* ctorComplex(_I: Interp, args: Value[]): G<Value> {
   if (args.length === 0) return new Complex(0, 0);
   const a = args[0];
   if (args.length === 1) {
-    if (typeof a === "string") return parseComplex(a);
+    if (isPyString(a)) return parseComplex(strText(a));
     if (a instanceof Complex) return a;
     const n = toNum(a);
     if (n === null) {
@@ -1058,10 +1177,10 @@ function* ctorComplex(_I: Interp, args: Value[]): G<Value> {
   return new Complex(reC.re - imC.im, reC.im + imC.re);
 }
 
-function parsePyFloat(orig: string): number {
+function parsePyFloat(orig: PyString): number {
   const fail = () =>
     diasporeErr("ValueError", `could not convert string to float: ${reprString(orig)}`);
-  const s = orig.trim();
+  const s = strText(orig).trim();
   if (s === "") throw fail();
   const m = /^([+-]?)(inf|infinity|nan)$/i.exec(s);
   if (m !== null) {
@@ -1084,26 +1203,42 @@ function* ctorBool(I: Interp, args: Value[]): G<Value> {
 }
 
 function* ctorStr(I: Interp, args: Value[], kw: KwArgs): G<Value> {
-  if (args.length > 1 || kw.size > 0) {
-    throw diasporeErr("TypeError", "diaspore str() takes one argument");
+  argCount("str", args, 0, 3);
+  const value = args[0] ?? kw.get("object") ?? "";
+  if (args.length > 1 || kw.has("encoding") || kw.has("errors")) {
+    const buffer = bufferBytes(value);
+    if (buffer === null) throw diasporeErr("TypeError", "decoding to str: need a bytes-like object");
+    return yield* textCodec(I, "decode", buffer,
+      wantStr("encoding", args[1] ?? kw.get("encoding") ?? "utf-8"),
+      wantStr("errors", args[2] ?? kw.get("errors") ?? "strict"));
   }
-  if (args.length === 0) return "";
-  return yield* I.str(args[0]);
+  return yield* I.str(value);
 }
 
-function* ctorBytes(I: Interp, args: Value[]): G<Value> {
-  argCount("bytes", args, 0, 2);
-  if (args.length === 0) return new Uint8Array(0);
-  const v = args[0];
-  if (typeof v === "string") {
-    if (args.length < 2) {
-      throw diasporeErr("TypeError", "string argument without an encoding");
-    }
-    const enc = wantStr("encoding", args[1]);
-    return encodeStrTo(v, enc);
+/** Construct bytes storage; mutable consumers never consult the __bytes__ protocol. */
+export function* bytesFromArguments(I: Interp, args: Value[], kw: KwArgs, mutable = false): G<Value> {
+  argCount(mutable ? "bytearray" : "bytes", args, 0, 3);
+  const v = args[0] ?? kw.get("source");
+  if (v === undefined) return new Uint8Array(0);
+  if (isPyString(v)) {
+    const encoding = args[1] ?? kw.get("encoding");
+    if (encoding === undefined) throw diasporeErr("TypeError", "string argument without an encoding");
+    const encoded = yield* textCodec(I, "encode", v, wantStr("encoding", encoding),
+      wantStr("errors", args[2] ?? kw.get("errors") ?? "strict"));
+    if (!(encoded instanceof Uint8Array)) throw diasporeErr("TypeError", "encoder did not return bytes");
+    return mutable ? new Uint8Array(encoded) : encoded;
   }
-  if (v instanceof Uint8Array) return new Uint8Array(v);
-  const n = asIndex(v);
+  if (args.length > 1 || kw.has("encoding") || kw.has("errors")) throw diasporeErr("TypeError", "encoding or errors without a string argument");
+  if (!mutable && v instanceof DiasporeInstance && v.cls.lookup("__bytes__") !== undefined) {
+    const result = yield* I.callDunder(v, "__bytes__", []);
+    if (!(result instanceof Uint8Array)) throw diasporeErr("TypeError", "__bytes__ returned non-bytes");
+    return result;
+  }
+  const buffer = bufferBytes(v);
+  if (buffer !== null) return new Uint8Array(buffer);
+  const indexed = asIndex(v) !== null || (v instanceof DiasporeInstance &&
+    (asIndex(v.prim as Value) !== null || v.cls.lookup("__index__") !== undefined));
+  const n = indexed ? yield* indexInteger(I, v) : null;
   if (n !== null) {
     if (n < 0n) throw diasporeErr("ValueError", "negative count");
     return new Uint8Array(Number(n));
@@ -1111,60 +1246,13 @@ function* ctorBytes(I: Interp, args: Value[]): G<Value> {
   const items = yield* iterToArray(I, v);
   const out = new Uint8Array(items.length);
   for (let i = 0; i < items.length; i++) {
-    const x = asIndex(items[i]);
-    if (x === null) {
-      throw diasporeErr(
-        "TypeError",
-        `'${typeName(items[i])}' object cannot be interpreted as an integer`,
-      );
-    }
-    if (x < 0n || x > 255n) throw diasporeErr("ValueError", "bytes must be in range(0, 256)");
+    const x = yield* indexInteger(I, items[i]);
+    if (x < 0n || x > 255n) throw diasporeErr("ValueError", `${mutable ? "byte" : "bytes"} must be in range(0, 256)`);
     out[i] = Number(x);
   }
   return out;
 }
 
-/** Encode text using a supported Python encoding name. */
-export function encodeStrTo(s: string, enc: string): Uint8Array {
-  switch (enc.toLowerCase().replace(/_/g, "-")) {
-    case "utf-8":
-    case "utf8":
-      return new TextEncoder().encode(s);
-    case "ascii":
-    case "us-ascii":
-    case "646": {
-      const out = new Uint8Array(s.length);
-      for (let i = 0; i < s.length; i++) {
-        const code = s.charCodeAt(i);
-        if (code > 0x7f) {
-          const points = chars(s);
-          let end = i + 1;
-          while (end < points.length && (points[end].codePointAt(0) as number) > 0x7f) end++;
-          throw unicodeCodecError("UnicodeEncodeError", "ascii", s, i, end, "ordinal not in range(128)");
-        }
-        out[i] = code;
-      }
-      return out;
-    }
-    case "latin-1":
-    case "latin1":
-    case "iso-8859-1": {
-      const out: number[] = [];
-      for (const r of s) {
-        const c = r.codePointAt(0) as number;
-        if (c > 0xff) {
-          throw diasporeErr(
-            "ValueError",
-            `'latin-1' codec can't encode character ${reprString(r)}`,
-          );
-        }
-        out.push(c);
-      }
-      return new Uint8Array(out);
-    }
-  }
-  throw diasporeErr("ValueError", `unknown encoding: ${enc}`);
-}
 
 function* ctorList(I: Interp, args: Value[]): G<Value> {
   if (args.length === 1) chargeSized(I, args[0]);
@@ -1206,23 +1294,58 @@ function* ctorFrozenSet(I: Interp, args: Value[], kw: KwArgs): G<Value> {
   return new DiasporeFrozenSet(out.map);
 }
 
-/** Merge a mapping or iterable of pairs into a sandbox dictionary. */
+/** Merge mappings by their keys protocol or consume outer pair iterators incrementally. */
 export function* dictUpdateFrom(I: Interp, d: DiasporeDict, src: Value): G<void> {
-  if (src instanceof DiasporeInstance && src.prim !== null) src = src.prim;
-  if (src instanceof DiasporeDict) {
-    for (const [hk, e] of src.map) d.setHK(storedHashKey(src.map, hk), e.key, e.val);
+  let dictionary: DiasporeDict | null = src instanceof DiasporeDict ? src : null;
+  if (src instanceof DiasporeInstance && src.prim instanceof DiasporeDict) {
+    const iterator = src.cls.lookup("__iter__");
+    if (iterator === undefined || iterator === I.builtinUnbound("dict", "__iter__")) dictionary = src.prim;
+  }
+  if (dictionary !== null) {
+    if (dictionary === d) return;
+    const size = dictionary.size;
+    for (const [slot, entry] of dictionary.map) {
+      I.fuel();
+      d.setHK(storedHashKey(dictionary.map, slot), entry.key, entry.val);
+      if (dictionary.size !== size) throw diasporeErr("RuntimeError", "dict mutated during update");
+    }
     return;
   }
-  const pairs = yield* iterToArray(I, src);
-  for (let i = 0; i < pairs.length; i++) {
-    const kv = yield* iterToArray(I, pairs[i]);
-    if (kv.length !== 2) {
-      throw diasporeErr(
-        "ValueError",
-        `dictionary update sequence element #${i} has length ${kv.length}; 2 is required`,
-      );
+  let keys: Value | undefined;
+  try {
+    keys = yield* I.getAttr(src, "keys");
+  } catch (error) {
+    if (!(error instanceof DiasporeError && excIsA(error.value, "AttributeError"))) throw error;
+  }
+  if (keys !== undefined) {
+    const result = yield* I.invoke(keys, [], new Map());
+    const names = result instanceof DiasporeList ? result.items : yield* iterToArray(I, result);
+    for (let index = 0; index < names.length; index++) {
+      I.fuel();
+      const key = names[index];
+      d.set(key, yield* getIndex(I, src, key));
     }
-    d.set(kv[0], kv[1]);
+    return;
+  }
+  const pairs = yield* getIter(I, src);
+  for (let index = 0;; index++) {
+    I.fuel();
+    const [pair, present] = yield* pairs.next();
+    if (!present) return;
+    let items: Value[];
+    try {
+      items = yield* iterToArray(I, pair);
+    } catch (error) {
+      if (error instanceof DiasporeError && excIsA(error.value, "TypeError")) {
+        throw diasporeErr("TypeError", `cannot convert dictionary update sequence element #${index} to a sequence`);
+      }
+      throw error;
+    }
+    if (items.length !== 2) {
+      throw diasporeErr("ValueError",
+        `dictionary update sequence element #${index} has length ${items.length}; 2 is required`);
+    }
+    d.set(items[0], items[1]);
   }
 }
 
@@ -1259,7 +1382,7 @@ function* ctorSlice(_I: Interp, args: Value[], kw: KwArgs): G<Value> {
   return new DiasporeSlice(args[0], args[1], args.length === 3 ? args[2] : NONE);
 }
 
-function* ctorType(I: Interp, args: Value[]): G<Value> {
+function* ctorType(I: Interp, args: Value[], kwargs: KwArgs): G<Value> {
   argCount("type", args, 1, 3);
   const v = args[0];
   if (args.length > 1) {
@@ -1269,25 +1392,23 @@ function* ctorType(I: Interp, args: Value[]): G<Value> {
     }
     const bases = args[1];
     const ns = args[2];
-    if (typeof v !== "string" || !(bases instanceof DiasporeTuple) || !(ns instanceof DiasporeDict)) {
+    if (!isPyString(v) || !(bases instanceof DiasporeTuple) || !(ns instanceof DiasporeDict)) {
       throw diasporeErr("TypeError", "type() argument types: (str, tuple, dict)");
     }
-    const checked: DiasporeClass[] = [];
-    for (const b of bases.items) {
-      if (!(b instanceof DiasporeClass)) {
-        throw diasporeErr("TypeError", `cannot subclass ${yield* I.repr(b)} in diaspore`);
-      }
-      checked.push(b);
-    }
+    const checked: (DiasporeClass | BuiltinType)[] = [];
+    for (const b of bases.items) checked.push(yield* I.checkBase(b));
     const nsMap = new Map<string, Value>();
     for (const [k, val] of ns.entries()) {
-      if (typeof k === "string") nsMap.set(k, val);
+      if (isPyString(k)) nsMap.set(strKey(k), val);
     }
-    return yield* I.buildClass(v, checked, nsMap, null, new Map());
+    return yield* I.buildClass(strKey(v), checked, nsMap, null, kwargs);
   }
+  if (kwargs.size !== 0) throw diasporeErr("TypeError", "type() takes no keyword arguments");
   const t = I.types;
   if (v instanceof DiasporeInstance) return v.cls;
-  if (v instanceof DiasporeClass || v instanceof BuiltinType) return t.get("type") as BuiltinType;
+  if (v instanceof DiasporeClass) return v.metaclass ?? t.get("type")!;
+  if (v instanceof BuiltinType) return t.get("type")!;
+  if (isPyString(v)) return t.get("str")!;
   switch (typeof v) {
     case "boolean":
       return t.get("bool") as BuiltinType;
@@ -1301,12 +1422,7 @@ function* ctorType(I: Interp, args: Value[]): G<Value> {
   if (v instanceof Uint8Array) return t.get("bytes") as BuiltinType;
   if (v instanceof DiasporeList) return t.get("list") as BuiltinType;
   if (v instanceof DiasporeTuple) return t.get("tuple") as BuiltinType;
-  if (v instanceof DiasporeMappingProxy) {
-    return new BuiltinType("mappingproxy", function* (): G<Value> {
-      throw diasporeErr("TypeError", "cannot construct 'mappingproxy' values");
-    });
-  }
-  if (v instanceof DiasporeDict) return t.get("dict") as BuiltinType;
+  if (v instanceof DiasporeDict && !(v instanceof DiasporeMappingProxy)) return t.get("dict") as BuiltinType;
   if (v instanceof DiasporeFrozenSet) return t.get("frozenset") as BuiltinType;
   if (v instanceof DiasporeSet) return t.get("set") as BuiltinType;
   if (v instanceof DiasporeRange) return t.get("range") as BuiltinType;
@@ -1317,7 +1433,29 @@ function* ctorType(I: Interp, args: Value[]): G<Value> {
   const name = typeName(v);
   const registered = t.get(name);
   if (registered !== undefined) return registered;
-  const result = new BuiltinType(name, function* (): G<Value> {
+  const result = new BuiltinType(name, function* (_I, args, kw): G<Value> {
+    if (name === "function") return functionFromCode(_I, args, kw);
+    if (name === "mappingproxy") {
+      argCount("mappingproxy", args, 1, 1);
+      if (!(args[0] instanceof DiasporeDict)) throw diasporeErr("TypeError", "mappingproxy() argument must be a mapping");
+      const proxy = new DiasporeMappingProxy(new Map());
+      proxy.map = args[0].map;
+      return proxy;
+    }
+    if (name === "method") {
+      argCount("method", args, 2, 2);
+      if (args[1] instanceof PyNoneT) throw diasporeErr("TypeError", "instance must not be None");
+      return new BoundMethod(args[0], args[1]);
+    }
+    if (name === "cell") {
+      argCount("cell", args, 0, 1);
+      return new NativeObject("cell", new Map(), args.length ? new Map([["cell_contents", args[0]]]) : new Map());
+    }
+    if (name === "module") {
+      argCount("module", args, 1, 2);
+      if (!isPyString(args[0])) throw diasporeErr("TypeError", "module name must be a string");
+      return new NativeModule(strKey(args[0]), new Map<string, Value>([["__name__", args[0]], ["__doc__", args[1] ?? NONE], ["__package__", NONE], ["__loader__", NONE], ["__spec__", NONE]]));
+    }
     throw diasporeErr("TypeError", `cannot construct '${name}' values`);
   });
   t.set(name, result);

@@ -8,6 +8,7 @@ import (
 // Raised is a diaspore-level exception in flight. Exc is the exception instance
 // (*Instance whose class derives from BaseException).
 type Raised struct {
+	metadataFrame *frame
 	// Exc is an exception instance whose class derives from BaseException.
 	Exc Value
 	// TB holds traceback entries, from the raising frame outward.
@@ -50,7 +51,7 @@ func plainExcStr(inst *Instance) string {
 }
 
 func excArgs(inst *Instance) []Value {
-	if a, ok := inst.D["args"].(*Tuple); ok {
+	if a, ok := inst.dictValue("args").(*Tuple); ok {
 		return a.Items
 	}
 	return nil
@@ -85,6 +86,18 @@ var excTree = [][2]string{
 	{"GeneratorExit", "BaseException"},
 	{"BaseExceptionGroup", "BaseException"},
 	{"Exception", "BaseException"},
+	{"Warning", "Exception"},
+	{"UserWarning", "Warning"},
+	{"DeprecationWarning", "Warning"},
+	{"PendingDeprecationWarning", "Warning"},
+	{"SyntaxWarning", "Warning"},
+	{"RuntimeWarning", "Warning"},
+	{"FutureWarning", "Warning"},
+	{"ImportWarning", "Warning"},
+	{"UnicodeWarning", "Warning"},
+	{"BytesWarning", "Warning"},
+	{"ResourceWarning", "Warning"},
+	{"EncodingWarning", "Warning"},
 	{"ArithmeticError", "Exception"},
 	{"ZeroDivisionError", "ArithmeticError"},
 	{"OverflowError", "ArithmeticError"},
@@ -118,6 +131,7 @@ var excTree = [][2]string{
 	{"UnicodeError", "ValueError"},
 	{"UnicodeDecodeError", "UnicodeError"},
 	{"UnicodeEncodeError", "UnicodeError"},
+	{"UnicodeTranslateError", "UnicodeError"},
 	{"BlockingIOError", "OSError"},
 	{"ChildProcessError", "OSError"},
 	{"ConnectionError", "OSError"},
@@ -158,7 +172,9 @@ func buildExcClasses() map[string]*Class {
 		} else {
 			bases = []*Class{objectClass}
 		}
-		c := &Class{Name: name, Bases: bases, NS: map[string]Value{}}
+		c := &Class{Name: name, Bases: bases, NS: map[string]Value{
+			"__module__": "builtins", "__qualname__": name,
+		}}
 		if parent != "" {
 			c.MRO = append([]*Class{c}, m[parent].MRO...)
 		} else {
@@ -170,7 +186,30 @@ func buildExcClasses() map[string]*Class {
 		Name: "__init__",
 		Fn: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			self := args[0].(*Instance)
-			self.D["args"] = &Tuple{Items: append([]Value{}, args[1:]...)}
+			self.dictSet("args", &Tuple{Items: append([]Value{}, args[1:]...)})
+			if (self.Class.Name == "UnicodeEncodeError" || self.Class.Name == "UnicodeDecodeError") && len(args) == 6 {
+				for i, name := range []string{"encoding", "object", "start", "end", "reason"} {
+					self.dictSet(name, args[i+1])
+				}
+			}
+			if self.Class.Name == "UnicodeTranslateError" && len(args) == 5 {
+				for i, name := range []string{"object", "start", "end", "reason"} {
+					self.dictSet(name, args[i+1])
+				}
+			}
+			if self.Class.IsSub(m["OSError"]) && len(args) >= 3 {
+				self.dictSet("errno", args[1])
+				self.dictSet("strerror", args[2])
+				if len(args) >= 4 {
+					self.dictSet("filename", args[3])
+				}
+			}
+			if self.Class.IsSub(m["StopIteration"]) {
+				self.dictSet("value", None)
+				if len(args) > 1 {
+					self.dictSet("value", args[1])
+				}
+			}
 			return None, nil
 		},
 	}
@@ -188,12 +227,13 @@ func init() {
 	// ExceptionGroup inherits from BaseExceptionGroup and Exception (C3).
 	eg := &Class{Name: "ExceptionGroup",
 		Bases: []*Class{m["BaseExceptionGroup"], m["Exception"]},
-		NS:    map[string]Value{}}
+		NS:    map[string]Value{"__module__": "builtins", "__qualname__": "ExceptionGroup"}}
 	eg.MRO = []*Class{eg, m["BaseExceptionGroup"], m["Exception"], m["BaseException"], objectClass}
 	m["ExceptionGroup"] = eg
 	groupInit := &Builtin{Name: "__init__", Fn: groupInitFn}
 	m["BaseExceptionGroup"].NS["__init__"] = groupInit
 	eg.NS["__init__"] = groupInit
+	initializeSyntaxErrorClasses(m)
 }
 
 // groupInitFn validates and populates an (Base)ExceptionGroup instance.
@@ -220,9 +260,9 @@ func groupInitFn(vm *VM, args []Value, kw []KwArg) (Value, error) {
 				"second argument (exceptions) must be a sequence of exceptions")
 		}
 	}
-	self.D["args"] = &Tuple{Items: []Value{msg, &List{Items: items}}}
-	self.D["message"] = msg
-	self.D["exceptions"] = &Tuple{Items: items}
+	self.dictSet("args", &Tuple{Items: []Value{msg, &List{Items: items}}})
+	self.dictSet("message", msg)
+	self.dictSet("exceptions", &Tuple{Items: items})
 	return None, nil
 }
 
@@ -239,11 +279,11 @@ func makeGroup(message string, excs []Value, base bool) *Instance {
 		}
 	}
 	items := append([]Value{}, excs...)
-	return &Instance{Class: excClasses[name], D: map[string]Value{
-		"args":       &Tuple{Items: []Value{message, &List{Items: items}}},
-		"message":    message,
-		"exceptions": &Tuple{Items: items},
-	}}
+	instance := newInstance(excClasses[name], nil)
+	instance.dictSet("args", &Tuple{Items: []Value{message, &List{Items: items}}})
+	instance.dictSet("message", message)
+	instance.dictSet("exceptions", &Tuple{Items: items})
+	return instance
 }
 
 // makeExc builds an exception instance of the named builtin class.
@@ -252,9 +292,18 @@ func makeExc(name string, args ...Value) *Instance {
 	if !ok {
 		cls = excClasses["RuntimeError"]
 	}
-	return &Instance{Class: cls, D: map[string]Value{
-		"args": &Tuple{Items: args},
-	}}
+	instance := newInstance(cls, nil)
+	instance.dictSet("args", &Tuple{Items: args})
+	if syntaxErrorClass != nil && cls.IsSub(syntaxErrorClass) && len(args) != 0 {
+		setSyntaxErrorField(instance, 0, args[0])
+	}
+	if name == "StopIteration" {
+		instance.dictSet("value", None)
+		if len(args) != 0 {
+			instance.dictSet("value", args[0])
+		}
+	}
+	return instance
 }
 
 // newError builds a Raised carrying a builtin exception with a str message.
@@ -274,11 +323,11 @@ func newErrorArgs(name string, args ...Value) *Raised {
 
 func newUnicodeError(name, encoding string, object Value, start, end int64, reason string) *Raised {
 	exc := makeExc(name, encoding, object, start, end, reason)
-	exc.D["encoding"] = encoding
-	exc.D["object"] = object
-	exc.D["start"] = start
-	exc.D["end"] = end
-	exc.D["reason"] = reason
+	exc.dictSet("encoding", encoding)
+	exc.dictSet("object", object)
+	exc.dictSet("start", start)
+	exc.dictSet("end", end)
+	exc.dictSet("reason", reason)
 	return &Raised{Exc: exc}
 }
 

@@ -1,6 +1,6 @@
 import {highlight, escapeHTML} from './common.js';
-import {ready, isReady, invoke} from './runtime.js';
-import {install, curated, stdlib} from './packages.js';
+import {ready, isReady, invoke, compile} from './runtime.js';
+import {install, curated} from './packages.js';
 import {shareLink, restoreLink} from './share.js';
 
 const $ = id => document.getElementById(id);
@@ -108,12 +108,16 @@ function showBundle(text) {
     $('tree').append(node);
   }
   $('copy-json').disabled = false;
+  $('download-json').disabled = false;
+  $('bundle-mode').textContent = bundle.stdlib ? 'Linked' : 'Standalone';
+  $('bundle-mode').title = bundle.stdlib || 'No runtime stdlib reference';
   $('run-json').disabled = busy;
 }
 function setBusy(value) {
   busy = value;
   for (const id of ['run', 'install', 'run-json']) $(id).disabled = !isReady || value || (id === 'run-json' && !bundle);
   $('example').disabled = value;
+  $('self-contained').disabled = value;
 }
 function renderResult(result, elapsed) {
   output.replaceChildren();
@@ -134,7 +138,7 @@ async function execute(mode) {
       showBundle(text);
       renderResult(await invoke('run', text, '{}'), performance.now() - start);
     } else {
-      const compiled = await invoke('compile', source.value, JSON.stringify(files));
+      const compiled = await compile(source.value, files, {self_contained: $('self-contained').checked});
       if (compiled.code !== 0) { renderResult(compiled, performance.now() - start); return; }
       showBundle(compiled.bundle);
       renderResult(await invoke('run', compiled.bundle, '{}'), performance.now() - start);
@@ -161,6 +165,17 @@ for (const tab of ['tree', 'json']) $(tab + '-tab').onclick = () => {
 $('copy-json').onclick = async () => {
   try { await navigator.clipboard.writeText($('json').value); toast('JSON copied'); }
   catch { $('json-tab').click(); $('json').select(); toast('Select the JSON and copy it.'); }
+};
+$('download-json').onclick = () => {
+  try {
+    const text = JSON.stringify(JSON.parse($('json').value), null, 2) + '\n';
+    const url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'main.dsp.json';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  } catch (error) { toast(`Cannot download bundle: ${error.message}`); }
 };
 async function installPackage(spec) {
   const [name, version] = spec.split('==');
@@ -237,7 +252,7 @@ const example = new URLSearchParams(location.search).get('example');
 if ([...$('example').options].some(option => option.value === example)) $('example').value = example;
 try {
   setBusy(true);
-  await Promise.all([ready, stdlib().then(shims => Object.assign(files, shims))]);
+  await ready;
   output.innerHTML = '<span class="quiet">Ctrl+Enter to run</span>';
   try {
     const shared = await restoreLink();

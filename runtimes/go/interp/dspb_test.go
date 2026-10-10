@@ -1,11 +1,14 @@
 package interp
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -70,7 +73,7 @@ func dspbFixtures(t *testing.T) []string {
 	var out []string
 	for _, e := range entries {
 		dst := filepath.Join(t.TempDir(), filepath.Base(e)+".json")
-		cmd := exec.Command("uv", "run", "diaspore", "build", e, "-o", dst)
+		cmd := exec.Command("uv", "run", "diaspore", "build", "--self-contained", e, "-o", dst)
 		cmd.Dir = root
 		if b, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("uv run diaspore build %s: %v\n%s", e, err, b)
@@ -176,5 +179,163 @@ open(sys.argv[3], "wb").write(encode(native))
 		if !reflect.DeepEqual(goDecoded, want) {
 			t.Fatalf("%s: go-decode(py-encode) diverges from compact model", fixture)
 		}
+	}
+}
+
+func dspbLinkedTestBundle(id string) map[string]any {
+	bundle := map[string]any{
+		"diaspore": float64(1), "main": "m",
+		"modules": map[string]any{"m": map[string]any{
+			"name": "m", "file": "m", "body": []any{},
+		}},
+	}
+	if id != "" {
+		bundle["stdlib"] = id
+	}
+	return bundle
+}
+
+func dspbLinkedTestBytes(id string) []byte {
+	data := append([]byte("DSPB02"), 2, 1, 'm', byte(len(id)))
+	data = append(data, id...)
+	return append(data, 1, 0, 1, 1, 0, 0, 0, 0)
+}
+
+func TestDSPBLinkedWireFormat(t *testing.T) {
+	id := "sha256:" + strings.Repeat("0123456789abcdef", 4)
+	for _, test := range []struct {
+		name, id string
+		wire     []byte
+	}{
+		{"standalone", "", append([]byte("DSPB01"), 1, 1, 'm', 1, 0, 1, 0, 0, 0, 0)},
+		{"linked", id, dspbLinkedTestBytes(id)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bundle := dspbLinkedTestBundle(test.id)
+			encoded, err := EncodeDSPB(bundle, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(encoded, test.wire) {
+				t.Fatalf("wire = %x; want %x", encoded, test.wire)
+			}
+			if !LooksLikeDSPB(encoded) {
+				t.Fatal("supported version was not detected")
+			}
+			decoded, err := DecodeDSPB(test.wire)
+			if err != nil || !reflect.DeepEqual(decoded, bundle) {
+				t.Fatalf("decoded = %#v, %v; want %#v", decoded, err, bundle)
+			}
+			if BundleDigest(decoded) != BundleDigest(bundle) {
+				t.Fatal("binary roundtrip changed canonical digest")
+			}
+			var compressed bytes.Buffer
+			writer := gzip.NewWriter(&compressed)
+			if _, err := writer.Write(test.wire); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			jsonBytes, err := json.Marshal(bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, data := range [][]byte{test.wire, compressed.Bytes(), jsonBytes} {
+				got, err := LoadBundle(data)
+				if err != nil || !reflect.DeepEqual(got, bundle) {
+					t.Fatalf("container load = %#v, %v", got, err)
+				}
+			}
+		})
+	}
+	if BundleDigest(dspbLinkedTestBundle(id)) == BundleDigest(dspbLinkedTestBundle("")) {
+		t.Fatal("stdlib reference did not participate in digest")
+	}
+	if LooksLikeDSPB([]byte("DSPB03")) {
+		t.Fatal("unsupported version was detected as supported")
+	}
+}
+
+func TestDSPBRejectsInvalidStdlibReference(t *testing.T) {
+	for _, value := range []any{
+		nil, false, float64(1), "", "sha256:",
+		"sha256:" + strings.Repeat("0", 63),
+		"sha256:" + strings.Repeat("0", 65),
+		"sha256:" + strings.Repeat("A", 64),
+		"SHA256:" + strings.Repeat("a", 64),
+		"sha256:" + strings.Repeat("g", 64),
+		"sha256:" + strings.Repeat("0", 63) + "\n",
+	} {
+		bundle := dspbLinkedTestBundle("")
+		bundle["stdlib"] = value
+		if _, err := EncodeDSPB(bundle, nil); err == nil {
+			t.Fatalf("encoder accepted invalid stdlib %#v", value)
+		}
+		data, err := json.Marshal(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadBundle(data); err == nil {
+			t.Fatalf("JSON loader accepted invalid stdlib %#v", value)
+		}
+		if id, ok := value.(string); ok {
+			if _, err := DecodeDSPB(dspbLinkedTestBytes(id)); err == nil {
+				t.Fatalf("binary decoder accepted invalid stdlib %q", id)
+			}
+		}
+	}
+}
+
+func TestDSPBLinkedCrossImplementation(t *testing.T) {
+	if _, err := exec.LookPath("uv"); err != nil {
+		t.Skip("uv not available")
+	}
+	id := "sha256:" + strings.Repeat("a", 64)
+	bundle := dspbLinkedTestBundle(id)
+	data, err := EncodeDSPB(bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "linked.dspb")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("uv", "run", "python", "-c", `
+import sys
+from diaspore.dspb import decode, encode
+raw = open(sys.argv[1], "rb").read()
+model = decode(raw)
+assert model["stdlib"] == sys.argv[2]
+assert encode(model) == raw
+`, path, id)
+	cmd.Dir = filepath.Join("..", "..", "..")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("linked cross-implementation: %v\n%s", err, out)
+	}
+}
+
+func TestDSPBClassBindingFlags(t *testing.T) {
+	for _, keyword := range []bool{false, true} {
+		class := map[string]any{"op": "class", "name": "__Inner", "binding": "_Outer__Inner", "body": []any{}}
+		if keyword {
+			class["kwargs"] = []any{map[string]any{"n": "metaclass", "v": map[string]any{"op": "name", "id": "type"}}}
+		}
+		bundle := dspbLinkedTestBundle("")
+		bundle["modules"].(map[string]any)["m"].(map[string]any)["body"] = []any{class}
+		encoded, err := EncodeDSPB(bundle, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := DecodeDSPB(encoded)
+		if err != nil || !reflect.DeepEqual(decoded, bundle) {
+			t.Fatalf("class binding roundtrip = %#v, %v", decoded, err)
+		}
+	}
+	opcode, _ := indexOf(dspbOps, "class")
+	reader := &dspbReader{data: []byte{byte(opcode), 0, 0, 4}, strings: []string{"C"}}
+	reader.decNode()
+	if reader.err == nil || !strings.Contains(reader.err.Error(), "class flags") {
+		t.Fatalf("unknown class flags accepted: %v", reader.err)
 	}
 }

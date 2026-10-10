@@ -11,8 +11,9 @@ Generate JSON Schema with `diaspore schema` or `make schema` (which writes
 `build/ir.schema.json`), or use the
 [published schema](https://radkawar.github.io/diaspore/ir.schema.json).
 
-The Python package is in `src/diaspore`, including pure-subset standard-library
-shims in `src/diaspore/stdlib`. The other runtimes are in `runtimes/go`,
+The Python package is in `src/diaspore`, including maintained standard-library
+adapters in `src/diaspore/stdlib` and unmodified upstream sources in
+`src/diaspore/cpython`. The other runtimes are in `runtimes/go`,
 `runtimes/ts`, and `runtimes/lua`. The self-hosted compiler is
 `dspc` (`selfhost/dspc.py`).
 
@@ -22,6 +23,7 @@ shims in `src/diaspore/stdlib`. The other runtimes are in `runtimes/go`,
 {
   "diaspore": 1,
   "main": "server",
+  "stdlib": "sha256:...",
   "modules": {
     "server": {"name": "server", "file": "examples/http/server.py", "body": [ ...stmt nodes... ]},
     "router": {"name": "router", "file": "examples/http/router.py", "body": [ ... ]}
@@ -37,20 +39,50 @@ shims in `src/diaspore/stdlib`. The other runtimes are in `runtimes/go`,
   as `"pkg.sub"`). Importing a dotted module executes its ancestors first
   (each exactly once), and after a submodule executes, the VM sets it as an
   attribute (module-global) of its parent package - so `pkg.sub.deep` chains
-  resolve as plain attribute access. Relative imports and `import *` do not
-  reach the VM: the compiler resolves them statically (star-expansion uses the
-  target's literal `__all__`, else its non-underscore top-level assignments).
+  resolve as plain attribute access. Relative imports are resolved statically.
+  `import *` executes at runtime: it uses the loaded module's `__all__`, or its
+  non-underscore namespace names when `__all__` is absent. Compiler-reserved
+  dot-prefixed temporaries are not public module names. Missing optional imports
+  raise `ImportError` at execution, so upstream pure-Python fallbacks can run.
+- `stdlib` - optional content id of the runtime's compiled standard library,
+  written as `sha256:` followed by 64 lowercase hexadecimal digits. Default
+  builds include this reference and omit standard-library modules from `modules`.
+  Loading fails before execution if the installed library has a different id;
+  the error names both ids. A missing field denotes a standalone bundle,
+  including builds made with `--self-contained` or `--no-stdlib`.
+  `null` is not a library id.
 - A module may carry `"src": ["line 1", ...]` (emitted by `diaspore build --debug`
   and always by `diaspore run x.py`): VMs then print the offending source line
   under each traceback frame. Purely diagnostic - never affects semantics.
 
 The Python compiler API `compile_bundle(entry, search_paths=(...))` searches
-the entry directory, supplied import roots in order, then the bundled standard
-library. Pass `stdlib=False` to omit that final search root. The self-hosted
-compiler accepts repeated `--path DIR` arguments and one `--stdlib DIR`, and
-searches the entry directory, the `--path` roots in order, then the stdlib
-root. These are compile-time source lookup paths; the VM imports modules from
-the resulting bundle rather than searching the host filesystem.
+the entry directory and supplied import roots before the shipped library.
+Program modules are compiled into the bundle; standard-library imports link to
+the installed store. Its maintained `stdlib` root overrides the vendored
+`cpython` root. `compile_bundle(..., self_contained=True)` or CLI
+`--self-contained` embeds the reachable standard-library modules instead and
+omits the reference. `stdlib=False` disables standard-library resolution.
+The self-hosted compiler accepts repeated `--path DIR`, `--self-contained`,
+and `--no-stdlib` with the same rules.
+
+At runtime, bundle modules take precedence over the linked store, followed by
+native modules. Library modules execute lazily on first import, with separate
+globals and import caches for each machine. Imports never search the host
+filesystem. A standalone bundle cannot silently fall back to the runtime's
+store; dynamic imports must name modules included in that bundle or native
+modules.
+
+The store is `{"diaspore_stdlib": 1, "id": "sha256:...", "modules": {...}}`.
+Its id hashes the canonical JSON object containing `diaspore_stdlib` and
+`modules`, excluding `id`, using the canonical encoding in section 14.
+Optional `licenses` and `manifest` metadata retain distribution notices and
+source provenance; they do not affect the compiled-code id.
+`make generate` compiles the store for Go, WebAssembly, TypeScript and Lua.
+The native Python package compiles and caches the same store from its installed
+sources. When running inside a sandbox, it uses the private `_diaspore_stdlib`
+bridge to obtain installed module IR without filesystem access. Generated
+stores are not committed. Embedding APIs use the shipped store for linked
+bundles by default; this supplies code, not filesystem or network capabilities.
 
 A module's `file` is its path relative to the compiler's working directory
 (absolute when outside it). Standard library modules are named
@@ -66,7 +98,7 @@ either absent or `null`; VMs must treat both identically.
 
 | Diaspore type | Notes |
 |---|---|
-| `int`     | Arbitrary precision (CPython semantics). The Go VM uses an int64 fast path and promotes to big integers on overflow, demoting results that fit - observable behavior is identical. |
+| `int`     | Arbitrary precision (CPython semantics). Go and Lua use an int64 fast path, promote on overflow, and demote results that fit. |
 | `float`   | IEEE 754 double. |
 | `complex` | Real and imaginary components are IEEE 754 doubles. |
 | `bool`    | `True`/`False`. `bool` is a subclass of `int` (`True == 1`, `isinstance(True, int)`). |
@@ -98,12 +130,23 @@ Hashable (usable as dict key / set member): `int`, `float`, `bool`, `str`,
 
 Numbers are string-encoded so no JSON reader can corrupt them.
 
+String constants and literal f-string parts may carry `codepoints`, the full
+sequence of Python Unicode codepoint integers (0 through 0x10FFFF). When present,
+it is authoritative instead of `v` or `s`. Compilers emit it only for strings
+containing surrogate codepoints; ASCII and scalar-only strings are unchanged.
+The accompanying `v` or `s` uses the JSON string representation, combining valid
+adjacent high/low surrogate pairs into scalars. For example, an explicit Python
+`"\ud800\udfff"` literal has `codepoints: [55296, 57343]`, while `"\U000103ff"`
+has no metadata. This distinguishes the literals without changing public JSON
+decoding semantics.
+
 ### 2.2 Canonical compact emission
 
 Emitters omit fields whose value equals the default; readers MUST treat an
 absent field as its default. The defaults: `orelse`/`finalbody`/`handlers`/
 `kw`/`args`/`elts`/`entries`/`bases`/`gdecl`/`ndecl`/`locals`/`defaults`/
-`kwonly`/`kwdefaults`/`kwargs` -> `[]`; `gen`/`coro`/`star` -> `false`; `vararg`/`kwarg`/`conv`/
+`kwonly`/`kwdefaults`/`kwargs` -> `[]`; `gen`/`coro`/`asyncgen`/`star` -> `false`;
+`params.posonly` -> `0`; `vararg`/`kwarg`/`conv`/
 `spec`/handler `t`/handler `name`/with-item `name` -> `null`; `alias` on a
 `bind:"none"` import is omitted. (`const.t` is a discriminator and is never
 omitted.) Verbose bundles that spell out defaults remain valid input
@@ -140,8 +183,8 @@ use dot-prefixed names (`.0`, `.r`, `.m1`, ...) which cannot collide with user
 identifiers; they are *not* listed in `locals`, so they resolve through the
 ordinary non-strict frame walk. Lambdas, decorators, `assert`, and `match`
 statements (PEP 634 semantics: literal/capture/wildcard/or/as/sequence/
-mapping/keyword-class patterns with guards; positional class patterns are
-rejected) are also desugared - VMs never see them.
+mapping/positional-class/keyword-class patterns with guards) are also
+desugared. Class patterns honor `__match_args__` and builtin match-self behavior.
 
 ## 4. Statement nodes
 
@@ -161,7 +204,7 @@ rejected) are also desugared - VMs never see them.
 | `try`      | `star?` (bool; `except*`), `body`, `handlers`: [{`t`: expr\|null, `name`: str\|null, `body`}], `orelse`, `finalbody` |
 | `with`     | `items`: [{`ctx`: expr, `name`: target\|null}], `body` |
 | `import`   | `module`: str (may be dotted), `alias`: str?, `bind`: `"root"`\|`"none"`? - default binds the named module to `alias`; `"root"` binds the root package (plain `import a.b.c`); `"none"` executes without binding (compiler-emitted before `from pkg import submodule`) |
-| `importfrom` | `module`: str, `names`: [{`n`: str, `alias`: str}] |
+| `importfrom` | `module`: str, `names`: [{`n`: str, `alias`: str}]; `[{"n":"*","alias":"*"}] imports the runtime namespace |
 | `del`      | `targets`: [target] |
 
 Targets are `name`, `attr`, `index`, or `tuple`/`list` nodes (patterns,
@@ -179,8 +222,8 @@ expression. Bare `except:` has `t: null`.
 ## 5. Functions
 
 ```json
-{"op":"func","name":"f","gen":false,
- "params":{"args":["a","b"],"defaults":[<expr>],
+{"op":"func","name":"f","gen":false,"coro":false,"asyncgen":false,
+ "params":{"args":["a","b"],"posonly":1,"defaults":[<expr>],
            "vararg":"rest"|null,
            "kwonly":["k"],"kwdefaults":[<expr>|null],
            "kwarg":"kw"|null},
@@ -191,7 +234,14 @@ expression. Bare `except:` has `t: null`.
 
 - `defaults` align with the tail of `args`. `kwdefaults` align 1:1 with
   `kwonly` (null = required keyword-only).
+- `posonly` counts the leading positional-only names in `args`; it defaults to
+  zero and must not exceed the argument count. Matching keyword names are
+  captured by `**kwargs` when present, rather than binding positional-only slots.
 - Defaults are evaluated once, at definition time, in the defining scope.
+- A leading string expression in a function body supplies its `__doc__`.
+  Module and class docstrings compile to `__doc__` namespace assignments.
+  Without a source docstring the compiler leaves the class namespace untouched;
+  class construction supplies default metadata after processing slot descriptors.
 - `locals` is the complete set of local variable names (compiler-computed with
   Python's "assignment anywhere makes it local" rule). `gdecl`/`ndecl` are names
   declared `global`/`nonlocal` (the statements themselves are compiled away).
@@ -199,6 +249,11 @@ expression. Bare `except:` has `t: null`.
 - `coro: true` records an `async def`; its `gen` is also true. `await` lowers
   to `yieldfrom` over the awaitable protocol. `async for` and `async with`
   are desugared by the compiler.
+- `asyncgen: true` distinguishes an async generator from a coroutine; it marks
+  an `async def` containing source-level `yield` in its own scope.
+- `annotation_scope: true` marks PEP 695 type parameter and lazy evaluation
+  scopes. These closures retain their immediately enclosing class namespace;
+  ordinary functions do not resolve names through intervening class namespaces.
 
 Argument binding follows Python: positionals fill `args` left to right,
 overflow goes to `vararg` (a tuple) or raises `TypeError`; keywords fill
@@ -264,8 +319,35 @@ stores its evaluated expression after the value assignment, if any.
 With `from __future__ import annotations`, the stored value is the annotation's
 CPython `ast.unparse`-normalized source string instead. Repeated annotations
 replace values without changing key order. Non-simple targets do not add
-dictionary entries. Function annotations and function-local annotations remain
-stripped.
+dictionary entries. Generic function annotations are evaluated in the type
+parameter scope (or stringified under the future directive). Other function
+annotations and function-local annotations remain stripped.
+Both `import __future__` and `from __future__ import feature` retain their
+runtime module and feature bindings, including aliases. Future-flag handling
+does not elide these imports; standalone dependency closure includes the real
+vendored `__future__` module.
+
+PEP 695 `type` declarations create `_typing.TypeAliasType` objects with a lazy,
+cached `__value__`. Type parameter bounds and constraints are also lazy and
+cached. Generic declarations expose their parameters through `__type_params__`
+without binding parameter names in the enclosing namespace. Decorators and
+function defaults evaluate in that enclosing namespace, before entering the
+type parameter scope. Generic classes include the corresponding `Generic`
+base and expose type parameters to their bodies and methods.
+
+Private identifiers are mangled lexically throughout a class and its nested
+functions: a name beginning with `__`, not ending with `__`, and containing no
+dot receives the prefix `_` plus the class name with leading underscores
+removed. An all-underscore class name leaves identifiers unchanged. Bindings,
+parameters, declarations, attribute syntax, imports, and pattern captures use
+the resulting identifiers; string literals, keyword arguments, and class
+pattern keyword attributes do not. Function, class, alias, and type parameter
+`__name__` metadata retains the original spelling. A private class declaration
+uses the optional IR `binding` field for its destination, independently of its
+original `name`. A generic class header mangles only its type parameter
+identifiers, using the declared class name; the class body uses ordinary
+class-wide mangling. Generic functions and aliases retain the enclosing
+class's lexical mangling.
 
 Class keywords are carried in `kwargs`; `n: null` expands a mapping. An
 explicit metaclass is called with `(name, bases, namespace)` and class keywords.
@@ -427,32 +509,39 @@ with CPython semantics.
 
 ## 11. Native modules
 
-Importable without being in the bundle. `import time`, `from math import sqrt`,
-etc. If a bundled user module shares a name, the bundle wins.
+Native modules are importable without bundled code. Program modules and linked
+stdlib modules take precedence (section 1). Public `json` and `random` are
+library modules backed by providers, not native replacements.
 
 - 11.1 `time` - `time()` (epoch float), `monotonic()`, `sleep(secs)`.
+  Python, Go and TypeScript also provide `perf_counter()`.
 - 11.2 `math` - `pi e inf nan sqrt floor ceil fabs pow log log2 log10 exp sin cos tan hypot fmod isnan isinf`.
   `floor`/`ceil` return ints. Domain errors raise `ValueError: math domain error`.
-- 11.3 `json` - `dumps(v, indent=None)` / `loads(s)`; CPython separators
-  (`, ` and `: `; with indent: `,` + newline). Keys must be str; values map
-  to diaspore types (`loads` numbers: int if integral literal else float).
-- 11.4 `random` - `seed(n)`, `random()`, `randint(a, b)`, `choice(seq)`,
-  `shuffle(list)`, and `Random(seed=None)` with independent generator state and
-  the same methods. Sequences are VM-specific; conformance checks invariants
-  and isolation rather than matching generated values.
+- 11.3 `json` uses the vendored CPython package over native `_json` scanning
+  and encoding primitives. Encoder and decoder options, including sorting,
+  indentation, separators, Unicode escaping, defaults, and object hooks,
+  retain the upstream public interface.
+- 11.4 `random` uses CPython's Python implementation over the portable `_random`
+  MT19937 provider. Explicit integer seeds and bit consumption follow CPython.
+  Default seeding uses journaled clocks rather than host OS entropy.
 - 11.5 `sys` - `argv` (list[str]: program name then args after `--`),
   `exit(code=0)`, `platform` (`"diaspore-py"`, `"diaspore-go"`, `"diaspore-ts"`, or `"diaspore-lua"`), `stderr_write(s)`.
   `stdin` supports `read(size=-1)` and `readline(size=-1)`; `stdout` and
   `stderr` support `write(str)` (returning characters written) and `flush()`.
   `getrecursionlimit()` and `setrecursionlimit(n)` expose the effective
   language recursion limit, bounded by the host's cap (section 13.2).
+  Python, Go and TypeScript also expose `audit(event, *args)` and
+  `addaudithook(hook)` for sandbox audit events (section 12).
 - 11.6 `net` (TCP) -
   `listen(host, port) -> int` (listener id; SO_REUSEADDR),
   `connect(host, port) -> int` (outbound; connection id),
   `accept(lid) -> int` (blocks; connection id),
   `recv(cid, maxbytes) -> bytes` (empty = peer closed),
   `send(cid, data: bytes) -> int` (sends all; returns len),
-  `close(id)`, `peer(cid) -> str` ("ip:port").
+  `close(id)`, `peer(cid) -> str` ("ip:port"),
+  `select(read_ids, write_ids, error_ids, timeout=None)` returns three ready-id
+  lists. Readiness accepts only this VM's socket/listener ids and requires `net`;
+  it never interprets an integer as an ambient host descriptor.
   Errors raise `OSError`. `listen` and `connect` are additionally checked
   against the scoped net policy (section 13.1) when one is set.
 - 11.7 `fs` is *not* a module - file I/O goes through builtin `open`:
@@ -460,22 +549,17 @@ etc. If a bundled user module shares a name, the bundle wins.
   usable as a context manager; text mode is UTF-8. The `encoding` keyword
   accepts `None` and UTF-8 aliases; a non-None encoding in binary mode raises
   `ValueError`. Other text encodings raise `NotImplementedError`.
-- 11.8 `re` - a *validated portable subset* of Python regular expressions
-  (chosen so RE2 engines implement it exactly; patterns outside it raise
-  `ValueError` on the runtimes rather than silently diverging).
-  Allowed: literals, `.`, `[...]` classes (ranges, negation), escapes
-  (`\d \D \w \W \s \S \b \B` and escaped metachars), anchors `^ $`,
-  quantifiers `* + ? {m} {m,n}` plus non-greedy variants, groups `(...)`,
-  non-capturing `(?:...)`, alternation `|`, inline flags `(?ims)`.
-  Rejected: backreferences, lookaround, named/atomic/conditional groups,
-  `\A`/`\Z`, possessive quantifiers.
-  API: `search(p, s, flags=0)`, `match`, `fullmatch` -> Match-or-None;
-  `findall` (CPython result-shape rules), `split(p, s, maxsplit=0)`
-  (capturing groups appear in the result), `sub(p, repl, s, count=0)`
-  (repl supports `\1`-`\9` and `\\` only), `escape`;
-  flags `IGNORECASE=2, MULTILINE=8, DOTALL=16`.
-  Match objects: `group(n=0)`, `groups()` (unmatched -> `None`),
-  `start/end/span(n=0)`.
+- 11.8 `re` remains native; the CPython `re` package is not vendored.
+  The shared surface includes compiled patterns, module and pattern
+  `match`, `search`, `fullmatch`, `findall`, `finditer`, `split`, `sub`, and
+  `subn`, string and byte patterns, callable replacement, named captures,
+  position/end-position bounds, and ASCII/Unicode/VERBOSE flags.
+  Match objects expose `group`, `groups`, `groupdict`, `start`, `end`, `span`,
+  and replacement expansion. Engines charge matching work against VM fuel.
+  Go supports lookahead, fixed-width lookbehind, backreferences, atomic groups
+  and conditional groups; possessive repetition remains unsupported.
+  LOCALE, DEBUG, TEMPLATE, and Unicode name escapes are not portable.
+  Runtime READMEs identify additional engine restrictions.
 - 11.9 `tasks` (requires the `spawn` capability) - concurrency with
   GIL semantics: one logical interpreter lock, diaspore-level operations are
   atomic, and the lock is released while blocked (channel ops, lock acquire,
@@ -494,7 +578,7 @@ etc. If a bundled user module shares a name, the bundle wins.
   uses join ordering and channel causality (concurrency programs are pinned
   with committed `.expected` files, since CPython has no `tasks`).
 - `_os` is an internal native module backing filesystem operations in the
-  `os`, `os.path`, and `pathlib` shims. `getcwd()` returns the current directory
+  `posix` C-layer adapter and upstream `os`, `os.path`, and `pathlib`. `getcwd()` returns the current directory
   and requires `fs`; `kind(path)` returns `"file"`, `"dir"`, `"other"`, or `None`
   for a missing path; `listdir(path)` returns sorted entry names; and
   `realpath(path)` resolves symlinks. The latter three enforce the filesystem
@@ -504,37 +588,67 @@ etc. If a bundled user module shares a name, the bundle wins.
   from file-key prefixes without consulting the host filesystem.
   Lua uses `PWD`, lexical real paths, and file-handle-based kind detection;
   directory listing raises `NotImplementedError` (see its runtime README).
+  Supported descriptor operations use a VM-private handle table, never arbitrary
+  host descriptor numbers. Read/write opening requires both policy grants.
+  Filesystem metadata and descriptor operations remain subject to `fs`.
+  Embedders close a completed machine explicitly; closing a suspended durable
+  machine releases host resources without running process-exit callbacks.
 
 ### 11.10 Standard library
 
-The pure-subset modules in `src/diaspore/stdlib` are compiled into bundles,
-not imported from the host Python installation. The Python CLI,
-`diaspore-go build`, `diaspore-ts build`, and browser compiler all ship these
-sources. Shims match CPython for the operations they implement and raise for
-unsupported requests; the table identifies restricted surfaces and deliberate
-compatibility differences. Native capability requirements still apply.
+The shipped standard library includes 426 byte-identical modules from CPython
+v3.12.12 in `src/diaspore/cpython`. `tools/stdlib_manifest.json` records source
+paths, hashes, and the exact inventory; an identical copy ships beside the
+vendored files. `make vendor` prefers a matching checkout at
+`~/dev/minor/clones/cpython`, then an integrity-checked release archive. Sources
+are committed; generated runtime stores are built locally and shipped with
+runtime packages, never fetched while executing a program. The PSF and Unicode
+licenses and vendor manifest accompany the distributed library.
 
-| Modules | Supported surface and limits |
+Upstream modules run unchanged above portable C-layer implementations in
+`src/diaspore/stdlib` and native accelerators. Public `json` uses native `_json`
+string scanning, encoding and scanner factories; `abc` uses native `_abc`
+registry/cache operations and callback frame semantics. `_operator.index`
+provides the native integer-index protocol without a public-module dependency.
+Optional accelerators remain absent where upstream has a pure implementation:
+`_pydatetime`, `_pydecimal`, `pickle`, `heapq`, `bisect`, and `functools` use
+those fallbacks. Public `json`, `random`, `unittest`, `collections`,
+`dataclasses`, `pathlib`, and `types` are upstream sources, not replacement
+public-API shims.
+
+`_io.py` uses CPython's `_pyio` implementation with the separately recorded
+bootstrap overlay in `tools/overlays/_pyio_to_io.patch`; public `io.py` and
+`_pyio.py` remain unmodified. Compiler helpers `_pyparse` and `_pyunparse`
+remain Diaspore-owned. Source availability does not imply that every upstream
+platform facility is implemented; section 12 and the regression scoreboard
+describe that boundary.
+
+| C-layer modules | Implementation and boundaries |
 |---|---|
-| `ast` | Syntax trees from `_pyparse`, the parser shared with `dspc`; line numbers only, no column or end positions. No `type_comments` or `feature_version`. `unparse` supports expressions. |
-| `base64`, `binascii` | Standard, URL-safe, and line-wrapped base64, base16, and binary encoding helpers. |
-| `hashlib` | Incremental SHA-256, SHA-1, and MD5. |
-| `zlib`, `gzip` | One-shot full DEFLATE decompression and checksum validation; compression emits stored blocks, so sizes differ from CPython. No streaming or file APIs; `zlib` has no preset dictionaries. |
-| `dataclasses` | Initialization, repr, equality, hashing, freezing, fields, defaults/factories, and `replace`. No inheritance, ordering, slots, keyword-only fields, `ClassVar`/`InitVar`, custom metadata, `unsafe_hash`, or recursive conversion helpers. |
-| `pathlib` | POSIX lexical paths and file read/write helpers through `open`; no metadata, traversal, resolution, filesystem mutation, Windows paths, glob matching, or URI conversion. |
-| `collections` | `namedtuple`, `OrderedDict`, `defaultdict`, `Counter`, and `deque`. |
-| `collections.abc` | Names for annotations and explicit inheritance; nominal checks only. No structural checks, virtual registration, abstract-method enforcement, generic aliases, or mixins. |
-| `threading`, `queue` | Threads, non-reentrant locks, conditions, events, and FIFO queues on `tasks` (section 11.9). Daemon threads only; no `RLock` or thread identities. Untimed waits and supported polling operations only; targets must handle their own exceptions. Requires `spawn`. |
-| `socket` | Blocking IPv4 TCP on `net` (section 11.6), using dotted-decimal addresses. `bind` records the address; `listen` reserves the port. Backlog is advisory. No timed/nonblocking I/O, descriptor APIs, or other families/types. Requires `net`. |
-| `asyncio` | Cooperative tasks with FIFO scheduling and logical-clock sleeps. |
-| `contextlib`, `copy` | Generator-based context managers and context helpers; shallow and deep copying. |
-| `functools`, `itertools`, `operator` | Functional programming, iterator, and callable-operator helpers. |
-| `fractions`, `string` | Rational arithmetic; string constants and `Template`. |
-| `io`, `types` | In-memory text/byte streams; type aliases, `SimpleNamespace`, and live read-only mapping proxies. |
-| `os`, `os.path` | Deterministic OS helpers and lexical path operations, without filesystem or process access. |
-| `unittest` | Test cases, assertions, and a deterministic text runner. |
-| `gc` | Compatibility helpers without control over VM memory management. |
-| `weakref` | References and containers retain their targets. `finalize` supports explicit invocation at most once, `detach`, `peek`, `alive`, and a stored `atexit` flag; it never runs automatically on collection or process exit. |
+| `_ast` | AST classes and parsing through shared `_pyparse`; UTF-8 byte column offsets and full source end positions, including compound-suite semicolons and both characters of doubled f-string braces. `compile(..., PyCF_ONLY_AST)` returns sandbox AST objects. |
+| `_json`, `_abc`, `_operator` | Native JSON acceleration, ABC registration and cache protocols, and operator primitives (`index`, `add`). Public modules remain upstream Python code. |
+| `_typing`, `_tokenize` | Type parameters, lazy aliases and generic bases; CPython 3.12 token streams beneath unchanged `typing` and `tokenize`. |
+| `_imp`, `_warnings`, `marshal` | Sandbox import locking and builtin discovery, upstream warning filtering/display, and marshal data formats 0-4. No host extension loading or CPython code-object serialization. |
+| `_collections`, `itertools` | Portable deque/defaultdict primitives and lazy iterator state machines beneath upstream collection code. |
+| `_random` | MT19937 with CPython integer seeding, state, `random`, and `getrandbits`. |
+| `_sha1`, `_md5`, `_sha2`, `_blake2`, `_sha3`, `_hashlib` | MD5, SHA-1/2/3, SHAKE, BLAKE2, HMAC, and PBKDF2-HMAC. No scrypt or unsupported OpenSSL-only digests; interpreted `compare_digest` does not promise native constant-time execution. |
+| `_diaspore_hash` | Optional Python, Go and TypeScript accelerator for `_hashcore`: `new(name)` creates an opaque, fuel-metered incremental MD5 or SHA-1/224/256/384/512 engine with `update`, `copy`, `digest`, and `hexdigest`. Public `hashlib` remains upstream code; Lua uses the portable provider fallback. |
+| `_struct`, `binascii` | LP64 binary formats including IEEE binary16/32/64, buffers, base64/hex, and CRCs. NaN payloads are canonicalized; UU and quoted-printable codecs are not implemented. |
+| `zlib` | Streaming DEFLATE decoding and stored-block compression, including gzip wrappers. Compression sizes differ from CPython; preset dictionaries and state copies are unsupported. |
+| `_io`, `_codecs`, `errno`, `_stat` | Pure IO bootstrap, UTF-8/ASCII/Latin-1 and error handlers, POSIX errors and mode helpers. Native file operations enforce capabilities. |
+| `posix`, `_locale`, `_string` | Scoped filesystem bridge, isolated environment, C/POSIX locale, and format-string parsing. Unsupported locales are rejected. |
+| `_thread`, `_contextvars`, `_weakref`, `atexit` | Task-backed threading, context-local state, retaining references, and ordered explicit process shutdown. Real threads require `spawn`; TS/Lua retain their no-thread restriction. |
+| `_socket`, `select` | Blocking IPv4 TCP and readiness waits over VM-owned sockets/listeners, with no ambient network authority or host descriptor access. Other families, UDP, DNS, and timed/nonblocking socket IO are unsupported. |
+| `unicodedata` | Unicode 15.0 properties, names/aliases/sequences, numeric values, decomposition, and NFC/NFD/NFKC/NFKD normalization. Historical `ucd_3_2_0` is unsupported. |
+| `gc` | Compatibility helpers without control over host memory management. |
+
+The API detector gates maintained package/compiler/C-layer code. Static uses
+from exact manifest-listed upstream files form a non-gating backlog in
+`build/api-parity-upstream.json`. The self-suite compares source test outcomes
+with CPython. `make cpython` runs upstream tests and records passed, failed,
+errored, skipped, and unexecuted counts separately; compilation/import failures
+are not test passes. Its committed per-module pass-count baseline is a CI
+ratchet, not a claim of complete CPython compatibility.
 
 ## 12. Deliberate deviations and exclusions
 
@@ -543,20 +657,100 @@ literals, class keywords including `metaclass`, and `except*`. The runtimes
 provide `property` and generator `send`/`throw`/`close`. Exception groups expose
 `message` and `exceptions`; `except*` handlers select matching subgroups.
 
-`exec`, `eval`, and `compile` operate on Diaspore-subset code, not host Python.
+`exec`, `eval`, and `compile` operate on Diaspore code, not host Python.
 Go embedding requires `interp.WithSnippetCompiler(dspc.CompileSnippet)` for
-source snippets. TypeScript uses its embedded compiler; the Python VM uses its
-compiler. Lua does not provide runtime source compilation.
+source snippets. TypeScript and Lua use generated self-hosted compiler
+artifacts; the Python VM uses its compiler.
 
 Unsupported or restricted features include:
 
-- Host threads; use the `tasks` API where available (section 11.9).
-- General user-defined descriptor protocols and `__slots__` storage semantics.
-  Builtin `property` is supported, but is not a general descriptor implementation.
-- `str.format`; use f-strings.
-- Positional class patterns in `match`; keyword class patterns are supported.
-- Percent-formatting on strings and bytes. It raises `TypeError` with
-  `diaspore does not support %-formatting; use f-strings`.
+- Direct host-thread access; use capability-checked `tasks` or the portable
+  threading providers where available (sections 11.9 and 11.10).
+- When the Python reference VM itself runs inside a sandbox, resuming its
+  thread-backed generators requires task support and the `spawn` capability.
+  Creating or inspecting a generator, or closing it before its first resume,
+  needs no backing thread. This restriction does not apply to the enclosing
+  runtime's own generator implementation.
+- Host-extension facilities such as `ctypes`, `ssl`, process creation through
+  `subprocess`/`multiprocessing`, `winreg`, `curses`, `dbm`, and `sqlite3` are
+  unsupported unless an explicitly scoped provider is installed. Vendoring a
+  module that has optional imports does not grant host authority.
+- `signal` uses a portable `_signal` provider with Linux/POSIX constants and
+  upstream `Signals`/`Handlers` enums. `signal`, `getsignal`, `valid_signals`
+  and `strsignal` use per-machine state; no host signal handlers are installed.
+  `raise_signal` synchronously calls the registered handler with `(sig, None)`.
+  The initial SIGINT handler raises `KeyboardInterrupt`. `SIG_IGN` and default
+  CHLD/URG/WINCH are ignored; PIPE/XFSZ initially use `SIG_IGN`. Other process
+  defaults, including an explicitly selected `SIG_DFL` for SIGINT, raise
+  `OSError` with `errno.ENOSYS` rather than affect the host process.
+  Host timers, masks, waits, thread-directed delivery and wakeup-FD APIs are absent.
+- AST type-comment parsing, historical `feature_version` grammars, and
+  interactive/Barry parser flags are explicitly unsupported.
+- Introspection exposes sandbox functions, cells, frames, and tracebacks, not
+  host execution internals. CPython bytecode, evaluation-stack sizes, and
+  bytecode line tables are unavailable; instruction positions refer to IR.
+  `CodeType` cannot reconstruct CPython bytecode. Python `code.replace`
+  supports the iterable-coroutine flag; Go also supports names, filenames and
+  first-line metadata, but neither supports structural bytecode edits.
+  `marshal` supports data records, not CPython code objects.
+- Lua class construction currently initializes nested classes' `__qualname__`
+  with their unqualified name rather than their lexical enclosing path.
+  Class representations respect explicit `__qualname__` and `__module__`
+  assignments; inherited metaclass overrides and direct `type.__repr__` use
+  their respective representation implementations.
+- Weak references and their registrations retain targets. No GC-triggered
+  callbacks run, and dropping a reference does not remove its registration
+  from weak-reference counts. Explicit finalizers and enabled exit callbacks
+  still run at the corresponding explicit lifecycle boundary.
+- Lua's pure Lua 5.4 host lacks real filesystem metadata:
+  `stat`, `lstat`, `fstat`, and `readlink` raise `OSError` with
+  `errno.ENOSYS` and `diaspore-lua cannot read file metadata`. Metadata-dependent
+  bootstrap/self-suite cases and corresponding corpus cases are skipped with
+  that reason. Already-compiled bundles and in-memory compilation remain supported.
+- `select` accepts only VM-owned connected sockets and listeners, not general
+  filesystem descriptors. Unconnected sockets have no native handle;
+  `fileno`, descriptor adoption, and `detach` are unsupported for them.
+  Readiness timeouts do not add timed socket IO.
+  Go readiness waiting is Linux-only; other Go targets raise
+  `NotImplementedError`. TS and Lua retain their no-network restriction.
+- TS pins identifier, printable-character, decimal-digit and repr behavior to Unicode 15.
+  Other character predicates and case conversion follow the host's Unicode
+  version; `isdigit` recognizes decimal digits but not superscript digits.
+- Go and TS store floats unboxed. NaN object identity and identity-based hashes
+  differ from CPython; finite binary64 values retain Python numeric hash
+  semantics. Programs must not rely on per-object NaN hashes or identity.
+- Go and TS `sys.int_info` describe host-sized `math/big` and V8 integer
+  storage, respectively: 32- or 64-bit digits with 4- or 8-byte storage.
+  Both decimal-conversion limit fields are zero. Their `sys.hash_info`
+  reports a 64-bit width, numeric modulus `2**61 - 1`, 63 hash bits,
+  zero seed bits and zero cutoff. String/key hashing is unseeded FNV-1a,
+  reported as `fnv1a_64` in Go and `fnv1a64-63` in TS, not CPython's SipHash.
+  Lua reports 24-bit bigint digits stored in native integer slots (8 bytes on
+  the supported Lua 5.4 build), with both decimal-conversion limit fields zero.
+  Its hash metadata reports 64-bit `fnv1a64`, numeric modulus `2**61 - 1`,
+  zero seed bits and zero cutoff. These values describe the runtime backends,
+  not CPython's integer layout or hashing ABI.
+- Python, Go and TS audit hooks are interpreter-local and run in registration
+  order for explicit sandbox `sys.audit` calls and hook registration events.
+  They do not forward host-process audit events or implement CPython's complete
+  automatic audit-event catalog.
+- Common UTF-8/ASCII/Latin-1 encoding operations run natively. Portable
+  primitives support UTF-16/32, endian-specific and incremental decoding,
+  and character-map codecs. Other codecs can require unavailable C backends.
+  Linked bundles can load any installed codec or AST provider lazily.
+  Self-contained builds include `codecs`, `_ast`, Unicode name data and exact
+  encoding modules when static calls require them; codec aliases use CPython's
+  alias table. Ordinary JSON and codec imports do not include Unicode tables.
+  Dynamic uses in self-contained bundles require an explicit import:
+  `encodings.X` for a codec, `ast` for AST-only compilation, and `unicodedata`
+  for Unicode name replacement. Missing dynamic providers raise an error
+  naming the required import.
+  Bundle source literals preserve explicit surrogate codepoints separately
+  from supplementary scalars. Public JSON, including durable snapshot JSON,
+  retains CPython JSON semantics: escaped surrogate pairs combine on decoding.
+- Self-contained builds include `copyreg` for statically recognized bound or
+  unbound `__reduce__` and `__reduce_ex__` calls. Dynamic reduction dispatch
+  requires an explicit `import copyreg`; linked stores already contain it.
 
 The compiler reports unsupported syntax with a `file:line` error.
 `tests/corpus/` compares supported programs with CPython and the four runtimes
@@ -564,8 +758,8 @@ The compiler reports unsupported syntax with a `file:line` error.
 and programs with native APIs are handled separately; this is not a claim of
 complete CPython compatibility.
 
-Behavior not fixed by the shared conformance contract includes distinct NaN
-objects in containers, `re.split` with negative `maxsplit`, whether abandoned
+Behavior not fixed by the shared conformance contract includes `re.split`
+with negative `maxsplit`, whether abandoned
 generators run `finally` during collection (section 7), and exact closed-file
 I/O error text. Programs must not depend on these details. `with` does run
 `__exit__` on `return` and `break`.
@@ -667,7 +861,10 @@ The mechanism is *journaled replay* (no interpreter state is serialized):
 
 - In a durable run (`diaspore run --durable` / `Machine(durable=True)`), every
   nondeterministic native call is an effect: `time.time/monotonic/sleep`,
-  all `random.*`, `input`, and every host-binding call. Live effects execute
+  `time.perf_counter` where available, `_os.urandom`, `input`, and every
+  host-binding call. Portable seeded random
+  operations are deterministic between effects; default seeding records its
+  clock inputs. Native entropy records a hexadecimal string. Live effects execute
   and append `{"m": module, "f": fn, "r": result}` to the journal; results
   must be canonical JSON values (no tuples) so replay is exact.
 - `flow.suspend(payload)` (native module `flow`; payload must be JSON)
@@ -689,8 +886,12 @@ The mechanism is *journaled replay* (no interpreter state is serialized):
   (`net`/`fs`/`spawn`); route I/O through host bindings and avoid relying on
   nonportable values such as object identities or set iteration order.
 - `bundle_sha256` is the SHA-256 of the bundle's canonical JSON: UTF-8,
-  compact separators (`,`/`:`), keys sorted, non-ASCII unescaped, no
-  HTML-escaping. Resume must reject a snapshot whose digest doesn't match.
+  compact separators (`,`/`:`), keys sorted, non-ASCII scalar values unescaped,
+  lone surrogate codepoints escaped as `\uXXXX`, and no HTML-escaping.
+  The bundle's `stdlib` reference participates in this digest. Linked snapshots
+  also record that id in their own `stdlib` field. Resume rejects a different
+  snapshot id or installed store before replay, as well as a different bundle
+  digest. Standalone snapshots omit the field.
 - CLI: suspend exits with code 7 and writes the snapshot
   (`--snapshot PATH`, default `TARGET.flow.json`);
   `diaspore resume BUNDLE SNAPSHOT [--send JSON] [--snapshot OUT]` continues.
@@ -705,8 +906,9 @@ a transport detail sniffed by magic bytes on load:
 
 - plain JSON (default output)
 - gzip (`1f 8b`, `x.dsp.json.gz`)
-- DSPB (`DSPB01`, `x.dspb`, [docs/dspb.md](dspb.md)): optional binary
-  encoding. Gzip decoding re-sniffs its payload, so `x.dspb.gz` is also valid.
+- DSPB (`DSPB01` for standalone bundles, `DSPB02` for linked bundles,
+  `x.dspb`, [docs/dspb.md](dspb.md)): optional binary encoding. Gzip decoding
+  re-sniffs its payload, so `x.dspb.gz` is also valid.
   `decode(encode(b)) == compact(b)` exactly; digests are computed on the
   decoded model, so the container never affects durable flows.
 

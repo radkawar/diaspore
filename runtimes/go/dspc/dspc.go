@@ -2,54 +2,29 @@
 // the Go VM. It lets Go hosts compile Python source to bundles with no Python
 // installation.
 //
-// The package also embeds Diaspore's pure-Python standard library modules
-// (collections, itertools, functools, ...). The compiler sees them as
-// read-only files under /stdlib, searched after the entry directory and any
-// caller-supplied search paths, matching the Python CLI.
+// Standard-library imports link to the content-addressed compiled store shipped
+// by interp. CompileOptions.SelfContained instead copies reachable library
+// modules into the result. Neither mode needs standard-library source files.
 //
-// Both embedded files are build artifacts: run `make generate` from the
-// repository root to produce dspc.dsp.json.gz and stdlib.json.gz before
-// building this package.
+// Run `make generate` from the repository root to produce the embedded compiler
+// bundle and interp's compiled standard-library store before building.
 package dspc
 
 import (
 	"bytes"
 	"compress/gzip"
 	_ "embed" // needed for the go:embed directive below
-	"encoding/json"
 	"fmt"
 	"io"
+	"path"
+	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/radkawar/diaspore/runtimes/go/interp"
 )
 
 //go:embed dspc.dsp.json.gz
 var bundleGz []byte
-
-//go:embed stdlib.json.gz
-var stdlibGz []byte
-
-// stdlibRoot is the virtual directory the embedded standard library lives in.
-const stdlibRoot = "/stdlib"
-
-var stdlib = sync.OnceValues(func() (map[string]string, error) {
-	data, err := gunzip(stdlibGz)
-	if err != nil {
-		return nil, fmt.Errorf("dspc: embedded stdlib is corrupt: %w", err)
-	}
-	var files map[string]string
-	if err := json.Unmarshal(data, &files); err != nil {
-		return nil, fmt.Errorf("dspc: embedded stdlib is corrupt: %w", err)
-	}
-	return files, nil
-})
-
-// Stdlib returns the embedded standard library as a map from virtual path
-// (under /stdlib) to module source. The map is shared; callers must not
-// modify it.
-func Stdlib() (map[string]string, error) { return stdlib() }
 
 // maxDepth is the recursion limit for compiler runs; the recursive-descent
 // parser needs more than the default 1000 frames on deeply nested input.
@@ -62,8 +37,8 @@ func Bundle() (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dspc: embedded bundle is corrupt: %w", err)
 	}
-	var bundle map[string]any
-	if err := json.Unmarshal(data, &bundle); err != nil {
+	bundle, err := interp.LoadBundle(data)
+	if err != nil {
 		return nil, fmt.Errorf("dspc: embedded bundle is corrupt: %w", err)
 	}
 	return bundle, nil
@@ -88,59 +63,86 @@ type Result struct {
 	Code int
 }
 
-// CompileFile compiles the entry module at path and every module it imports.
-// Search paths are checked in order after the entry's directory, then the
-// embedded standard library. The compiler may read only files under those
-// directories.
-func CompileFile(path string, debug bool, searchPaths []string, opts ...interp.Option) (Result, error) {
-	dir := "."
-	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
-		dir = path[:i]
+// CompileOptions controls source lookup and standard-library linking.
+type CompileOptions struct {
+	// Debug includes source lines in emitted modules for tracebacks.
+	Debug bool
+	// SearchPaths are checked after the entry directory, in declaration order.
+	SearchPaths []string
+	// SelfContained embeds reachable library modules instead of a store reference.
+	SelfContained bool
+	// NoStdlib disables standard-library resolution and emits no store reference.
+	NoStdlib bool
+	// Sources replaces the host filesystem when non-nil. Paths are rooted at /.
+	// CompileSource always uses an overlay and adds its explicit entry source.
+	Sources map[string]string
+}
+
+// CompileFile compiles the entry and its source dependencies. With no Sources
+// overlay, the compiler may read only the entry directory and SearchPaths.
+// Standard-library imports link to interp's shipped store by default.
+func CompileFile(filename string, config CompileOptions, opts ...interp.Option) (Result, error) {
+	argv, readPaths := compileArgs(filename, config, config.Sources != nil)
+	if config.Sources != nil {
+		opts = append([]interp.Option{interp.WithFSOverlay(sourceOverlay(config.Sources))}, opts...)
 	}
-	argv := []string{"dspc", path}
-	readPaths := []string{dir, path}
-	for _, searchPath := range searchPaths {
+	return run(argv, readPaths, opts)
+}
+
+// CompileSource compiles an in-memory entry without host filesystem access.
+// Imports use config.Sources and the shipped compiled standard library. The
+// explicit source takes precedence over the same entry in config.Sources.
+func CompileSource(filename, source string, config CompileOptions, opts ...interp.Option) (Result, error) {
+	overlay := sourceOverlay(config.Sources)
+	overlay[virtualPath(filename)] = source
+	argv, readPaths := compileArgs(filename, config, true)
+	return run(argv, readPaths, append([]interp.Option{interp.WithFSOverlay(overlay)}, opts...))
+}
+
+func virtualPath(filename string) string {
+	return path.Clean("/" + filename)
+}
+
+func sourceOverlay(sources map[string]string) map[string]string {
+	overlay := make(map[string]string, len(sources)+1)
+	for filename, source := range sources {
+		overlay[virtualPath(filename)] = source
+	}
+	return overlay
+}
+
+func compileArgs(filename string, config CompileOptions, virtual bool) ([]string, []string) {
+	dir := filepath.Dir(filename)
+	if virtual {
+		filename = virtualPath(filename)
+		dir = path.Dir(filename)
+	}
+	argv := []string{"dspc", filename}
+	readPaths := []string{dir, filename}
+	for _, searchPath := range config.SearchPaths {
+		if virtual {
+			searchPath = virtualPath(searchPath)
+		}
 		argv = append(argv, "--path", searchPath)
 		readPaths = append(readPaths, searchPath)
 	}
-	argv = append(argv, "--stdlib", stdlibRoot)
-	readPaths = append(readPaths, stdlibRoot)
-	if debug {
+	if config.Debug {
 		argv = append(argv, "--debug")
 	}
-	files, err := stdlib()
-	if err != nil {
-		return Result{}, err
+	if config.SelfContained {
+		argv = append(argv, "--self-contained")
 	}
-	return run(argv, readPaths, append([]interp.Option{interp.WithVirtualFiles(files)}, opts...))
-}
-
-// CompileSource compiles a single in-memory module. The source is presented
-// to the compiler as the file at path; no real file system access is granted.
-// Imports resolve against the embedded standard library.
-func CompileSource(path, source string, opts ...interp.Option) (Result, error) {
-	dir := "/"
-	if i := strings.LastIndexByte(path, '/'); i > 0 {
-		dir = path[:i]
+	if config.NoStdlib {
+		argv = append(argv, "--no-stdlib")
 	}
-	files, err := stdlib()
-	if err != nil {
-		return Result{}, err
-	}
-	overlay := make(map[string]string, len(files)+1)
-	for name, src := range files {
-		overlay[name] = src
-	}
-	overlay[path] = source
-	return run([]string{"dspc", "--stdlib", stdlibRoot, path}, []string{dir, stdlibRoot},
-		append([]interp.Option{interp.WithFSOverlay(overlay)}, opts...))
+	return argv, readPaths
 }
 
 // CompileSnippet compiles source for exec(), eval() and compile() and returns
 // the statement list of the resulting module. It matches the signature
 // expected by interp.WithSnippetCompiler.
 func CompileSnippet(source, mode string) ([]any, error) {
-	r, err := CompileSource("/snippet/__snippet__.py", source)
+	r, err := CompileSource("/snippet/__snippet__.py", source, CompileOptions{NoStdlib: true})
 	if err != nil {
 		return nil, err
 	}
@@ -155,8 +157,8 @@ func CompileSnippet(source, mode string) ([]any, error) {
 		}
 		return nil, fmt.Errorf("%s", msg)
 	}
-	var bundle map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(r.Bundle)), &bundle); err != nil {
+	bundle, err := interp.LoadBundle([]byte(strings.TrimSpace(r.Bundle)))
+	if err != nil {
 		return nil, fmt.Errorf("dspc: compiler produced invalid JSON: %w", err)
 	}
 	main, _ := bundle["main"].(string)
@@ -182,6 +184,9 @@ func run(argv, readPaths []string, extra []interp.Option) (Result, error) {
 		interp.WithStdout(&stdout),
 		interp.WithStderr(&stderr),
 	}
-	code := interp.New(compiler, append(opts, extra...)...).Run()
+	vm := interp.New(compiler, append(opts, extra...)...)
+	defer vm.Close()
+	code := vm.Run()
+	vm.Close()
 	return Result{Bundle: stdout.String(), Stderr: stderr.String(), Code: code}, nil
 }

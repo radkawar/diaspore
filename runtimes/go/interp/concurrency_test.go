@@ -13,7 +13,7 @@ import (
 
 func compileBundle(t *testing.T, path string) map[string]any {
 	t.Helper()
-	result, err := dspc.CompileFile(path, false, nil)
+	result, err := dspc.CompileFile(path, dspc.CompileOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

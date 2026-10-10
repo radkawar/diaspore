@@ -62,8 +62,10 @@ def __getattr__(name: str):
     """
     if name == "bundle_schema":
         from .ir import bundle_schema
+
         return bundle_schema
     if name == "Bundle":
         from .ir import Bundle
+
         return Bundle
     raise AttributeError(f"module 'diaspore' has no attribute {name!r}")

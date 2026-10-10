@@ -36,6 +36,9 @@ jobs:
             (cd runtimes/go && CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
               go build -trimpath -ldflags="-s -w" -o "$GITHUB_WORKSPACE/build/$name/diaspore-go$ext" ./cmd/diaspore-go)
             cp LICENSE README.md "build/$name/"
+            mkdir -p "build/$name/cpython"
+            cp src/diaspore/cpython/LICENSE src/diaspore/cpython/UNICODE_LICENSE \
+              src/diaspore/cpython/stdlib_manifest.json "build/$name/cpython/"
             if [ "$os" = windows ]; then
               (cd build && zip -qr "../dist/$name.zip" "$name")
             else

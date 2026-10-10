@@ -1,6 +1,6 @@
 import {highlight} from './common.js';
 import {ready, isReady, invoke} from './runtime.js';
-import {install, stdlib} from './packages.js';
+import {install} from './packages.js';
 
 const input = document.getElementById('repl-input');
 const transcript = document.getElementById('transcript');
@@ -96,7 +96,7 @@ terminal.addEventListener('click', () => {
 });
 window.addEventListener('resize', resize);
 try {
-  await Promise.all([ready, stdlib().then(shims => Object.assign(files, shims))]);
+  await ready;
   banner.textContent = 'Diaspore. Type %pip install NAME to add a package.\n';
   unlock();
 } catch (error) { banner.textContent = 'Unable to load Diaspore.\n'; append(error.message + '\n', 'error'); }

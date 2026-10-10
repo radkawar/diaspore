@@ -1,567 +1,296 @@
-/* The re module (spec 11.8): a validated portable subset of Python regular
- * expressions implemented over JS RegExp. The validator rejects everything
- * outside the subset; the translator bridges the remaining JS/Python gaps
- * ('.' vs '\r', bare inline flags, ']' as the first class member). */
-
+/* Native regular expressions implement Python 3.12 capture/backtracking and
+ * Unicode 15.0 character semantics, with code-point or byte offsets. The
+ * explicit engine avoids JS capture resets and empty-match scan differences.
+ * LOCALE, TEMPLATE and DEBUG flags are unsupported. Conditional groups, named
+ * Unicode escapes and variable or backreference-dependent lookbehind raise
+ * re.error. Syntax and replacement errors retain their source coordinates. */
 import {
-  type Value,
-  type G,
-  type KwArgs,
-  NONE,
-  DiasporeList,
-  DiasporeTuple,
-  NativeModule,
-  NativeObject,
-  Builtin,
-  typeName,
-  asIndex,
-  hasAstral,
-  diasporeErr,
+  type Value, type G, type KwArgs, NONE, DiasporeList, DiasporeTuple,
+  type PyString, isPyString, chars, strFromChars, strJoin,
+  DiasporeDict, DiasporeIterBase, NativeModule, NativeObject, BuiltinType,
+  Builtin, BoundMethod, DiasporeFunction, DiasporeClass, DiasporeInstance,
+  asIndex, bytesToBinStr, diasporeErr,
 } from "./values.ts";
-import { needArgs } from "./helpers.ts";
+import { acquireBuffer, indexInteger } from "./buffers.ts";
 import { bi } from "./builtins.ts";
 import type { Interp } from "./interp.ts";
+import { compileRegex, executeRegex, type RegexCode, type RegexResult } from "./re_engine.ts";
+import { REGEX_ERROR, regexError } from "./re_error.ts";
 
-const RE_IGNORECASE = 2n;
-const RE_MULTILINE = 8n;
-const RE_DOTALL = 16n;
-
-/** Mirrors diaspore-py's _re_validate byte for byte. */
-function reValidate(pattern: string): void {
-  let i = 0;
-  const n = pattern.length;
-  while (i < n) {
-    const ch = pattern[i];
-    if (ch === "\\") {
-      const next = i + 1 < n ? pattern[i + 1] : "";
-      if (next >= "1" && next <= "9") {
-        throw diasporeErr("ValueError", "diaspore re: backreferences are not supported");
-      }
-      if (next === "A" || next === "Z") {
-        throw diasporeErr("ValueError", "diaspore re: \\A/\\Z are not supported (use ^ and $)");
-      }
-      i += 2;
-      continue;
-    }
-    if (pattern.startsWith("(?", i)) {
-      let j = i + 2;
-      let flags = 0;
-      while (j < n && (pattern[j] === "i" || pattern[j] === "m" || pattern[j] === "s")) {
-        flags++;
-        j++;
-      }
-      const ok = (j < n && pattern[j] === ":") || (flags > 0 && j < n && pattern[j] === ")");
-      if (!ok) {
-        throw diasporeErr("ValueError", "diaspore re: only (?:...) groups and (?ims) flags are supported");
-      }
-      i = j + 1;
-      continue;
-    }
-    if ((ch === "*" || ch === "+" || ch === "?") && i + 1 < n && pattern[i + 1] === "+") {
-      throw diasporeErr("ValueError", "diaspore re: possessive quantifiers are not supported");
-    }
-    i++;
+function integer(value: Value): bigint {
+  const n = asIndex(value); if (n === null) throw diasporeErr("TypeError", "integer argument expected"); return n;
+}
+function bind(name: string, args: Value[], kw: KwArgs, names: string[], required: number, defaults: Value[]): Value[] {
+  if (args.length > names.length) throw diasporeErr("TypeError", `${name}() takes at most ${names.length} arguments`);
+  const result = args.slice();
+  for (const [key, value] of kw) {
+    const i = names.indexOf(key);
+    if (i < 0) throw diasporeErr("TypeError", `${name}() got an unexpected keyword argument '${key}'`);
+    if (i < args.length) throw diasporeErr("TypeError", `${name}() got multiple values for '${key}'`);
+    result[i] = value;
+  }
+  for (let i = 0; i < names.length; i++) if (result[i] === undefined) {
+    if (i < required) throw diasporeErr("TypeError", `${name}() missing required argument '${names[i]}'`);
+    result[i] = defaults[i - required];
+  }
+  return result;
+}
+function text(value: Value): { raw: PyString; bytes: boolean } {
+  if (isPyString(value)) return { raw: value, bytes: false };
+  const lease = acquireBuffer(value);
+  if (lease === null) throw diasporeErr("TypeError", "expected string or bytes-like object");
+  try {
+    return { raw: bytesToBinStr(lease.data), bytes: true };
+  } finally {
+    lease.release();
   }
 }
-
-/** Translates a validated diaspore pattern to JS RegExp source:
- * - strips bare inline-flag groups `(?ims)` (collected into global flags),
- * - rewrites `.` to [^\n] (or [\s\S] under DOTALL) for Python semantics,
- * - escapes a leading `]` inside a character class (Python treats it as a
- *   literal; JS treats `[]` as an empty class). */
-function translate(pattern: string, dotAll: boolean): { src: string; extra: string } {
-  let out = "";
-  let extra = "";
-  let i = 0;
-  const n = pattern.length;
-  while (i < n) {
-    const ch = pattern[i];
-    if (ch === "\\") {
-      out += pattern.slice(i, i + 2);
-      i += 2;
-      continue;
-    }
-    if (ch === "[") {
-      // character class: copy verbatim, escaping a leading ']'
-      out += "[";
-      i++;
-      if (i < n && pattern[i] === "^") {
-        out += "^";
-        i++;
-      }
-      if (i < n && pattern[i] === "]") {
-        out += "\\]";
-        i++;
-      }
-      while (i < n && pattern[i] !== "]") {
-        if (pattern[i] === "\\") {
-          out += pattern.slice(i, i + 2);
-          i += 2;
-        } else {
-          out += pattern[i];
-          i++;
-        }
-      }
-      if (i < n) {
-        out += "]";
-        i++;
-      }
-      continue;
-    }
-    if (ch === "(" && pattern.startsWith("(?", i)) {
-      let j = i + 2;
-      let flags = "";
-      while (j < n && (pattern[j] === "i" || pattern[j] === "m" || pattern[j] === "s")) {
-        flags += pattern[j];
-        j++;
-      }
-      if (flags.length > 0 && j < n && pattern[j] === ")") {
-        // bare inline flags: apply globally
-        for (const f of flags) if (!extra.includes(f)) extra += f;
-        i = j + 1;
-        continue;
-      }
-      out += pattern.slice(i, j + 1);
-      i = j + 1;
-      continue;
-    }
-    if (ch === ".") {
-      out += dotAll ? "[\\s\\S]" : "[^\\n]";
-      i++;
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return { src: out, extra };
+function encoded(raw: PyString, bytes: boolean): Value {
+  return bytes ? Uint8Array.from(raw, c => c.charCodeAt(0)) : raw;
 }
-
-interface CompiledRe {
-  search: RegExp; // global, hasIndices
-  match: RegExp; // sticky
-  fullmatch: RegExp; // sticky, end-anchored
-  nGroups: number;
+interface Subject {
+  original: Value; chars: string[]; bytes: boolean; pos: number; end: number;
+  slice: (start: number, end?: number) => Value;
 }
-
-const cache = new Map<string, CompiledRe>();
-
-function getCompiled(pattern: Value, flags: bigint): CompiledRe {
-  if (typeof pattern !== "string") {
-    throw diasporeErr("TypeError", "re pattern must be a string");
-  }
-  const key = `${flags}:${pattern}`;
-  const hit = cache.get(key);
-  if (hit !== undefined) return hit;
-  reValidate(pattern);
-  let dotAll = (flags & RE_DOTALL) !== 0n;
-  let jsFlags = "d";
-  if ((flags & RE_IGNORECASE) !== 0n) jsFlags += "i";
-  if ((flags & RE_MULTILINE) !== 0n) jsFlags += "m";
-  // pre-scan inline flags so '.' translation sees DOTALL from (?s)
-  const pre = translate(pattern, false);
-  if (pre.extra.includes("s")) dotAll = true;
-  const { src, extra } = translate(pattern, dotAll);
-  for (const f of extra) {
-    if (f === "i" && !jsFlags.includes("i")) jsFlags += "i";
-    if (f === "m" && !jsFlags.includes("m")) jsFlags += "m";
-  }
-  const compile = (source: string, fl: string): RegExp => {
-    try {
-      return new RegExp(source, fl);
-    } catch (e) {
-      let msg = e instanceof Error ? e.message : String(e);
-      const idx = msg.lastIndexOf(": ");
-      if (idx >= 0) msg = msg.slice(idx + 2);
-      throw diasporeErr("ValueError", `diaspore re: invalid pattern: ${msg}`);
-    }
+function subject(pattern: Pattern, value: Value, pos: Value = 0n, end: Value = 9223372036854775807n): Subject {
+  const s = text(value);
+  if (s.bytes !== pattern.bytes) throw diasporeErr("TypeError", "cannot mix string and bytes patterns");
+  const points = chars(s.raw);
+  const clamp = (v: Value) => {
+    const n = integer(v);
+    return Number(n < 0n ? 0n : n > BigInt(points.length) ? BigInt(points.length) : n);
   };
-  const c: CompiledRe = {
-    search: compile(src, jsFlags + "g"),
-    match: compile(`(?:${src})`, jsFlags + "y"),
-    fullmatch: compile(`(?:${src})(?![\\s\\S])`, jsFlags + "y"),
-    nGroups: 0,
-  };
-  // count capturing groups via a probe match against the empty-ish regex
-  c.nGroups = countGroups(src);
-  cache.set(key, c);
-  return c;
+  return { original: value, chars: points, bytes: s.bytes, pos: clamp(pos), end: clamp(end), slice: (a, b = points.length) => encoded(strFromChars(points.slice(a, b)), s.bytes) };
 }
-
-function countGroups(src: string): number {
-  let count = 0;
-  let i = 0;
-  while (i < src.length) {
-    const ch = src[i];
-    if (ch === "\\") {
-      i += 2;
-      continue;
-    }
-    if (ch === "[") {
-      i++;
-      if (i < src.length && src[i] === "^") i++;
-      if (i < src.length && src[i] === "]") i++;
-      while (i < src.length && src[i] !== "]") {
-        if (src[i] === "\\") i += 2;
-        else i++;
-      }
-      i++;
-      continue;
-    }
-    if (ch === "(" && !src.startsWith("(?", i)) count++;
-    i++;
+function* groupNumber(I: Interp, code: RegexCode, value: Value): G<number> {
+  const raw = value instanceof DiasporeInstance && value.prim !== null ? value.prim : value;
+  let n: number | bigint | undefined;
+  if (isPyString(raw)) n = typeof raw === "string" ? code.names.get(raw) : undefined;
+  else if (asIndex(raw) !== null || value instanceof DiasporeInstance && value.cls.lookup("__index__") !== undefined) {
+    n = yield* indexInteger(I, value);
   }
-  return count;
+  if (n === undefined || n < 0 || n > code.groups) throw diasporeErr("IndexError", "no such group");
+  return Number(n);
 }
-
-/** Loc vector like Go's FindStringSubmatchIndex: [s0,e0,s1,e1,...] with -1
- * for unmatched groups. Offsets are UTF-16 code units into the subject. */
-type Loc = number[];
-
-function locOf(m: RegExpExecArray): Loc {
-  const indices = (m as RegExpExecArray & { indices?: ([number, number] | undefined)[] })
-    .indices as ([number, number] | undefined)[];
-  const out: number[] = [];
-  for (let g = 0; g < m.length; g++) {
-    const pair = indices[g];
-    if (pair === undefined) {
-      out.push(-1, -1);
+function captured(s: Subject, result: RegexResult, g: number, fallback: Value = NONE): Value {
+  const start = result.caps[g * 2]; return start < 0 ? fallback : s.slice(start, result.caps[g * 2 + 1]);
+}
+function* matches(I: Interp, pattern: Pattern, s: Subject, mode: string): Generator<RegexResult> {
+  let at = s.pos, mustConsume = false;
+  while (at <= s.end) {
+    I.fuel(); let found: RegexResult | undefined;
+    for (const candidate of executeRegex(pattern.code, s.chars, at, s.end, () => I.fuel())) {
+      if (mustConsume && candidate.pos === at || mode === "fullmatch" && candidate.pos !== s.end) continue;
+      const caps = candidate.caps.slice(); caps[0] = at; caps[1] = candidate.pos;
+      found = { ...candidate, caps }; break;
+    }
+    if (found) {
+      yield found;
+      if (mode === "match" || mode === "fullmatch" || mode === "search") return;
+      mustConsume = found.pos === at; at = found.pos;
     } else {
-      out.push(pair[0], pair[1]);
+      if (mode === "match" || mode === "fullmatch") return;
+      at++; mustConsume = false;
     }
   }
-  return out;
 }
 
-/** Advance lastIndex by one code point (for empty matches). */
-function bumpLastIndex(re: RegExp, s: string): void {
-  const i = re.lastIndex;
-  const c = s.charCodeAt(i);
-  if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
-    const c2 = s.charCodeAt(i + 1);
-    if (c2 >= 0xdc00 && c2 <= 0xdfff) {
-      re.lastIndex = i + 2;
-      return;
+type Template = (PyString | number)[];
+function template(pattern: Pattern, source: PyString): Template {
+  const raw = chars(source), parts: Template = [];
+  let literal: string[] = [];
+  const flush = () => { if (literal.length) { parts.push(strFromChars(literal)); literal = []; } };
+  let at = 0;
+  const error: (message: string, position?: number) => never = (message, position = at) => { throw regexError(message, encoded(source, pattern.bytes), position); };
+  const escape: Record<string, string> = { a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\" };
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] !== "\\") { literal.push(raw[i]); continue; }
+    at = i;
+    const c = raw[++i]; if (c === undefined) error("bad escape (end of pattern)");
+    let ref: string | undefined, referenceStart = at + 1;
+    if (c === "g") {
+      if (raw[++i] !== "<") error("missing <");
+      referenceStart = i + 1;
+      const end = raw.indexOf(">", i + 1); if (end < 0) error("missing >, unterminated name", referenceStart);
+      const name = strFromChars(raw.slice(i + 1, end));
+      if (typeof name !== "string") error("bad character in group name", referenceStart);
+      ref = name; i = end;
+      if (!ref) error("missing group name", referenceStart);
+    } else if (/^[0-9]$/.test(c)) {
+      let digits = c;
+      if (c === "0" || /^[0-7]{3}$/.test(raw.slice(i, i + 3).join(""))) {
+        while (digits.length < 3 && /^[0-7]$/.test(raw[i + 1] ?? "")) digits += raw[++i];
+        const oct = parseInt(digits, 8); if (oct > 255) error("octal escape outside range");
+        literal.push(String.fromCharCode(oct)); continue;
+      }
+      if (/^[0-9]$/.test(raw[i + 1] ?? "")) digits += raw[++i];
+      ref = digits;
+    } else if (escape[c] !== undefined) literal.push(escape[c]);
+    else if (/^[a-zA-Z]$/.test(c)) error(`bad escape \\${c}`);
+    else literal.push("\\", c);
+    if (ref !== undefined) {
+      const id = /^[0-9]+$/.test(ref) ? Number(ref) : pattern.code.names.get(ref);
+      if (id === undefined) throw diasporeErr("IndexError", `unknown group name '${ref}'`);
+      if (id > pattern.code.groups) error(`invalid group reference ${id}`, referenceStart);
+      flush(); parts.push(id);
     }
   }
-  re.lastIndex = i + 1;
+  flush(); return parts;
 }
-
-/** All matches with CPython 3.7+ semantics (an empty match adjacent to a
- * non-empty match is kept; the scan advances one code point after an empty
- * match). The JS exec loop implements exactly this. */
-function findAllPy(c: CompiledRe, s: string): Loc[] {
-  const re = c.search;
-  re.lastIndex = 0;
-  const out: Loc[] = [];
-  for (;;) {
-    if (re.lastIndex > s.length) break;
-    const m = re.exec(s);
-    if (m === null) break;
-    out.push(locOf(m));
-    if (m[0].length === 0) {
-      bumpLastIndex(re, s);
-    }
+function expand(parts: Template, s: Subject, result: RegexResult): Value {
+  const out: PyString[] = [];
+  for (const part of parts) {
+    if (isPyString(part)) out.push(part);
+    else if (result.caps[2 * part] >= 0) out.push(strFromChars(s.chars.slice(result.caps[2 * part], result.caps[2 * part + 1])));
   }
-  return out;
+  return encoded(strJoin(out), s.bytes);
 }
-
-/** UTF-16 offset -> code-point offset (CPython match positions). */
-function cpIndex(s: string, off: number): bigint {
-  if (!hasAstral(s)) return BigInt(off);
-  let cp = 0;
-  for (let i = 0; i < off; i++) {
-    const c = s.charCodeAt(i);
-    if (c >= 0xd800 && c <= 0xdbff && i + 1 < off) i++;
-    cp++;
+function wrapMatch(pattern: Pattern, s: Subject, result: RegexResult): NativeObject {
+  const object = new NativeObject("re.Match", new Map());
+  object.methods.set("group", bi("group", function* (I, args, kw): G<Value> {
+    if (kw.size) throw diasporeErr("TypeError", "group() takes no keyword arguments");
+    const values: Value[] = [];
+    for (const arg of args.length ? args : [0n]) values.push(captured(s, result, yield* groupNumber(I, pattern.code, arg)));
+    return values.length === 1 ? values[0] : new DiasporeTuple(values);
+  }));
+  object.methods.set("__getitem__", bi("__getitem__", function* (I, args, kw): G<Value> {
+    if (kw.size) throw diasporeErr("TypeError", "__getitem__() takes no keyword arguments");
+    const [g] = bind("__getitem__", args, kw, ["group"], 1, []);
+    return captured(s, result, yield* groupNumber(I, pattern.code, g));
+  }));
+  for (const method of ["groups", "groupdict"]) object.methods.set(method, bi(method, function* (_I, args, kw): G<Value> {
+    const [fallback] = bind(method, args, kw, ["default"], 0, [NONE]);
+    if (method === "groups") return new DiasporeTuple(Array.from({ length: pattern.code.groups }, (_, i) => captured(s, result, i + 1, fallback)));
+    const out = new DiasporeDict(); for (const [name, id] of pattern.code.names) out.set(name, captured(s, result, id, fallback)); return out;
+  }));
+  for (const method of ["start", "end", "span"]) object.methods.set(method, bi(method, function* (I, args, kw): G<Value> {
+    const [g] = bind(method, args, kw, ["group"], 0, [0n]); const id = yield* groupNumber(I, pattern.code, g);
+    const a = BigInt(result.caps[id * 2]), b = BigInt(result.caps[id * 2 + 1]);
+    return method === "start" ? a : method === "end" ? b : new DiasporeTuple([a, b]);
+  }));
+  object.methods.set("expand", bi("expand", function* (_I, args, kw): G<Value> {
+    const [value] = bind("expand", args, kw, ["template"], 1, []); const repl = text(value);
+    if (repl.bytes !== s.bytes) throw diasporeErr("TypeError", "cannot mix string and bytes replacements");
+    return expand(template(pattern, repl.raw), s, result);
+  }));
+  let lastgroup: Value = NONE;
+  for (const [name, id] of pattern.code.names) if (id === result.last) lastgroup = name;
+  object.props = new Map<string, Value>([
+    ["re", pattern], ["string", s.original], ["pos", BigInt(s.pos)], ["endpos", BigInt(s.end)],
+    ["lastindex", result.last === null ? NONE : BigInt(result.last)], ["lastgroup", lastgroup],
+    ["regs", new DiasporeTuple(Array.from({ length: pattern.code.groups + 1 }, (_, i) => new DiasporeTuple([BigInt(result.caps[i * 2]), BigInt(result.caps[i * 2 + 1])])))]
+  ]);
+  return object;
+}
+class MatchIterator extends DiasporeIterBase {
+  kindName = "callable_iterator";
+  private pattern: Pattern;
+  private s: Subject;
+  private iterator: Generator<RegexResult>;
+  constructor(pattern: Pattern, s: Subject, iterator: Generator<RegexResult>) {
+    super(); this.pattern = pattern; this.s = s; this.iterator = iterator;
   }
-  return BigInt(cp);
+  *next(): G<[Value, boolean]> { const item = this.iterator.next(); return item.done ? [NONE, false] : [wrapMatch(this.pattern, this.s, item.value), true]; }
 }
-
-function wrapMatch(s: string, loc: Loc): NativeObject {
-  const nGroups = loc.length / 2 - 1;
-  const groupVal = (g: number): Value => {
-    if (loc[2 * g] < 0) return NONE;
-    return s.slice(loc[2 * g], loc[2 * g + 1]);
-  };
-  const groupArg = (name: string, args: Value[]): number => {
-    let n = 0n;
-    if (args.length > 1) {
-      throw diasporeErr("TypeError", `${name} expected at most 1 arguments, got ${args.length}`);
-    }
-    if (args.length === 1) {
-      const v = asIndex(args[0]);
-      if (v === null) throw diasporeErr("IndexError", "no such group");
-      n = v;
-    }
-    if (n < 0n || n > BigInt(nGroups)) throw diasporeErr("IndexError", "no such group");
-    return Number(n);
-  };
-  const spanOf = (g: number): [Value, Value] => {
-    if (loc[2 * g] < 0) return [-1n, -1n];
-    return [cpIndex(s, loc[2 * g]), cpIndex(s, loc[2 * g + 1])];
-  };
-  const methods = new Map<string, Builtin>();
-  methods.set(
-    "group",
-    bi("group", function* (_I, args): G<Value> {
-      return groupVal(groupArg("group", args));
-    }),
-  );
-  methods.set(
-    "groups",
-    bi("groups", function* (): G<Value> {
-      const items: Value[] = [];
-      for (let g = 1; g <= nGroups; g++) items.push(groupVal(g));
-      return new DiasporeTuple(items);
-    }),
-  );
-  methods.set(
-    "start",
-    bi("start", function* (_I, args): G<Value> {
-      return spanOf(groupArg("start", args))[0];
-    }),
-  );
-  methods.set(
-    "end",
-    bi("end", function* (_I, args): G<Value> {
-      return spanOf(groupArg("end", args))[1];
-    }),
-  );
-  methods.set(
-    "span",
-    bi("span", function* (_I, args): G<Value> {
-      const [a, b] = spanOf(groupArg("span", args));
-      return new DiasporeTuple([a, b]);
-    }),
-  );
-  return new NativeObject("re.Match", methods);
-}
-
-// CPython's re.escape special-character set.
-const ESCAPE_SET = new Set("()[]{}?*+-|^$\\.&~# \t\n\r\v\f");
-
-function reEscape(s: string): string {
-  let b = "";
-  for (const r of s) {
-    if (ESCAPE_SET.has(r)) b += "\\";
-    b += r;
+class Pattern extends NativeObject {
+  code: RegexCode; bytes: boolean;
+  constructor(value: Value, flags: bigint) {
+    super("re.Pattern", new Map());
+    if (!isPyString(value) && !(value instanceof Uint8Array)) throw diasporeErr("TypeError", "first argument must be string or compiled pattern");
+    const p = text(value); this.bytes = p.bytes;
+    if (flags < 0n || flags > 511n) throw diasporeErr("ValueError", "unsupported regular expression flags");
+    this.code = compileRegex(p.raw, Number(flags), p.bytes, value);
+    const index = new DiasporeDict(); for (const [name, id] of this.code.names) index.set(name, BigInt(id));
+    this.props = new Map<string, Value>([["pattern", value], ["flags", BigInt(this.code.flags)], ["groups", BigInt(this.code.groups)], ["groupindex", index]]);
+    for (const method of ["match", "search", "fullmatch", "findall", "finditer"]) this.methods.set(method, bi(method, function* (I, args, kw): G<Value> {
+      const [value, pos, end] = bind(method, args, kw, ["string", "pos", "endpos"], 1, [0n, 9223372036854775807n]);
+      return yield* run(I, thisPattern, method, subject(thisPattern, value, pos, end));
+    }));
+    const thisPattern = this;
+    this.methods.set("split", bi("split", function* (I, args, kw): G<Value> {
+      const [value, limit] = bind("split", args, kw, ["string", "maxsplit"], 1, [0n]);
+      return yield* run(I, thisPattern, "split", subject(thisPattern, value), limit);
+    }));
+    for (const method of ["sub", "subn"]) this.methods.set(method, bi(method, function* (I, args, kw): G<Value> {
+      const [repl, value, limit] = bind(method, args, kw, ["repl", "string", "count"], 2, [0n]);
+      return yield* run(I, thisPattern, method, subject(thisPattern, value), limit, repl);
+    }));
   }
-  return b;
 }
-
-/** Applies a sub() replacement template to one match. */
-function expandTemplate(b: string[], repl: string, s: string, loc: Loc): void {
-  const nGroups = loc.length / 2 - 1;
-  for (let i = 0; i < repl.length; i++) {
-    const c = repl[i];
-    if (c !== "\\") {
-      b.push(c);
+function* run(I: Interp, pattern: Pattern, method: string, s: Subject, limit: Value = 0n, repl: Value = NONE): G<Value> {
+  const iterator = matches(I, pattern, s, method);
+  if (method === "finditer") return new MatchIterator(pattern, s, iterator);
+  if (method === "match" || method === "search" || method === "fullmatch") { const first = iterator.next(); return first.done ? NONE : wrapMatch(pattern, s, first.value); }
+  const out: Value[] = []; let last = 0, done = 0n;
+  const max = integer(limit), substitution = method === "sub" || method === "subn";
+  let parts: Template | null = null;
+  const callable = repl instanceof Builtin || repl instanceof BuiltinType || repl instanceof BoundMethod || repl instanceof DiasporeFunction || repl instanceof DiasporeClass || repl instanceof DiasporeInstance && repl.cls.lookup("__call__") !== undefined;
+  if (substitution && !callable) {
+    const r = text(repl); if (r.bytes !== s.bytes) throw diasporeErr("TypeError", "cannot mix string and bytes replacements");
+    parts = template(pattern, r.raw);
+  }
+  if (max >= 0n) for (const result of iterator) {
+    if (method === "findall") {
+      const empty = encoded("", s.bytes);
+      out.push(pattern.code.groups === 0 ? captured(s, result, 0) : pattern.code.groups === 1 ? captured(s, result, 1, empty) : new DiasporeTuple(Array.from({ length: pattern.code.groups }, (_, i) => captured(s, result, i + 1, empty))));
       continue;
     }
-    i++;
-    if (i >= repl.length) {
-      throw diasporeErr("ValueError", "diaspore re: bad escape (end of pattern)");
-    }
-    const e = repl[i];
-    if (e >= "1" && e <= "9") {
-      const g = e.charCodeAt(0) - 48;
-      if (g > nGroups) throw diasporeErr("ValueError", `invalid group reference ${g}`);
-      if (loc[2 * g] >= 0) b.push(s.slice(loc[2 * g], loc[2 * g + 1]));
-    } else if (e === "\\") {
-      b.push("\\");
-    } else if (e === "n") {
-      b.push("\n");
-    } else if (e === "t") {
-      b.push("\t");
-    } else if (e === "r") {
-      b.push("\r");
-    } else if (e === "f") {
-      b.push("\f");
-    } else if (e === "v") {
-      b.push("\v");
-    } else if (e === "a") {
-      b.push("\x07");
-    } else if (e === "b") {
-      b.push("\b");
-    } else if (e === "0") {
-      b.push("\x00");
-    } else {
-      throw diasporeErr("ValueError", `diaspore re: bad escape \\${e}`);
-    }
+    out.push(s.slice(last, result.caps[0]));
+    if (substitution) {
+      const value = parts === null ? yield* I.invoke(repl, [wrapMatch(pattern, s, result)], new Map()) : expand(parts, s, result);
+      if (value === NONE && parts === null) out.push(encoded("", s.bytes));
+      else { const r = text(value); if (r.bytes !== s.bytes) throw diasporeErr("TypeError", "replacement has wrong type"); out.push(encoded(r.raw, r.bytes)); }
+    } else for (let id = 1; id <= pattern.code.groups; id++) out.push(captured(s, result, id));
+    last = result.pos; done++;
+    if (max > 0n && done >= max) break;
   }
+  if (method === "findall") return new DiasporeList(out);
+  out.push(s.slice(last));
+  if (!substitution) return new DiasporeList(out);
+  const raw = strJoin(out.map(value => text(value).raw)); const value = encoded(raw, s.bytes);
+  return method === "subn" ? new DiasporeTuple([value, done]) : value;
 }
 
-// --------------------------------------------------------------------------
-
-/** Construct the portable regular-expression module. */
+/** Construct the capability-free native Python regular-expression module. */
 export function makeReModule(_I: Interp): NativeModule {
-  const intArg = (what: string, v: Value): bigint => {
-    const n = asIndex(v);
-    if (n === null) throw diasporeErr("TypeError", `${what} must be an integer`);
-    return n;
+  const cache = new Map<string, Pattern>();
+  const compile = (value: Value, flags: Value): Pattern => {
+    const n = integer(flags);
+    if (value instanceof Pattern) { if (n !== 0n) throw diasporeErr("ValueError", "cannot process flags argument with a compiled pattern"); return value; }
+    if (!isPyString(value) && !(value instanceof Uint8Array)) throw diasporeErr("TypeError", "first argument must be string or compiled pattern");
+    const p = text(value);
+    const key = `${p.bytes ? "b" : typeof p.raw === "string" ? "s" : "p"}:${n}:${typeof p.raw === "string" ? p.raw : JSON.stringify(chars(p.raw))}`;
+    const hit = cache.get(key); if (hit) return hit;
+    const result = new Pattern(value, n);
+    if (cache.size >= 512) cache.delete(cache.keys().next().value!);
+    cache.set(key, result); return result;
   };
-
-  // (pattern, string, flags=0) shared by search/match/fullmatch/findall
-  const parse = (name: string, args: Value[], kw: KwArgs): [CompiledRe, string] => {
-    needArgs(name, args, 2, 3);
-    let flags = 0n;
-    if (args.length === 3) flags = intArg("flags", args[2]);
-    const kv = kw.get("flags");
-    if (kv !== undefined) flags = intArg("flags", kv);
-    const c = getCompiled(args[0], flags);
-    if (typeof args[1] !== "string") {
-      throw diasporeErr(
-        "TypeError",
-        `expected string or bytes-like object, got '${typeName(args[1])}'`,
-      );
-    }
-    return [c, args[1]];
-  };
-
-  const matcher = (name: string, pick: (c: CompiledRe) => RegExp) =>
-    bi(name, function* (_I2, args, kw): G<Value> {
-      const [c, s] = parse(name, args, kw);
-      const re = pick(c);
-      re.lastIndex = 0;
-      const m = re.exec(s);
-      if (m === null) return NONE;
-      return wrapMatch(s, locOf(m));
-    });
-
-  const findall = bi("findall", function* (_I2, args, kw): G<Value> {
-    const [c, s] = parse("findall", args, kw);
-    const nGroups = c.nGroups;
-    const out = new DiasporeList();
-    for (const loc of findAllPy(c, s)) {
-      if (nGroups === 0) {
-        out.items.push(s.slice(loc[0], loc[1]));
-      } else if (nGroups === 1) {
-        out.items.push(groupOrEmpty(s, loc, 1));
-      } else {
-        const row: Value[] = [];
-        for (let g = 1; g <= nGroups; g++) row.push(groupOrEmpty(s, loc, g));
-        out.items.push(new DiasporeTuple(row));
-      }
-    }
-    return out;
-  });
-
-  const split = bi("split", function* (_I2, args, kw): G<Value> {
-    needArgs("split", args, 2, 4);
-    let maxsplit = 0n;
-    let flags = 0n;
-    if (args.length >= 3) maxsplit = intArg("maxsplit", args[2]);
-    const mkv = kw.get("maxsplit");
-    if (mkv !== undefined) maxsplit = intArg("maxsplit", mkv);
-    if (args.length === 4) flags = intArg("flags", args[3]);
-    const fkv = kw.get("flags");
-    if (fkv !== undefined) flags = intArg("flags", fkv);
-    const c = getCompiled(args[0], flags);
-    if (typeof args[1] !== "string") {
-      throw diasporeErr(
-        "TypeError",
-        `expected string or bytes-like object, got '${typeName(args[1])}'`,
-      );
-    }
-    const s = args[1];
-    const out = new DiasporeList();
-    let last = 0;
-    let count = 0n;
-    for (const loc of findAllPy(c, s)) {
-      if (maxsplit > 0n && count >= maxsplit) break;
-      out.items.push(s.slice(last, loc[0]));
-      for (let g = 1; g <= c.nGroups; g++) {
-        if (loc[2 * g] < 0) out.items.push(NONE);
-        else out.items.push(s.slice(loc[2 * g], loc[2 * g + 1]));
-      }
-      last = loc[1];
-      count++;
-    }
-    out.items.push(s.slice(last));
-    return out;
-  });
-
-  const sub = bi("sub", function* (_I2, args, kw): G<Value> {
-    needArgs("sub", args, 3, 5);
-    const repl = args[1];
-    if (typeof repl !== "string") {
-      throw diasporeErr("TypeError", "diaspore re: repl must be a string");
-    }
-    if (repl.includes("\\g")) {
-      throw diasporeErr("ValueError", "diaspore re: \\g<...> replacements are not supported");
-    }
-    let count = 0n;
-    if (args.length >= 4) {
-      const n = asIndex(args[3]);
-      if (n === null) throw diasporeErr("TypeError", "count must be an integer");
-      count = n;
-    }
-    const ckv = kw.get("count");
-    if (ckv !== undefined) {
-      const n = asIndex(ckv);
-      if (n === null) throw diasporeErr("TypeError", "count must be an integer");
-      count = n;
-    }
-    let flags = 0n;
-    if (args.length === 5) {
-      const f = asIndex(args[4]);
-      if (f === null) throw diasporeErr("TypeError", "flags must be an integer");
-      flags = f;
-    }
-    const fkv = kw.get("flags");
-    if (fkv !== undefined) {
-      const f = asIndex(fkv);
-      if (f === null) throw diasporeErr("TypeError", "flags must be an integer");
-      flags = f;
-    }
-    const c = getCompiled(args[0], flags);
-    if (typeof args[2] !== "string") {
-      throw diasporeErr(
-        "TypeError",
-        `expected string or bytes-like object, got '${typeName(args[2])}'`,
-      );
-    }
-    const s = args[2];
-    const b: string[] = [];
-    let last = 0;
-    let done = 0n;
-    for (const loc of findAllPy(c, s)) {
-      if (count > 0n && done >= count) break;
-      b.push(s.slice(last, loc[0]));
-      expandTemplate(b, repl, s, loc);
-      last = loc[1];
-      done++;
-    }
-    b.push(s.slice(last));
-    return b.join("");
-  });
-
-  const escape = bi("escape", function* (_I2, args): G<Value> {
-    needArgs("escape", args, 1, 1);
-    if (typeof args[0] !== "string") {
-      throw diasporeErr("TypeError", `expected string, got '${typeName(args[0])}'`);
-    }
-    return reEscape(args[0]);
-  });
-
-  return new NativeModule(
-    "re",
-    new Map<string, Value>([
-      ["IGNORECASE", RE_IGNORECASE],
-      ["MULTILINE", RE_MULTILINE],
-      ["DOTALL", RE_DOTALL],
-      ["search", matcher("search", (c) => c.search)],
-      ["match", matcher("match", (c) => c.match)],
-      ["fullmatch", matcher("fullmatch", (c) => c.fullmatch)],
-      ["findall", findall],
-      ["split", split],
-      ["sub", sub],
-      ["escape", escape],
-    ]),
-  );
-}
-
-function groupOrEmpty(s: string, loc: Loc, g: number): Value {
-  if (loc[2 * g] < 0) return "";
-  return s.slice(loc[2 * g], loc[2 * g + 1]);
+  const ns = new Map<string, Value>();
+  const aliases: Record<string, number> = { NOFLAG: 0, TEMPLATE: 1, T: 1, IGNORECASE: 2, I: 2, LOCALE: 4, L: 4, MULTILINE: 8, M: 8, DOTALL: 16, S: 16, UNICODE: 32, U: 32, VERBOSE: 64, X: 64, DEBUG: 128, ASCII: 256, A: 256 };
+  for (const [name, value] of Object.entries(aliases)) ns.set(name, BigInt(value));
+  for (const name of ["Pattern", "Match"]) {
+    const type = new BuiltinType(`re.${name}`, function* (): G<Value> { throw diasporeErr("TypeError", `cannot create 're.${name}' instances`); });
+    ns.set(name, type);
+    _I.types.set(`re.${name}`, type);
+  }
+  ns.set("error", REGEX_ERROR); ns.set("PatternError", REGEX_ERROR);
+  ns.set("compile", bi("compile", function* (_I, args, kw): G<Value> {
+    const [pattern, flags] = bind("compile", args, kw, ["pattern", "flags"], 1, [0n]); return compile(pattern, flags);
+  }));
+  ns.set("purge", bi("purge", function* (_I, args, kw): G<Value> { bind("purge", args, kw, [], 0, []); cache.clear(); return NONE; }));
+  ns.set("escape", bi("escape", function* (_I, args, kw): G<Value> {
+    const [value] = bind("escape", args, kw, ["pattern"], 1, []); const p = text(value);
+    const special = /[()[\]{}?*+\-|^$\\.&~# \t\n\r\v\f]/g;
+    const escaped = typeof p.raw === "string" ? p.raw.replace(special, "\\$&")
+      : strJoin((function* () { for (const char of p.raw) yield char.replace(special, "\\$&"); })());
+    return encoded(escaped, p.bytes);
+  }));
+  for (const method of ["match", "search", "fullmatch", "findall", "finditer", "split", "sub", "subn"]) ns.set(method, bi(method, function* (I, args, kw): G<Value> {
+    const sub = method === "sub" || method === "subn", split = method === "split";
+    const names = sub ? ["pattern", "repl", "string", "count", "flags"] : split ? ["pattern", "string", "maxsplit", "flags"] : ["pattern", "string", "flags"];
+    const a = bind(method, args, kw, names, sub ? 3 : 2, sub || split ? [0n, 0n] : [0n]);
+    const pattern = compile(a[0], a[a.length - 1]);
+    return yield* run(I, pattern, method, subject(pattern, a[sub ? 2 : 1]), sub ? a[3] : split ? a[2] : 0n, sub ? a[1] : NONE);
+  }));
+  return new NativeModule("re", ns);
 }

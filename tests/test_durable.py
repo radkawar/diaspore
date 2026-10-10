@@ -56,24 +56,69 @@ class TestSuspendResume:
         assert out3.getvalue() == "got [1, 2] roll stable: True\ndone\n"
 
     def test_effects_replay_identically(self, tmp_path: Path) -> None:
-        bundle = build(tmp_path, (
-            "import flow\n"
-            "import random\n"
-            "import time\n"
-            "a = random.randint(1, 10 ** 9)\n"
-            "t = time.time()\n"
-            "flow.suspend(None)\n"
-            "b = random.randint(1, 10 ** 9)\n"
-            "print(a, t > 0, a == b or a != b)\n"
-            "print('journal kept a stable:', isinstance(a, int))\n"
-        ))
+        bundle = build(
+            tmp_path,
+            (
+                "import flow\n"
+                "import random\n"
+                "import time\n"
+                "a = random.randint(1, 10 ** 9)\n"
+                "t = time.time()\n"
+                "flow.suspend(None)\n"
+                "b = random.randint(1, 10 ** 9)\n"
+                "print(a, t > 0, a == b or a != b)\n"
+                "print('journal kept a stable:', isinstance(a, int))\n"
+            ),
+        )
         r1 = machine(bundle, io.StringIO()).run_durable()
         assert isinstance(r1, Suspended)
         kinds = [(e["m"], e["f"]) for e in r1.snapshot["journal"]]
-        assert kinds == [("random", "randint"), ("time", "time")]
+        assert kinds == [("time", "time"), ("time", "monotonic"), ("time", "time")]
         out = io.StringIO()
         r2 = machine(bundle, out).resume(r1.snapshot)
         assert isinstance(r2, Completed)
+
+    def test_perf_counter_uses_monotonic_host_clock(self, tmp_path: Path) -> None:
+        import time
+
+        bundle = build(tmp_path, "import time\nprint(time.perf_counter())\n")
+        out = io.StringIO()
+        before = time.perf_counter()
+        result = machine(bundle, out).run_durable()
+        after = time.perf_counter()
+        assert isinstance(result, Completed) and result.code == 0
+        assert before <= float(out.getvalue()) <= after
+
+    def test_perf_counter_replays_recorded_value(self, tmp_path: Path) -> None:
+        bundle = build(
+            tmp_path,
+            "import flow\n"
+            "import time\n"
+            "value = time.perf_counter()\n"
+            "flow.suspend(value)\n"
+            "print(value)\n",
+        )
+        first = machine(bundle, io.StringIO()).run_durable()
+        assert isinstance(first, Suspended)
+        assert isinstance(first.payload, float)
+        assert first.snapshot["journal"] == [
+            {"m": "time", "f": "perf_counter", "r": first.payload},
+        ]
+        out = io.StringIO()
+        resumed = machine(bundle, out).resume(first.snapshot)
+        assert isinstance(resumed, Completed) and resumed.code == 0
+        assert float(out.getvalue()) == first.payload
+
+    def test_perf_counter_uses_deterministic_clock(self, tmp_path: Path) -> None:
+        bundle = build(
+            tmp_path,
+            "import time\n"
+            "print(time.perf_counter(), time.monotonic())\n",
+        )
+        out = io.StringIO()
+        result = machine(bundle, out, deterministic=True).run_durable()
+        assert isinstance(result, Completed) and result.code == 0
+        assert out.getvalue() == "0.001 0.002\n"
 
     def test_snapshot_is_json_portable(self, tmp_path: Path) -> None:
         bundle = build(tmp_path, WORKFLOW)
@@ -84,14 +129,17 @@ class TestSuspendResume:
         assert isinstance(r2, Suspended)
         assert out.getvalue() == "got x\n"
 
-    @pytest.mark.parametrize("bad", [
-        {"diaspore_flow": 1, "journal": "evil"},
-        {"diaspore_flow": 1, "journal": [{"m": 1}]},
-        {"diaspore_flow": 1, "journal": [{"m": "time", "f": "time"}]},  # no r
-        {"diaspore_flow": 1, "journal": [], "argv": [1, 2]},
-        {"diaspore_flow": 2, "journal": []},
-        "not a dict",
-    ])
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"diaspore_flow": 1, "journal": "evil"},
+            {"diaspore_flow": 1, "journal": [{"m": 1}]},
+            {"diaspore_flow": 1, "journal": [{"m": "time", "f": "time"}]},  # no r
+            {"diaspore_flow": 1, "journal": [], "argv": [1, 2]},
+            {"diaspore_flow": 2, "journal": []},
+            "not a dict",
+        ],
+    )
     def test_hostile_snapshots_rejected_cleanly(self, tmp_path: Path, bad) -> None:
         bundle = build(tmp_path, WORKFLOW)
         with pytest.raises(ValueError):
@@ -111,14 +159,17 @@ class TestSuspendResume:
             calls.append(key)
             return {"k": key, "n": len(calls)}
 
-        bundle = build(tmp_path, (
-            "import flow\n"
-            "import host\n"
-            "a = host.fetch('one')\n"
-            "flow.suspend(a)\n"
-            "b = host.fetch('two')\n"
-            "print(a['n'], b['n'])\n"
-        ))
+        bundle = build(
+            tmp_path,
+            (
+                "import flow\n"
+                "import host\n"
+                "a = host.fetch('one')\n"
+                "flow.suspend(a)\n"
+                "b = host.fetch('two')\n"
+                "print(a['n'], b['n'])\n"
+            ),
+        )
         bindings = {"host": {"fetch": fetch}}
         r1 = machine(bundle, io.StringIO(), bindings=bindings).run_durable()
         assert isinstance(r1, Suspended) and r1.payload == {"k": "one", "n": 1}
@@ -130,26 +181,21 @@ class TestSuspendResume:
         assert out.getvalue() == "1 2\n"
 
     def test_non_json_binding_result_rejected(self, tmp_path: Path) -> None:
-        bundle = build(tmp_path, (
-            "import host\n"
-            "try:\n"
-            "    host.bad()\n"
-            "except TypeError as e:\n"
-            "    print('refused')\n"
-        ))
-        r = machine(bundle, out := io.StringIO(),
-                    bindings={"host": {"bad": lambda: (1, 2)}}).run_durable()
+        bundle = build(
+            tmp_path,
+            ("import host\ntry:\n    host.bad()\nexcept TypeError as e:\n    print('refused')\n"),
+        )
+        r = machine(
+            bundle, out := io.StringIO(), bindings={"host": {"bad": lambda: (1, 2)}}
+        ).run_durable()
         assert isinstance(r, Completed)
         assert out.getvalue() == "refused\n"
 
     def test_suspend_outside_durable_mode(self, tmp_path: Path) -> None:
-        bundle = build(tmp_path, (
-            "import flow\n"
-            "try:\n"
-            "    flow.suspend(1)\n"
-            "except RuntimeError as e:\n"
-            "    print(e)\n"
-        ))
+        bundle = build(
+            tmp_path,
+            ("import flow\ntry:\n    flow.suspend(1)\nexcept RuntimeError as e:\n    print(e)\n"),
+        )
         out = io.StringIO()
         assert Machine(bundle, stdout=out).run() == 0
         assert "requires a durable run" in out.getvalue()
@@ -160,15 +206,18 @@ class TestSuspendResume:
             Machine(bundle, durable=True, caps={"net"})
 
     def test_finally_not_run_on_suspend(self, tmp_path: Path) -> None:
-        bundle = build(tmp_path, (
-            "import flow\n"
-            "try:\n"
-            "    print('try')\n"
-            "    flow.suspend('mid-try')\n"
-            "    print('after')\n"
-            "finally:\n"
-            "    print('cleanup')\n"
-        ))
+        bundle = build(
+            tmp_path,
+            (
+                "import flow\n"
+                "try:\n"
+                "    print('try')\n"
+                "    flow.suspend('mid-try')\n"
+                "    print('after')\n"
+                "finally:\n"
+                "    print('cleanup')\n"
+            ),
+        )
         out = io.StringIO()
         r1 = machine(bundle, out).run_durable()
         assert isinstance(r1, Suspended)
@@ -177,6 +226,27 @@ class TestSuspendResume:
         r2 = machine(bundle, out2).resume(r1.snapshot)
         assert isinstance(r2, Completed)
         assert out2.getvalue() == "after\ncleanup\n"
+
+    def test_shutdown_callbacks_wait_for_completion(self, tmp_path: Path) -> None:
+        bundle = build(tmp_path, (
+            "import atexit, flow\n"
+            "atexit.register(print, 'shutdown')\n"
+            "flow.suspend('paused')\n"
+            "print('completed')\n"
+        ))
+        first_output = io.StringIO()
+        first = machine(bundle, first_output)
+        suspended = first.run_durable()
+        assert isinstance(suspended, Suspended)
+        first.close()
+        assert first_output.getvalue() == ""
+        resumed_output = io.StringIO()
+        resumed = machine(bundle, resumed_output)
+        completed = resumed.resume(suspended.snapshot)
+        assert isinstance(completed, Completed) and completed.code == 0
+        resumed.close()
+        resumed.close()
+        assert resumed_output.getvalue() == "completed\nshutdown\n"
 
 
 CROSS_VM_WF = """
@@ -199,13 +269,16 @@ class TestCrossVM:
 
     def _go(self, go_vm, cmd, cwd):
         import subprocess
-        return subprocess.run([str(go_vm), *cmd], capture_output=True,
-                              text=True, timeout=60, cwd=cwd)
+
+        return subprocess.run(
+            [str(go_vm), *cmd], capture_output=True, text=True, timeout=60, cwd=cwd
+        )
 
     def test_py_suspend_go_resume_py_resume(self, go_vm, tmp_path: Path) -> None:
         import json as _json
 
         from diaspore import dumps
+
         bundle = build(tmp_path, CROSS_VM_WF)
         bundle_path = tmp_path / "wf.dsp.json"
         bundle_path.write_text(dumps(bundle), encoding="utf-8")
@@ -218,15 +291,17 @@ class TestCrossVM:
 
         # segment 2 on diaspore-go, resuming the diaspore-py snapshot
         snap2 = tmp_path / "s2.json"
-        p = self._go(go_vm, ["resume", str(bundle_path), str(snap1),
-                             "--send", '"yes"', "--snapshot", str(snap2)], tmp_path)
+        p = self._go(
+            go_vm,
+            ["resume", str(bundle_path), str(snap1), "--send", '"yes"', "--snapshot", str(snap2)],
+            tmp_path,
+        )
         assert p.returncode == 7, p.stderr
         assert p.stdout == "segment 2, got: yes roll stable: True\n"
 
         # segment 3 back on diaspore-py, resuming the diaspore-go snapshot
         out = io.StringIO()
-        r3 = machine(bundle, out).resume(
-            _json.loads(snap2.read_text(encoding="utf-8")), send=42)
+        r3 = machine(bundle, out).resume(_json.loads(snap2.read_text(encoding="utf-8")), send=42)
         assert isinstance(r3, Completed) and r3.code == 0
         assert out.getvalue() == "segment 3, amount: 42 still stable: True\ndone\n"
 
@@ -234,17 +309,18 @@ class TestCrossVM:
         import json as _json
 
         from diaspore import dumps
+
         bundle = build(tmp_path, CROSS_VM_WF)
         bundle_path = tmp_path / "wf.dsp.json"
         bundle_path.write_text(dumps(bundle), encoding="utf-8")
         snap = tmp_path / "s.json"
 
-        p = self._go(go_vm, ["run", str(bundle_path), "--durable",
-                             "--snapshot", str(snap)], tmp_path)
+        p = self._go(
+            go_vm, ["run", str(bundle_path), "--durable", "--snapshot", str(snap)], tmp_path
+        )
         assert p.returncode == 7, p.stderr
         out = io.StringIO()
-        r2 = machine(bundle, out).resume(
-            _json.loads(snap.read_text(encoding="utf-8")), send="ok")
+        r2 = machine(bundle, out).resume(_json.loads(snap.read_text(encoding="utf-8")), send="ok")
         assert isinstance(r2, Suspended)
         assert r2.payload == ["need", "amount"]
         assert out.getvalue() == "segment 2, got: ok roll stable: True\n"
@@ -252,39 +328,50 @@ class TestCrossVM:
 
 class TestScopedCapabilities:
     def test_net_listen_scoped(self, tmp_path: Path) -> None:
-        bundle = build(tmp_path, (
-            "import net\n"
-            "lid = net.listen('127.0.0.1', 8631)\n"
-            "print('listened')\n"
-            "net.close(lid)\n"
-            "try:\n"
-            "    net.listen('127.0.0.1', 9999)\n"
-            "except PermissionError as e:\n"
-            "    print(e)\n"
-            "try:\n"
-            "    net.connect('example.com', 80)\n"
-            "except PermissionError as e:\n"
-            "    print('connect denied')\n"
-        ))
+        bundle = build(
+            tmp_path,
+            (
+                "import net\n"
+                "lid = net.listen('127.0.0.1', 8631)\n"
+                "print('listened')\n"
+                "net.close(lid)\n"
+                "try:\n"
+                "    net.listen('127.0.0.1', 9999)\n"
+                "except PermissionError as e:\n"
+                "    print(e)\n"
+                "try:\n"
+                "    net.connect('example.com', 80)\n"
+                "except PermissionError as e:\n"
+                "    print('connect denied')\n"
+            ),
+        )
         out = io.StringIO()
-        m = Machine(bundle, stdout=out, stderr=io.StringIO(), caps={"net"},
-                    policy={"net": {"listen": ["127.0.0.1:8631"], "connect": []}})
+        m = Machine(
+            bundle,
+            stdout=out,
+            stderr=io.StringIO(),
+            caps={"net"},
+            policy={"net": {"listen": ["127.0.0.1:8631"], "connect": []}},
+        )
         assert m.run() == 0
         assert out.getvalue() == (
             "listened\n"
             "diaspore: net.listen 127.0.0.1:9999 not permitted by policy\n"
-            "connect denied\n")
+            "connect denied\n"
+        )
 
     def test_net_wildcards(self, tmp_path: Path) -> None:
-        bundle = build(tmp_path, (
-            "import net\n"
-            "lid = net.listen('127.0.0.1', 8632)\n"
-            "print('ok')\n"
-            "net.close(lid)\n"
-        ))
+        bundle = build(
+            tmp_path,
+            ("import net\nlid = net.listen('127.0.0.1', 8632)\nprint('ok')\nnet.close(lid)\n"),
+        )
         out = io.StringIO()
-        m = Machine(bundle, stdout=out, caps={"net"},
-                    policy={"net": {"listen": ["127.0.0.1:*"], "connect": []}})
+        m = Machine(
+            bundle,
+            stdout=out,
+            caps={"net"},
+            policy={"net": {"listen": ["127.0.0.1:*"], "connect": []}},
+        )
         assert m.run() == 0 and out.getvalue() == "ok\n"
 
     def test_fs_scoped(self, tmp_path: Path) -> None:
@@ -293,24 +380,31 @@ class TestScopedCapabilities:
         (allowed / "in.txt").write_text("readable\n", encoding="utf-8")
         secret = tmp_path / "secret.txt"
         secret.write_text("no\n", encoding="utf-8")
-        bundle = build(tmp_path, (
-            f"with open({str(allowed / 'in.txt')!r}) as f:\n"
-            "    print(f.read().strip())\n"
-            f"with open({str(allowed / 'out.txt')!r}, 'w') as f:\n"
-            "    f.write('written')\n"
-            "print('wrote')\n"
-            "try:\n"
-            f"    open({str(secret)!r})\n"
-            "except PermissionError as e:\n"
-            "    print('secret denied')\n"
-            "try:\n"
-            f"    open({str(tmp_path / 'else.txt')!r}, 'w')\n"
-            "except PermissionError as e:\n"
-            "    print('write denied')\n"
-        ))
+        bundle = build(
+            tmp_path,
+            (
+                f"with open({str(allowed / 'in.txt')!r}) as f:\n"
+                "    print(f.read().strip())\n"
+                f"with open({str(allowed / 'out.txt')!r}, 'w') as f:\n"
+                "    f.write('written')\n"
+                "print('wrote')\n"
+                "try:\n"
+                f"    open({str(secret)!r})\n"
+                "except PermissionError as e:\n"
+                "    print('secret denied')\n"
+                "try:\n"
+                f"    open({str(tmp_path / 'else.txt')!r}, 'w')\n"
+                "except PermissionError as e:\n"
+                "    print('write denied')\n"
+            ),
+        )
         out = io.StringIO()
-        m = Machine(bundle, stdout=out, caps={"fs"},
-                    policy={"fs": {"read": [str(allowed)], "write": [str(allowed)]}})
+        m = Machine(
+            bundle,
+            stdout=out,
+            caps={"fs"},
+            policy={"fs": {"read": [str(allowed)], "write": [str(allowed)]}},
+        )
         assert m.run() == 0
         assert out.getvalue() == "readable\nwrote\nsecret denied\nwrite denied\n"
         assert (allowed / "out.txt").read_text(encoding="utf-8") == "written"

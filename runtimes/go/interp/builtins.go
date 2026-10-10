@@ -23,21 +23,37 @@ func bi(name string, fn func(vm *VM, args []Value, kw []KwArg) (Value, error)) *
 
 func (vm *VM) makeBuiltins() map[string]Value {
 	types := map[string]*BuiltinType{
-		"int":       {Name: "int", ctor: ctorInt},
-		"float":     {Name: "float", ctor: ctorFloat},
-		"bool":      {Name: "bool", ctor: ctorBool},
-		"str":       {Name: "str", ctor: ctorStr},
-		"bytes":     {Name: "bytes", ctor: ctorBytes},
-		"list":      {Name: "list", ctor: ctorList},
-		"tuple":     {Name: "tuple", ctor: ctorTuple},
-		"dict":      {Name: "dict", ctor: ctorDict},
-		"set":       {Name: "set", ctor: ctorSet},
-		"frozenset": {Name: "frozenset", ctor: ctorFrozenSet},
-		"range":     {Name: "range", ctor: ctorRange},
-		"slice":     {Name: "slice", ctor: biSlice},
-		"complex":   {Name: "complex", ctor: ctorComplex},
-		"type":      {Name: "type", ctor: ctorType},
-		"NoneType":  {Name: "NoneType", ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) { return None, nil }},
+		"int":          {Name: "int", ctor: ctorInt},
+		"float":        {Name: "float", ctor: ctorFloat},
+		"bool":         {Name: "bool", ctor: ctorBool},
+		"str":          {Name: "str", ctor: ctorStr},
+		"bytes":        {Name: "bytes", ctor: ctorBytes},
+		"bytearray":    {Name: "bytearray", ctor: ctorByteArray},
+		"memoryview":   {Name: "memoryview", ctor: ctorMemoryView},
+		"list":         {Name: "list", ctor: ctorList},
+		"tuple":        {Name: "tuple", ctor: ctorTuple},
+		"dict":         {Name: "dict", ctor: ctorDict},
+		"set":          {Name: "set", ctor: ctorSet},
+		"frozenset":    {Name: "frozenset", ctor: ctorFrozenSet},
+		"range":        {Name: "range", ctor: ctorRange},
+		"slice":        {Name: "slice", ctor: biSlice},
+		"complex":      {Name: "complex", ctor: ctorComplex},
+		"type":         {Name: "type", ctor: ctorType},
+		"property":     {Name: "property", ctor: ctorProperty},
+		"staticmethod": {Name: "staticmethod", ctor: ctorStaticMethod},
+		"classmethod":  {Name: "classmethod", ctor: ctorClassMethod},
+		"NoneType": {Name: "NoneType", ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs("NoneType", args, kw); err != nil {
+				return nil, err
+			}
+			return None, nil
+		}},
+		"ellipsis": {Name: "ellipsis", ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs("ellipsis", args, kw); err != nil {
+				return nil, err
+			}
+			return Ellipsis, nil
+		}},
 	}
 	types["NotImplementedType"] = &BuiltinType{Name: "NotImplementedType",
 		ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -87,14 +103,13 @@ func (vm *VM) makeBuiltins() map[string]Value {
 		"input":          bi("input", biInput),
 		"open":           bi("open", biOpen),
 		"exit":           bi("exit", biExit),
-		"staticmethod":   bi("staticmethod", biStaticmethod),
-		"classmethod":    bi("classmethod", biClassmethod),
 		"format":         bi("format", biFormat),
 		".await":         bi(".await", biAwait),
 		"compile":        bi("compile", biCompile),
 		"exec":           bi("exec", biExec),
 		"eval":           bi("eval", biEval),
-		"property":       bi("property", biProperty),
+		"__import__":     bi("__import__", biImport),
+		"_typing_union":  bi("_typing_union", biTypingUnion),
 		"vars":           bi("vars", biVars),
 		"dir":            bi("dir", biDir),
 		"super":          superMarker,
@@ -103,7 +118,7 @@ func (vm *VM) makeBuiltins() map[string]Value {
 		"NotImplemented": NotImplemented,
 	}
 	for name, t := range types {
-		if name != "NoneType" && name != "NotImplementedType" {
+		if name != "NoneType" && name != "NotImplementedType" && name != "ellipsis" {
 			b[name] = t
 		}
 	}
@@ -113,6 +128,15 @@ func (vm *VM) makeBuiltins() map[string]Value {
 	for _, name := range []string{"dict_keys", "dict_values", "dict_items"} {
 		types[name] = dictionaryViewType(name)
 	}
+	types["GenericAlias"] = &BuiltinType{Name: "GenericAlias", ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		if err := argCount("GenericAlias", args, 2, 2); err != nil {
+			return nil, err
+		}
+		if err := noKw("GenericAlias", kw); err != nil {
+			return nil, err
+		}
+		return alias(args[0], args[1]), nil
+	}}
 	return b
 }
 
@@ -269,33 +293,10 @@ func biReversed(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	if err := argCount("reversed", args, 1, 1); err != nil {
 		return nil, err
 	}
-	var items []Value
-	switch t := args[0].(type) {
-	case *DictView:
-		return t.iterator(true), nil
-	case *Dict:
-		return (&DictView{dict: t, kind: "keys"}).iterator(true), nil
-	case *List:
-		items = append([]Value{}, t.Items...)
-	case *Tuple:
-		items = append([]Value{}, t.Items...)
-	case string:
-		for _, r := range t {
-			items = append(items, string(r))
-		}
-	case []byte:
-		for _, c := range t {
-			items = append(items, int64(c))
-		}
-	case *Range:
-		for i := int64(0); i < t.Len(); i++ {
-			items = append(items, t.Start+i*t.Step)
-		}
-	default:
-		return nil, newErrorf("TypeError", "'%s' object is not reversible", typeName(args[0]))
+	if err := noKw("reversed", kw); err != nil {
+		return nil, err
 	}
-	reverseSlice(items)
-	return &seqIter{items: items, kind: "reversed"}, nil
+	return reversedValue(vm, args[0])
 }
 
 // chargeSized charges fuel for the length of a sized container before a bulk
@@ -320,7 +321,11 @@ func (vm *VM) chargeSized(v Value) error {
 	case *DictView:
 		n = int64(t.length())
 	case *Range:
-		n = t.Len()
+		var err error
+		n, err = t.Len()
+		if err != nil {
+			return err
+		}
 	}
 	if n > 0 {
 		return vm.fuelN(n)
@@ -522,6 +527,22 @@ func biAbs(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	if err := argCount("abs", args, 1, 1); err != nil {
 		return nil, err
 	}
+	if err := noKw("abs", kw); err != nil {
+		return nil, err
+	}
+	switch object := args[0].(type) {
+	case *Instance:
+		if value, found, err := vm.unarySpecial(object, object.Class, "abs"); found || err != nil {
+			return value, err
+		}
+		if object.Prim != nil {
+			return biAbs(vm, []Value{object.Prim}, nil)
+		}
+	case *Class:
+		if value, found, err := vm.unarySpecial(object, object.Meta, "abs"); found || err != nil {
+			return value, err
+		}
+	}
 	if n, ok := asInt(args[0]); ok {
 		if n == math.MinInt64 {
 			return new(big.Int).Neg(big.NewInt(n)), nil
@@ -607,6 +628,11 @@ func biPow(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		return nil, err
 	}
 	if len(args) == 3 {
+		if _, none := args[2].(NoneType); none {
+			return vm.binop("pow", args[0], args[1])
+		}
+	}
+	if len(args) == 3 {
 		if inst, ok := args[0].(*Instance); ok {
 			if _, has := inst.Class.Lookup("__pow__"); has {
 				result, err := vm.callDunder(inst, "__pow__", args[1:])
@@ -640,7 +666,7 @@ func biOrd(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	}
 	switch t := args[0].(type) {
 	case string:
-		rs := []rune(t)
+		rs := pyRunes(t)
 		if len(rs) != 1 {
 			return nil, newErrorf("TypeError",
 				"ord() expected a character, but string of length %d found", len(rs))
@@ -669,7 +695,7 @@ func biChr(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	if n < 0 || n >= 0x110000 {
 		return nil, newError("ValueError", "chr() arg not in range(0x110000)")
 	}
-	return string(rune(n)), nil
+	return pyRuneString(rune(n)), nil
 }
 
 func intToBase(n int64, prefix string, base int) string {
@@ -750,6 +776,12 @@ func valueMatchesType(v Value, bt *BuiltinType) bool {
 	case "bytes":
 		_, ok := v.([]byte)
 		return ok
+	case "bytearray":
+		_, ok := v.(*ByteArray)
+		return ok
+	case "memoryview":
+		_, ok := v.(*MemoryView)
+		return ok
 	case "list":
 		_, ok := v.(*List)
 		return ok
@@ -757,8 +789,11 @@ func valueMatchesType(v Value, bt *BuiltinType) bool {
 		_, ok := v.(*Tuple)
 		return ok
 	case "dict":
-		_, ok := v.(*Dict)
-		return ok
+		switch v.(type) {
+		case *Dict, *metadataNamespace:
+			return true
+		}
+		return false
 	case "set":
 		_, ok := v.(*Set)
 		return ok
@@ -777,22 +812,22 @@ func valueMatchesType(v Value, bt *BuiltinType) bool {
 	case "NoneType":
 		_, ok := v.(NoneType)
 		return ok
+	case "ellipsis":
+		_, ok := v.(EllipsisType)
+		return ok
 	case "NotImplementedType":
 		_, ok := v.(NotImplementedType)
 		return ok
 	case "dict_keys", "dict_values", "dict_items":
 		view, ok := v.(*DictView)
 		return ok && "dict_"+view.kind == bt.Name
-	case "Random":
-		native, ok := v.(*NativeObject)
-		return ok && native.Kind == "Random"
 	case "type":
 		switch v.(type) {
 		case *Class, *BuiltinType:
 			return true
 		}
 	}
-	return false
+	return typeName(v) == bt.Name
 }
 
 func biIsinstance(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -802,6 +837,8 @@ func biIsinstance(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	var classes []Value
 	if tup, ok := args[1].(*Tuple); ok {
 		classes = tup.Items
+	} else if union, ok := args[1].(*UnionType); ok {
+		classes = union.Args.Items
 	} else {
 		classes = []Value{args[1]}
 	}
@@ -811,7 +848,30 @@ func biIsinstance(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			if cls == objectClass {
 				return true, nil
 			}
-			if inst, ok := args[0].(*Instance); ok && inst.Class.IsSub(cls) {
+			var instanceClass *Class
+			switch instance := args[0].(type) {
+			case *Instance:
+				instanceClass = instance.Class
+			case *Class:
+				instanceClass = instance.Meta
+			}
+			if instanceClass == cls {
+				return true, nil
+			}
+			if cls.Meta != nil {
+				if hook, found := cls.Meta.Lookup("__instancecheck__"); found {
+					result, err := vm.call(vm.bindAttr(hook, cls, cls.Meta), []Value{args[0]}, nil)
+					if err != nil {
+						return nil, err
+					}
+					truth, err := vm.truth(result)
+					if err != nil || truth {
+						return truth, err
+					}
+					continue
+				}
+			}
+			if instanceClass != nil && instanceClass.IsSub(cls) {
 				return true, nil
 			}
 		case *BuiltinType:
@@ -843,34 +903,52 @@ func biIssubclass(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	var classes []Value
 	if tup, ok := args[1].(*Tuple); ok {
 		classes = tup.Items
+	} else if union, ok := args[1].(*UnionType); ok {
+		classes = union.Args.Items
 	} else {
 		classes = []Value{args[1]}
 	}
 	for _, c := range classes {
-		if cls, ok := c.(*Class); ok && cls == objectClass {
-			switch args[0].(type) {
-			case *Class, *BuiltinType:
-				return true, nil
+		if cls, ok := c.(*Class); ok && cls.Meta != nil {
+			if hook, found := cls.Meta.Lookup("__subclasscheck__"); found {
+				result, err := vm.call(vm.bindAttr(hook, cls, cls.Meta), []Value{args[0]}, nil)
+				if err != nil {
+					return nil, err
+				}
+				truth, err := vm.truth(result)
+				if err != nil || truth {
+					return truth, err
+				}
+				continue
 			}
 		}
-	}
-	switch a := args[0].(type) {
-	case *Class:
-		for _, c := range classes {
-			if cls, ok := c.(*Class); ok && a.IsSub(cls) {
+		switch c.(type) {
+		case *Class, *BuiltinType:
+		default:
+			return nil, newError("TypeError", "issubclass() arg 2 must be a class, a tuple of classes, or a union")
+		}
+		switch a := args[0].(type) {
+		case *Class:
+			if cls, ok := c.(*Class); ok && (cls == objectClass || a.IsSub(cls)) {
 				return true, nil
 			}
-		}
-	case *BuiltinType:
-		for _, c := range classes {
+			if bt, ok := c.(*BuiltinType); ok && a.Prim != nil {
+				if bt.Name == a.Prim.Name || (bt.Name == "int" && a.Prim.Name == "bool") {
+					return true, nil
+				}
+			}
+		case *BuiltinType:
+			if c == objectClass {
+				return true, nil
+			}
 			if bt, ok := c.(*BuiltinType); ok {
 				if a.Name == bt.Name || (a.Name == "bool" && bt.Name == "int") {
 					return true, nil
 				}
 			}
+		default:
+			return nil, newError("TypeError", "issubclass() arg 1 must be a class")
 		}
-	default:
-		return nil, newError("TypeError", "issubclass() arg 1 must be a class")
 	}
 	return false, nil
 }
@@ -880,11 +958,17 @@ func biCallable(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		return nil, err
 	}
 	switch t := args[0].(type) {
-	case *Function, *BoundMethod, *Class, *BuiltinType, *Builtin:
+	case *metadataDescriptor:
+		return !t.getter, nil
+	case *jsonScanner, *jsonEncoder:
+		return true, nil
+	case *GenericAlias:
+		return true, nil
+	case *Function, *BoundMethod, *Class, *BuiltinType, *Builtin, *StaticMethod:
 		return true, nil
 	case *Instance:
 		_, ok := t.Class.Lookup("__call__")
-		return ok, nil
+		return ok || callableDescriptorKind(t) == "staticmethod", nil
 	}
 	return false, nil
 }
@@ -919,6 +1003,9 @@ func biIter(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	if wrapped, ok := it.(*instIter); ok {
+		return wrapped.obj, nil
+	}
 	return it, nil
 }
 
@@ -935,6 +1022,12 @@ func biNext(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	case *Instance:
 		if _, ok := t.Class.Lookup("__next__"); ok {
 			it = &instIter{vm: vm, obj: t, retval: None}
+		}
+	case *Class:
+		if t.Meta != nil {
+			if _, ok := t.Meta.Lookup("__next__"); ok {
+				it = &instIter{vm: vm, obj: t, retval: None}
+			}
 		}
 	}
 	if it == nil {
@@ -1155,24 +1248,63 @@ func biAwait(vm *VM, args []Value, kw []KwArg) (Value, error) {
 }
 
 func biCompile(vm *VM, args []Value, kw []KwArg) (Value, error) {
-	if err := argCount("compile", args, 1, 6); err != nil {
+	if err := argCount("compile", args, 0, 6); err != nil {
 		return nil, err
 	}
-	filename := "<string>"
-	mode := "exec"
-	if len(args) >= 2 {
-		if s, ok := args[1].(string); ok {
-			filename = s
+	values := []Value{nil, nil, nil, int64(0), false, int64(-1), int64(-1)}
+	names := []string{"source", "filename", "mode", "flags", "dont_inherit", "optimize", "_feature_version"}
+	copy(values, args)
+	for _, k := range kw {
+		found := false
+		for i, name := range names {
+			if k.Name == name {
+				if i < len(args) {
+					return nil, newErrorf("TypeError", "compile() got multiple values for argument '%s'", name)
+				}
+				values[i] = k.Val
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, newErrorf("TypeError", "invalid keyword argument '%s'", k.Name)
 		}
 	}
-	if len(args) >= 3 {
-		m, ok := args[2].(string)
-		if !ok || (m != "exec" && m != "eval" && m != "single") {
-			return nil, newError("ValueError", "compile() mode must be 'exec', 'eval' or 'single'")
+	for i := 0; i < 3; i++ {
+		if values[i] == nil {
+			return nil, newErrorf("TypeError", "compile() missing required argument '%s'", names[i])
 		}
-		mode = m
 	}
-	return vm.compileSourceObject(args[0], filename, mode)
+	filename, err := wantStr("filename", values[1])
+	if err != nil {
+		return nil, err
+	}
+	mode, err := wantStr("mode", values[2])
+	if err != nil {
+		return nil, err
+	}
+	flags, err := wantInt("flags", values[3])
+	if err != nil {
+		return nil, err
+	}
+	if flags&1024 != 0 {
+		module, err := vm.importModule("_ast")
+		if err != nil {
+			if _, missing := raisedAs(err, "ModuleNotFoundError"); missing {
+				return nil, newError("ModuleNotFoundError", "AST compilation requires bundled _ast (bundle it with `import ast`)")
+			}
+			return nil, err
+		}
+		compile, err := vm.getAttr(module, "_compile")
+		if err != nil {
+			return nil, err
+		}
+		return vm.call(compile, values[:6], []KwArg{{"_feature_version", values[6]}})
+	}
+	if mode != "exec" && mode != "eval" && mode != "single" {
+		return nil, newError("ValueError", "compile() mode must be 'exec', 'eval' or 'single'")
+	}
+	return vm.compileSourceObject(values[0], filename, mode)
 }
 
 // biExec/biEval are the value forms (e.g. passed to map); direct calls are
@@ -1205,34 +1337,128 @@ func biEval(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	return vm.execEval(vm.mainFrame(), args[0], glob, loc, "eval")
 }
 
-func biProperty(vm *VM, args []Value, kw []KwArg) (Value, error) {
-	if err := argCount("property", args, 0, 4); err != nil {
+func biImport(vm *VM, args []Value, kw []KwArg) (Value, error) {
+	if err := argCount("__import__", args, 0, 5); err != nil {
 		return nil, err
 	}
-	p := &Property{}
-	get := func(i int) Value {
-		if i < len(args) {
-			if _, isNone := args[i].(NoneType); !isNone {
-				return args[i]
+	var values [5]Value
+	copy(values[:], args)
+	names := [...]string{"name", "globals", "locals", "fromlist", "level"}
+	for _, item := range kw {
+		index := -1
+		for i, name := range names {
+			if item.Name == name {
+				index = i
+				break
 			}
 		}
-		return nil
+		if index < 0 {
+			return nil, newErrorf("TypeError", "'%s' is an invalid keyword argument for __import__()", item.Name)
+		}
+		if values[index] != nil {
+			return nil, newErrorf("TypeError", "__import__() got multiple values for argument '%s'", item.Name)
+		}
+		values[index] = item.Val
 	}
-	p.Fget, p.Fset, p.Fdel = get(0), get(1), get(2)
-	p.Doc = get(3)
-	for _, k := range kw {
-		switch k.Name {
-		case "fget":
-			p.Fget = k.Val
-		case "fset":
-			p.Fset = k.Val
-		case "fdel":
-			p.Fdel = k.Val
-		case "doc":
-			p.Doc = k.Val
+	name, err := wantStr("__import__() argument 'name'", values[0])
+	if err != nil {
+		return nil, err
+	}
+	level := int64(0)
+	if values[4] != nil {
+		level, err = wantInt("level", values[4])
+		if err != nil {
+			return nil, err
 		}
 	}
-	return p, nil
+	if level < 0 {
+		return nil, newError("ValueError", "level must be >= 0")
+	}
+	if level > 0 {
+		globals := values[1]
+		packageName, lookupErr := vm.getIndex(globals, "__package__")
+		if lookupErr != nil || packageName == None {
+			packageName, lookupErr = vm.getIndex(globals, "__name__")
+			if lookupErr == nil {
+				if _, pathErr := vm.getIndex(globals, "__path__"); pathErr != nil {
+					text, _ := packageName.(string)
+					if dot := strings.LastIndexByte(text, '.'); dot >= 0 {
+						packageName = text[:dot]
+					} else {
+						packageName = ""
+					}
+				}
+			}
+		}
+		packageText, ok := packageName.(string)
+		if lookupErr != nil || !ok || packageText == "" {
+			return nil, newError("ImportError", "attempted relative import with no known parent package")
+		}
+		for i := int64(1); i < level; i++ {
+			dot := strings.LastIndexByte(packageText, '.')
+			if dot < 0 {
+				return nil, newError("ImportError", "attempted relative import beyond top-level package")
+			}
+			packageText = packageText[:dot]
+		}
+		if name != "" {
+			name = packageText + "." + name
+		} else {
+			name = packageText
+		}
+	}
+	if name == "" {
+		return nil, newError("ValueError", "Empty module name")
+	}
+	module, err := vm.importModule(name)
+	if err != nil {
+		return nil, err
+	}
+	fromlist := values[3]
+	if fromlist != nil && fromlist != None {
+		nonempty, err := vm.truth(fromlist)
+		if err != nil {
+			return nil, err
+		}
+		if nonempty {
+			iter, err := vm.getIter(fromlist)
+			if err != nil {
+				return nil, err
+			}
+			for {
+				value, more, err := itNext(iter)
+				if err != nil {
+					return nil, err
+				}
+				if !more {
+					break
+				}
+				if err := vm.fuel(); err != nil {
+					return nil, err
+				}
+				member, ok := value.(string)
+				if !ok {
+					return nil, newErrorf("TypeError", "Item in from list must be str, not %s", typeName(value))
+				}
+				if member == "*" {
+					continue
+				}
+				if _, err := vm.getAttr(module, member); err == nil {
+					continue
+				}
+				if vm.hasModule(name + "." + member) {
+					if _, err := vm.importModule(name + "." + member); err != nil {
+						return nil, err
+					}
+				}
+			}
+			return module, nil
+		}
+	}
+	if dot := strings.IndexByte(name, '.'); dot >= 0 {
+		return vm.importModule(name[:dot])
+	}
+	return module, nil
 }
 
 func biSlice(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -1251,27 +1477,20 @@ func biVars(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	if err := argCount("vars", args, 0, 1); err != nil {
 		return nil, err
 	}
+	if err := noKw("vars", kw); err != nil {
+		return nil, err
+	}
 	if len(args) == 0 {
-		return nil, newError("TypeError", "vars() with no argument unsupported here")
-	}
-	d := NewDict()
-	switch t := args[0].(type) {
-	case *Instance:
-		for k, v := range t.D {
-			d.SetStr(k, v)
+		if vm.metadata.active != nil {
+			return vm.localsDict(vm.metadata.active), nil
 		}
-		return d, nil
-	case *Module:
-		for k, c := range t.frame.cells {
-			if c.v != nil {
-				d.SetStr(k, c.v)
-			}
-		}
-		return d, nil
-	case *Class:
-		return &classDict{cls: t}, nil
+		return vm.localsDict(vm.mainFrame()), nil
 	}
-	return nil, newError("TypeError", "vars() argument must have __dict__")
+	value, err := vm.getAttr(args[0], "__dict__")
+	if _, missing := raisedAs(err, "AttributeError"); missing {
+		return nil, newError("TypeError", "vars() argument must have __dict__")
+	}
+	return value, err
 }
 
 func biDir(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -1284,7 +1503,7 @@ func biDir(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	names := map[string]bool{}
 	switch t := args[0].(type) {
 	case *Instance:
-		for k := range t.D {
+		for _, k := range t.dictNames() {
 			names[k] = true
 		}
 		for _, c := range t.Class.MRO {
@@ -1317,20 +1536,6 @@ func biDir(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		items[i] = k
 	}
 	return &List{Items: items}, nil
-}
-
-func biStaticmethod(vm *VM, args []Value, kw []KwArg) (Value, error) {
-	if err := argCount("staticmethod", args, 1, 1); err != nil {
-		return nil, err
-	}
-	return &StaticMethod{Fn: args[0]}, nil
-}
-
-func biClassmethod(vm *VM, args []Value, kw []KwArg) (Value, error) {
-	if err := argCount("classmethod", args, 1, 1); err != nil {
-		return nil, err
-	}
-	return &ClassMethod{Fn: args[0]}, nil
 }
 
 func ctorInt(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -1396,7 +1601,7 @@ func parsePyInt(orig string, base int) (Value, error) {
 		return newErrorf("ValueError", "invalid literal for int() with base %d: %s",
 			base, reprString(orig))
 	}
-	s := strings.TrimFunc(orig, unicode.IsSpace)
+	s := normalizeIntegerText(strings.TrimFunc(orig, unicode.IsSpace))
 	sign := ""
 	if strings.HasPrefix(s, "+") || strings.HasPrefix(s, "-") {
 		sign = s[:1]
@@ -1521,8 +1726,19 @@ func ctorBool(vm *VM, args []Value, kw []KwArg) (Value, error) {
 }
 
 func ctorStr(vm *VM, args []Value, kw []KwArg) (Value, error) {
-	if err := argCount("str", args, 0, 1); err != nil {
-		return nil, err
+	if len(args) > 1 || len(kw) != 0 {
+		source, encoding, errors, encoded, err := codecConstructorArgs("str", args, kw, "object")
+		if err != nil {
+			return nil, err
+		}
+		if !encoded {
+			return vm.str(source)
+		}
+		data, err := bufferBytes(source)
+		if err != nil {
+			return nil, err
+		}
+		return vm.decodeText(data, encoding, errors)
 	}
 	if len(args) == 0 {
 		return "", nil
@@ -1531,24 +1747,37 @@ func ctorStr(vm *VM, args []Value, kw []KwArg) (Value, error) {
 }
 
 func ctorBytes(vm *VM, args []Value, kw []KwArg) (Value, error) {
-	if err := argCount("bytes", args, 0, 2); err != nil {
+	if err := argCount("bytes", args, 0, 3); err != nil {
 		return nil, err
+	}
+	if len(args) > 1 || len(kw) != 0 {
+		source, encoding, errors, encoded, err := codecConstructorArgs("bytes", args, kw, "source")
+		if err != nil {
+			return nil, err
+		}
+		if encoded {
+			text, err := wantStr("source", source)
+			if err != nil {
+				return nil, err
+			}
+			return vm.encodeText(text, encoding, errors)
+		}
+		args = []Value{source}
 	}
 	if len(args) == 0 {
 		return []byte{}, nil
 	}
 	switch t := args[0].(type) {
 	case string:
-		if len(args) < 2 {
-			return nil, newError("TypeError", "string argument without an encoding")
-		}
-		enc, err := wantStr("encoding", args[1])
+		return nil, newError("TypeError", "string argument without an encoding")
+	case []byte:
+		return append([]byte{}, t...), nil
+	case *ByteArray, *MemoryView:
+		data, err := bufferBytes(t)
 		if err != nil {
 			return nil, err
 		}
-		return encodeStr(t, enc)
-	case []byte:
-		return append([]byte{}, t...), nil
+		return append([]byte{}, data...), nil
 	case int64:
 		if t < 0 {
 			return nil, newError("ValueError", "negative count")
@@ -1664,28 +1893,30 @@ func ctorDict(vm *VM, args []Value, kw []KwArg) (Value, error) {
 }
 
 func ctorRange(vm *VM, args []Value, kw []KwArg) (Value, error) {
+	if err := noKw("range", kw); err != nil {
+		return nil, err
+	}
 	if err := argCount("range", args, 1, 3); err != nil {
 		return nil, err
 	}
-	vals := make([]int64, len(args))
-	for i, a := range args {
-		n, ok := asInt(a)
-		if !ok {
-			return nil, newErrorf("TypeError",
-				"'%s' object cannot be interpreted as an integer", typeName(a))
+	var values [3]Value
+	for i, arg := range args {
+		value, err := percentIndex(vm, arg)
+		if err != nil {
+			return nil, err
 		}
-		vals[i] = n
+		values[i] = value
 	}
-	switch len(vals) {
+	switch len(args) {
 	case 1:
-		return &Range{Start: 0, Stop: vals[0], Step: 1}, nil
+		return newRange(int64(0), values[0], int64(1)), nil
 	case 2:
-		return &Range{Start: vals[0], Stop: vals[1], Step: 1}, nil
+		return newRange(values[0], values[1], int64(1)), nil
 	default:
-		if vals[2] == 0 {
+		if numCmp(values[2], int64(0)) == 0 {
 			return nil, newError("ValueError", "range() arg 3 must not be zero")
 		}
-		return &Range{Start: vals[0], Stop: vals[1], Step: vals[2]}, nil
+		return newRange(values[0], values[1], values[2]), nil
 	}
 }
 
@@ -1722,6 +1953,14 @@ func ctorComplex(vm *VM, args []Value, kw []KwArg) (Value, error) {
 }
 
 func ctorType(vm *VM, args []Value, kw []KwArg) (Value, error) {
+	value, err := ctorTypeWithMeta(vm, args, kw, nil)
+	if err != nil || len(args) != 3 {
+		return value, err
+	}
+	return vm.initializeMeta(nil, value, args, kw)
+}
+
+func ctorTypeWithMeta(vm *VM, args []Value, kw []KwArg, meta *Class) (Value, error) {
 	if len(args) == 3 {
 		name, nameOK := args[0].(string)
 		basesTup, basesOK := args[1].(*Tuple)
@@ -1752,6 +1991,25 @@ func ctorType(vm *VM, args []Value, kw []KwArg) (Value, error) {
 				return nil, newErrorf("TypeError", "cannot subclass %s in diaspore", r)
 			}
 		}
+		var requested Value = vm.types["type"]
+		if meta != nil {
+			requested = meta
+		}
+		winner, err := vm.selectMetaclass(requested, bases)
+		if err != nil {
+			return nil, err
+		}
+		if selected, custom := winner.(*Class); custom {
+			if selected != meta {
+				if constructor, found := selected.Lookup("__new__"); found {
+					if static, ok := constructor.(*StaticMethod); ok {
+						constructor = static.Fn
+					}
+					return vm.call(constructor, []Value{selected, args[0], args[1], args[2]}, kw)
+				}
+			}
+			meta = selected
+		}
 		ns := map[string]Value{}
 		var order []string
 		for _, k := range nsDict.Keys() {
@@ -1761,7 +2019,7 @@ func ctorType(vm *VM, args []Value, kw []KwArg) (Value, error) {
 				order = append(order, ks)
 			}
 		}
-		return vm.buildClass(name, bases, ns, order, nil, nil, primBase, primIndex)
+		return vm.buildClass(name, bases, ns, order, nil, kw, primBase, primIndex, meta)
 	}
 	if len(args) == 2 || len(args) > 3 {
 		return nil, newError("TypeError", "type() takes 1 or 3 arguments")
@@ -1772,7 +2030,12 @@ func ctorType(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	switch t := args[0].(type) {
 	case *Instance:
 		return t.Class, nil
-	case *Class, *BuiltinType:
+	case *Class:
+		if t.Meta != nil {
+			return t.Meta, nil
+		}
+		return vm.types["type"], nil
+	case *BuiltinType:
 		return vm.types["type"], nil
 	case bool:
 		return vm.types["bool"], nil
@@ -1809,7 +2072,63 @@ func ctorType(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	if builtinType, ok := vm.types[name]; ok {
 		return builtinType, nil
 	}
-	return &BuiltinType{Name: name, ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		return nil, newErrorf("TypeError", "cannot construct '%s' values", name)
-	}}, nil
+	return vm.metadataType(name), nil
+}
+
+func codecConstructorArgs(name string, args []Value, kw []KwArg, sourceName string) (Value, string, string, bool, error) {
+	if err := argCount(name, args, 0, 3); err != nil {
+		return nil, "", "", false, err
+	}
+	source := Value("")
+	encoding, errors := "utf-8", "strict"
+	encoded := len(args) > 1
+	if len(args) > 0 {
+		source = args[0]
+	}
+	for i, value := range args {
+		if i == 0 {
+			continue
+		}
+		text, err := wantStr("encoding/errors", value)
+		if err != nil {
+			return nil, "", "", false, err
+		}
+		if i == 1 {
+			encoding = text
+		} else {
+			errors = text
+		}
+	}
+	for _, option := range kw {
+		position := -1
+		switch option.Name {
+		case sourceName:
+			position = 0
+		case "encoding":
+			position = 1
+		case "errors":
+			position = 2
+		}
+		if position < 0 {
+			return nil, "", "", false, newErrorf("TypeError", "%s() got an unexpected keyword argument '%s'", name, option.Name)
+		}
+		if position < len(args) {
+			return nil, "", "", false, newErrorf("TypeError", "%s() got multiple values for '%s'", name, option.Name)
+		}
+		if position == 0 {
+			source = option.Val
+			continue
+		}
+		text, err := wantStr(option.Name, option.Val)
+		if err != nil {
+			return nil, "", "", false, err
+		}
+		encoded = true
+		if position == 1 {
+			encoding = text
+		} else {
+			errors = text
+		}
+	}
+	return source, encoding, errors, encoded, nil
 }

@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/radkawar/diaspore/runtimes/go/interp"
 )
 
 var repoRoot = filepath.Join("..", "..", "..", "..")
@@ -93,31 +95,41 @@ func TestBuildMatchesNative(t *testing.T) {
 		"examples/http/server.py",
 	}
 	for _, entry := range entries {
-		t.Run(filepath.Base(filepath.Dir(entry))+"/"+filepath.Base(entry), func(t *testing.T) {
-			goOut := filepath.Join(t.TempDir(), "go.json")
-			pyOut := filepath.Join(t.TempDir(), "py.json")
-			cmd := exec.Command(bin, "build", entry, "-o", goOut)
-			cmd.Dir = repoRoot
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("diaspore-go build %s: %v\n%s", entry, err, out)
-			}
-			cmd = exec.Command("uv", "run", "diaspore", "build", entry, "-o", pyOut)
-			cmd.Dir = repoRoot
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("uv run diaspore build %s: %v\n%s", entry, err, out)
-			}
-			goBundle, err := os.ReadFile(goOut)
-			if err != nil {
-				t.Fatal(err)
-			}
-			pyBundle, err := os.ReadFile(pyOut)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(normalizedBundle(t, goBundle), normalizedBundle(t, pyBundle)) {
-				t.Fatalf("bundle divergence on %s", entry)
-			}
-		})
+		for _, mode := range []struct {
+			name string
+			args []string
+		}{
+			{"linked", nil},
+			{"self-contained", []string{"--self-contained"}},
+		} {
+			t.Run(filepath.Base(filepath.Dir(entry))+"/"+filepath.Base(entry)+"/"+mode.name, func(t *testing.T) {
+				goOut := filepath.Join(t.TempDir(), "go.json")
+				pyOut := filepath.Join(t.TempDir(), "py.json")
+				goArgs := append([]string{"build", entry, "-o", goOut}, mode.args...)
+				cmd := exec.Command(bin, goArgs...)
+				cmd.Dir = repoRoot
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("diaspore-go build %s: %v\n%s", entry, err, out)
+				}
+				pyArgs := append([]string{"run", "diaspore", "build", entry, "-o", pyOut}, mode.args...)
+				cmd = exec.Command("uv", pyArgs...)
+				cmd.Dir = repoRoot
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("uv run diaspore build %s: %v\n%s", entry, err, out)
+				}
+				goBundle, err := os.ReadFile(goOut)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pyBundle, err := os.ReadFile(pyOut)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(normalizedBundle(t, goBundle), normalizedBundle(t, pyBundle)) {
+					t.Fatalf("bundle divergence on %s (%s)", entry, mode.name)
+				}
+			})
+		}
 	}
 }
 
@@ -129,6 +141,7 @@ func TestBuildSearchPaths(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
 		"app/main.py":       "import localmod\nimport shared\nimport extra\nprint(localmod.value, shared.value, extra.value)\n",
+		"app/json_usage.py": "import json\nprint(json.dumps([1, 2], separators=(',', ':')))\n",
 		"app/localmod.py":   "value = 'entry'\n",
 		"first/localmod.py": "value = 'wrong'\n",
 		"first/shared.py":   "value = 'first'\n",
@@ -201,6 +214,53 @@ func TestBuildSearchPaths(t *testing.T) {
 			}
 			if !strings.Contains(string(out), tc.want) {
 				t.Fatalf("output %q does not contain %q", out, tc.want)
+			}
+		})
+	}
+	id, err := interp.StdlibID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, selfContained := range []bool{false, true} {
+		name := "linked stdlib"
+		if selfContained {
+			name = "self-contained stdlib"
+		}
+		t.Run(name, func(t *testing.T) {
+			bundlePath := filepath.Join(t.TempDir(), "library.dsp.json")
+			args := []string{"build", "app/json_usage.py", "-o", bundlePath}
+			if selfContained {
+				args = append(args, "--self-contained")
+			}
+			cmd := exec.Command(bin, args...)
+			cmd.Dir = root
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("build: %v\n%s", err, out)
+			}
+			data, err := os.ReadFile(bundlePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bundle := decodeJSON(t, data).(map[string]any)
+			modules := bundle["modules"].(map[string]any)
+			if selfContained {
+				if _, linked := bundle["stdlib"]; linked {
+					t.Fatal("--self-contained left a store reference in the bundle")
+				}
+				if _, included := modules["json"]; !included {
+					t.Fatal("--self-contained omitted json")
+				}
+			} else {
+				if bundle["stdlib"] != id {
+					t.Fatalf("stdlib reference = %v, want %s", bundle["stdlib"], id)
+				}
+				if _, included := modules["json"]; included {
+					t.Fatal("default build embedded a linked standard-library module")
+				}
+			}
+			output, err := exec.Command(bin, "run", bundlePath).CombinedOutput()
+			if err != nil || string(output) != "[1,2]\n" {
+				t.Fatalf("run: %v, output %q", err, output)
 			}
 		})
 	}

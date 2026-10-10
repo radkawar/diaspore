@@ -3,7 +3,6 @@ package interp
 import (
 	"io"
 	"strings"
-	"unicode/utf8"
 )
 
 func (vm *VM) makeTextStream(name string) *NativeObject {
@@ -81,7 +80,7 @@ func (vm *VM) makeTextStream(name string) *NativeObject {
 					return nil, newError("OSError", err.Error())
 				}
 			}
-			return int64(utf8.RuneCountInString(text)), nil
+			return int64(pyRuneCount(text)), nil
 		})
 		methods["flush"] = bi("flush", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			if err := argCount("flush", args, 0, 0); err != nil {
@@ -142,4 +141,42 @@ func biSetRecursionLimit(vm *VM, args []Value, kw []KwArg) (Value, error) {
 	}
 	vm.maxDepth = int(limit)
 	return None, nil
+}
+
+func biUnraisableHook(vm *VM, args []Value, kw []KwArg) (Value, error) {
+	if err := argCount("unraisablehook", args, 1, 1); err != nil {
+		return nil, err
+	}
+	if err := noKw("unraisablehook", kw); err != nil {
+		return nil, err
+	}
+	report := args[0]
+	exception, err := vm.getAttr(report, "exc_value")
+	if err != nil {
+		return nil, err
+	}
+	message, err := vm.getAttr(report, "err_msg")
+	if err != nil {
+		return nil, err
+	}
+	object, err := vm.getAttr(report, "object")
+	if err != nil {
+		return nil, err
+	}
+	prefix := "Exception ignored in"
+	if _, none := message.(NoneType); !none {
+		prefix, err = vm.str(message)
+		if err != nil {
+			return nil, err
+		}
+	}
+	repr, err := vm.repr(object)
+	if err != nil {
+		return nil, err
+	}
+	traceback, err := vm.getAttr(report, "exc_traceback")
+	if err != nil {
+		return nil, err
+	}
+	return None, vm.writeSysException(exception, traceback, prefix+": "+repr+"\n")
 }

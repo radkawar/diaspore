@@ -68,7 +68,11 @@ def run_cpython(entry: Path) -> Result:
     env = dict(os.environ, PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1")
     proc = subprocess.run(
         [sys.executable, str(entry)],
-        capture_output=True, text=True, timeout=60, env=env, input="",
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        input="",
     )
     return Result(proc.stdout, proc.returncode, _last_stderr_line(proc.stderr, proc.returncode))
 
@@ -89,27 +93,37 @@ def build(entry: Path) -> dict:
 
 def run_diaspore_py(entry: Path, max_steps: int | None = None) -> Result:
     out, err = io.StringIO(), io.StringIO()
-    m = Machine(build(entry), argv=[str(entry)], caps=caps_for(entry),
-                max_steps=max_steps, stdout=out, stderr=err)
+    m = Machine(
+        build(entry),
+        argv=[str(entry)],
+        caps=caps_for(entry),
+        max_steps=max_steps,
+        stdout=out,
+        stderr=err,
+    )
     with patch("sys.stdin", io.StringIO("")):
-        code = m.run()
+        try:
+            code = m.run()
+        finally:
+            m.close()
     return Result(out.getvalue(), code, _last_stderr_line(err.getvalue(), code))
 
 
 def ensure_dspc_bundles() -> None:
-    """Generates the compiler and stdlib embedded by the Go and TS runtimes.
+    """Generate the compiler and stdlib artifacts used by portable runtimes.
 
     These are build artifacts; `make generate` rebuilds only what is stale.
     """
-    proc = subprocess.run(["make", "-s", "generate"], cwd=ROOT,
-                          capture_output=True, text=True, timeout=300)
+    proc = subprocess.run(
+        ["make", "-s", "generate"], cwd=ROOT, capture_output=True, text=True, timeout=300
+    )
     if proc.returncode != 0:
         pytest.fail(f"make generate failed:\n{proc.stdout}{proc.stderr}")
 
 
 # Runtime exclusions reflect features outside each runtime's supported subset:
-# diaspore-ts has no tasks or net; diaspore-lua has no tasks, net, re, big
-# integers or runtime compilation.
+# diaspore-ts has no tasks or net; diaspore-lua additionally lacks host filesystem
+# metadata and POSIX locale operations.
 _TASKS_AND_NET = {
     "45_tasks",
     "70_threading_coordination",
@@ -117,9 +131,14 @@ _TASKS_AND_NET = {
     "72_threading_limits",
     "73_socket_echo",
     "74_socket_limits",
+    "106_thread_primitives",
+    "109_socket_adapter",
 }
 TS_SKIP = set(_TASKS_AND_NET)
-LUA_SKIP = _TASKS_AND_NET | {"44_regex", "46_bigints", "61_exec_eval", "89_filesystem_metadata"}
+LUA_SKIP = _TASKS_AND_NET | {
+    "89_filesystem_metadata",
+    "98_posix_locale",
+}
 
 
 @pytest.fixture(scope="session")
@@ -149,6 +168,7 @@ def run_diaspore_ts(entry: Path, ts_cmd: list[str], tmp_path: Path) -> Result:
 def lua_vm() -> list[str]:
     """Command prefix for the Lua VM; skip if unavailable."""
     entry = LUA_DIR / "cli.lua"
+    ensure_dspc_bundles()
     if not entry.exists():
         pytest.skip("Lua VM source not present")
     lua = shutil.which("lua5.4") or shutil.which("lua")
@@ -180,7 +200,10 @@ def go_vm() -> Path:
     GO_BIN.parent.mkdir(exist_ok=True)
     proc = subprocess.run(
         ["go", "build", "-o", str(GO_BIN), "./cmd/diaspore-go"],
-        cwd=GO_DIR, capture_output=True, text=True, timeout=300,
+        cwd=GO_DIR,
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
     if proc.returncode != 0:
         pytest.fail(f"go build failed:\n{proc.stderr}")
@@ -200,12 +223,15 @@ def run_diaspore_go(entry: Path, go_bin: Path, tmp_path: Path) -> Result:
 def assert_matches(got: Result, expected: Result, label: str) -> None:
     assert got.stdout == expected.stdout, (
         f"{label}: stdout mismatch\n--- expected (CPython) ---\n{expected.stdout}"
-        f"--- got ---\n{got.stdout}")
+        f"--- got ---\n{got.stdout}"
+    )
     assert got.code == expected.code, (
-        f"{label}: exit code {got.code} != {expected.code} (err: {got.err_line!r})")
+        f"{label}: exit code {got.code} != {expected.code} (err: {got.err_line!r})"
+    )
     if expected.code != 0:
         assert got.err_line == expected.err_line, (
-            f"{label}: final stderr line {got.err_line!r} != {expected.err_line!r}")
+            f"{label}: final stderr line {got.err_line!r} != {expected.err_line!r}"
+        )
 
 
 _expected_cache: dict[Path, Result] = {}

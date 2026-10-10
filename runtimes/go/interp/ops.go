@@ -95,6 +95,36 @@ func (vm *VM) binop(kind string, l, r Value) (Value, error) {
 }
 
 func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
+	if inplace {
+		inherited := true
+		if instance, ok := l.(*Instance); ok {
+			if names, found := binDunder[kind]; found {
+				method, present, err := objectReductionSpecial(vm, instance, "__i"+names[0][2:])
+				if err != nil {
+					return nil, err
+				}
+				if present {
+					inherited = false
+					result, err := vm.call(method, []Value{r}, nil)
+					if _, declined := result.(NotImplementedType); err != nil || !declined {
+						return result, err
+					}
+				}
+			}
+		}
+		if inherited {
+			if result, handled, err := vm.builtinInplace(kind, l, r); handled {
+				return result, err
+			}
+		}
+	}
+	if kind == "bitor" && vm.genericType(l) && vm.genericType(r) {
+		_, leftNone := l.(NoneType)
+		_, rightNone := r.(NoneType)
+		if !leftNone || !rightNone {
+			return vm.genericUnionBinop(l, r)
+		}
+	}
 	if kind == "bitor" || kind == "bitand" || kind == "bitxor" || kind == "sub" {
 		if view, ok := l.(*DictView); ok && view.kind != "values" {
 			return vm.viewBinop(kind, l, r)
@@ -105,9 +135,8 @@ func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
 	}
 	if kind == "mod" {
 		switch l.(type) {
-		case string, []byte:
-			return nil, newError("TypeError",
-				"diaspore does not support %-formatting; use f-strings")
+		case string, []byte, *ByteArray:
+			return percentFormat(vm, l, r)
 		}
 	}
 	if kind == "mul" {
@@ -139,16 +168,6 @@ func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
 	ri, rInst := r.(*Instance)
 	if lInst || rInst {
 		if names, ok := binDunder[kind]; ok {
-			if inplace && lInst {
-				// Augmented assignment tries __i<op>__ first.
-				iname := "__i" + names[0][2:]
-				if _, ok := li.Class.Lookup(iname); ok {
-					res, err := vm.callDunder(li, iname, []Value{r})
-					if _, declined := res.(NotImplementedType); err != nil || !declined {
-						return res, err
-					}
-				}
-			}
 			rightFirst := false
 			if rInst {
 				if lInst && ri.Class != li.Class && ri.Class.IsSub(li.Class) {
@@ -230,6 +249,18 @@ func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
 	switch kind {
 	case "add":
 		switch a := l.(type) {
+		case *ByteArray:
+			data, err := bufferBytes(r)
+			if err != nil {
+				return nil, err
+			}
+			if inplace {
+				end := int64(len(a.data))
+				err := vm.bufferSet(a, &Slice{Lower: end, Upper: end, Step: None}, data, false)
+				return a, err
+			}
+			out := make([]byte, 0, len(a.data)+len(data))
+			return &ByteArray{data: append(append(out, a.data...), data...)}, nil
 		case string:
 			if b, ok := r.(string); ok {
 				return a + b, nil
@@ -237,7 +268,7 @@ func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
 			return nil, newErrorf("TypeError",
 				"can only concatenate str (not \"%s\") to str", typeName(r))
 		case []byte:
-			if b, ok := r.([]byte); ok {
+			if b, err := bufferBytes(r); err == nil {
 				out := make([]byte, 0, len(a)+len(b))
 				return append(append(out, a...), b...), nil
 			}
@@ -245,19 +276,8 @@ func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
 				"can only concatenate bytes (not \"%s\") to bytes", typeName(r))
 		case *List:
 			if b, ok := r.(*List); ok {
-				if inplace {
-					a.Items = append(a.Items, b.Items...)
-					return a, nil
-				}
 				out := make([]Value, 0, len(a.Items)+len(b.Items))
 				return &List{Items: append(append(out, a.Items...), b.Items...)}, nil
-			}
-			if inplace {
-				items, err := vm.iterToSlice(r)
-				if err == nil {
-					a.Items = append(a.Items, items...)
-					return a, nil
-				}
 			}
 			return nil, newErrorf("TypeError",
 				"can only concatenate list (not \"%s\") to list", typeName(r))
@@ -271,31 +291,22 @@ func (vm *VM) binopWith(kind string, l, r Value, inplace bool) (Value, error) {
 		}
 	case "mul":
 		if inplace {
-			if list, ok := l.(*List); ok {
+			if array, ok := l.(*ByteArray); ok {
 				if count, ok := asInt(r); ok {
-					if count <= 0 {
-						list.Items = nil
-						return list, nil
+					if count < 0 {
+						count = 0
 					}
-					length := len(list.Items)
-					if count == 1 || length == 0 {
-						return list, nil
+					if count == 1 || len(array.data) == 0 {
+						return array, nil
 					}
-					if count > int64(int(^uint(0)>>1)/length) {
-						return nil, newError("MemoryError", "repeated list is too long")
+					if array.exports.Load() != 0 {
+						return nil, newError("BufferError", "Existing exports of data: object cannot be re-sized")
 					}
-					size := int(count) * length
-					if cap(list.Items) >= size {
-						list.Items = list.Items[:size]
-					} else {
-						items := make([]Value, size)
-						copy(items, list.Items)
-						list.Items = items
+					if count > int64(int(^uint(0)>>1)/len(array.data)) {
+						return nil, newError("MemoryError", "repeated bytearray is too long")
 					}
-					for copied := length; copied < size; {
-						copied += copy(list.Items[copied:], list.Items[:copied])
-					}
-					return list, nil
+					array.data = bytes.Repeat(array.data, int(count))
+					return array, nil
 				}
 			}
 		}
@@ -371,6 +382,8 @@ func (vm *VM) seqRepeat(seq, count Value) (Value, error, bool) {
 		return strings.Repeat(a, int(n)), nil, true
 	case []byte:
 		return bytes.Repeat(a, int(n)), nil, true
+	case *ByteArray:
+		return &ByteArray{data: bytes.Repeat(a.data, int(n))}, nil, true
 	case *List:
 		out := make([]Value, 0, int(n)*len(a.Items))
 		for i := int64(0); i < n; i++ {
@@ -686,14 +699,20 @@ func (vm *VM) complexBinop(kind string, l, r Value) (Value, error) {
 
 func (vm *VM) unary(kind string, v Value) (Value, error) {
 	if inst, ok := v.(*Instance); ok {
-		if kind == "neg" {
-			if _, ok := inst.Class.Lookup("__neg__"); ok {
-				return vm.callDunder(inst, "__neg__", nil)
-			}
+		if value, found, err := vm.unarySpecial(inst, inst.Class, kind); found || err != nil {
+			return value, err
+		}
+		if inst.Prim != nil {
+			return vm.unary(kind, inst.Prim)
 		}
 		sym := map[string]string{"neg": "-", "pos": "+", "invert": "~"}[kind]
 		return nil, newErrorf("TypeError", "bad operand type for unary %s: '%s'",
 			sym, inst.Class.Name)
+	}
+	if class, ok := v.(*Class); ok {
+		if value, found, err := vm.unarySpecial(class, class.Meta, kind); found || err != nil {
+			return value, err
+		}
 	}
 	switch kind {
 	case "neg":
@@ -829,6 +848,13 @@ func (vm *VM) compareValue(kind string, l, r Value) (Value, error) {
 		}
 		if !lInst && rInst && ri.Prim != nil {
 			return vm.compareValue(kind, l, ri.Prim)
+		}
+		if lInst && rInst {
+			if left, ok := li.Prim.(*GenericAlias); ok {
+				if right, ok := ri.Prim.(*GenericAlias); ok {
+					return vm.compareValue(kind, left, right)
+				}
+			}
 		}
 		switch kind {
 		case "eq":
@@ -1073,6 +1099,45 @@ func (vm *VM) eq(l, r Value) (bool, error) {
 }
 
 func (vm *VM) eqBuiltin(l, r Value) (bool, error) {
+	if ns, ok := l.(*metadataNamespace); ok {
+		l = ns.snapshot()
+	}
+	if ns, ok := r.(*metadataNamespace); ok {
+		r = ns.snapshot()
+	}
+	if _, ok := l.(*MemoryView); ok {
+		return vm.memoryViewEqual(l, r)
+	}
+	if _, ok := r.(*MemoryView); ok {
+		return vm.memoryViewEqual(l, r)
+	}
+	if b, ok := l.(*ByteArray); ok {
+		l = b.data
+	}
+	if b, ok := r.(*ByteArray); ok {
+		r = b.data
+	}
+	if a, ok := l.(*GenericAlias); ok {
+		b, ok := r.(*GenericAlias)
+		if !ok {
+			return false, nil
+		}
+		if a.Unpacked != b.Unpacked {
+			return false, nil
+		}
+		same, err := vm.eq(a.Origin, b.Origin)
+		if err != nil || !same {
+			return same, err
+		}
+		return vm.eqSeq(a.Args.Items, b.Args.Items)
+	}
+	if a, ok := l.(*UnionType); ok {
+		b, ok := r.(*UnionType)
+		if !ok {
+			return false, nil
+		}
+		return vm.unionEqual(a, b)
+	}
 	if _, ok := l.(*DictView); ok {
 		return vm.viewEqual(l, r)
 	}
@@ -1162,16 +1227,7 @@ func (vm *VM) eqBuiltin(l, r Value) (bool, error) {
 		if !ok {
 			return false, nil
 		}
-		if a.Len() != b.Len() {
-			return false, nil
-		}
-		if a.Len() == 0 {
-			return true, nil
-		}
-		if a.Start != b.Start {
-			return false, nil
-		}
-		return a.Len() == 1 || a.Step == b.Step, nil
+		return rangeEqual(a, b), nil
 	}
 	return isIdentical(l, r), nil
 }
@@ -1210,6 +1266,16 @@ func (vm *VM) eqSeq(a, b []Value) (bool, error) {
 
 func (vm *VM) contains(container, item Value) (bool, error) {
 	switch c := container.(type) {
+	case *metadataNamespace:
+		_, found, err := c.get(item)
+		return found, err
+	case *ByteArray:
+		if b, err := bufferBytes(item); err == nil {
+			return bytes.Contains(c.data, b), nil
+		}
+		return vm.contains(c.data, item)
+	case *MemoryView:
+		return vm.iterContains(c, item)
 	case *Instance:
 		if _, ok := c.Class.Lookup("__contains__"); ok {
 			res, err := vm.callDunder(c, "__contains__", []Value{item})
@@ -1251,6 +1317,10 @@ func (vm *VM) contains(container, item Value) (bool, error) {
 		_, ok, err := c.Get(item)
 		return ok, err
 	case *classDict:
+		if c.mapping != nil {
+			_, found, err := c.mapping.Get(item)
+			return found, err
+		}
 		if name, ok := item.(string); ok {
 			_, found := c.cls.NS[name]
 			return found, nil
@@ -1264,30 +1334,16 @@ func (vm *VM) contains(container, item Value) (bool, error) {
 	case *DictView:
 		return vm.viewContains(c, item)
 	case *Range:
-		n, ok := asInt(item)
-		if !ok {
-			if f, isF := item.(float64); isF {
-				if f != math.Trunc(f) {
-					return false, nil
-				}
-				n = int64(f)
-			} else {
-				return false, nil
-			}
+		found, err := vm.rangeSearch(c, item, "__contains__")
+		if err != nil {
+			return false, err
 		}
-		return rangeContains(c, n), nil
+		return found.(bool), nil
 	case Iterator:
 		return vm.iterContains(container, item)
 	}
 	return false, newErrorf("TypeError", "argument of type '%s' is not iterable",
 		typeName(container))
-}
-
-func rangeContains(r *Range, n int64) bool {
-	if r.Step > 0 {
-		return n >= r.Start && n < r.Stop && (n-r.Start)%r.Step == 0
-	}
-	return n <= r.Start && n > r.Stop && (r.Start-n)%(-r.Step) == 0
 }
 
 func (vm *VM) seqContains(items []Value, item Value) (bool, error) {
@@ -1328,6 +1384,8 @@ func (vm *VM) iterContains(container, item Value) (bool, error) {
 
 func (vm *VM) truth(v Value) (bool, error) {
 	switch t := v.(type) {
+	case *metadataNamespace:
+		return t.len() != 0, nil
 	case bool:
 		return t, nil
 	case NoneType:
@@ -1340,6 +1398,11 @@ func (vm *VM) truth(v Value) (bool, error) {
 		return t != "", nil
 	case []byte:
 		return len(t) > 0, nil
+	case *ByteArray:
+		return len(t.data) > 0, nil
+	case *MemoryView:
+		n, err := t.lenValue()
+		return n != 0, err
 	case *List:
 		return len(t.Items) > 0, nil
 	case *Tuple:
@@ -1347,6 +1410,9 @@ func (vm *VM) truth(v Value) (bool, error) {
 	case *Dict:
 		return t.Len() > 0, nil
 	case *classDict:
+		if t.mapping != nil {
+			return t.mapping.Len() != 0, nil
+		}
 		return len(t.cls.NS) != 0, nil
 	case *Set:
 		return t.Len() > 0, nil
@@ -1355,7 +1421,7 @@ func (vm *VM) truth(v Value) (bool, error) {
 	case *DictView:
 		return t.length() != 0, nil
 	case *Range:
-		return t.Len() > 0, nil
+		return !t.empty(), nil
 	case *big.Int:
 		return t.Sign() != 0, nil
 	case *Instance:
@@ -1390,10 +1456,16 @@ func (vm *VM) truth(v Value) (bool, error) {
 
 func (vm *VM) diasporeLen(v Value) (int64, error) {
 	switch t := v.(type) {
+	case *metadataNamespace:
+		return int64(t.len()), nil
 	case string:
-		return int64(len([]rune(t))), nil
+		return int64(pyRuneCount(t)), nil
 	case []byte:
 		return int64(len(t)), nil
+	case *ByteArray:
+		return int64(len(t.data)), nil
+	case *MemoryView:
+		return t.lenValue()
 	case *List:
 		return int64(len(t.Items)), nil
 	case *Tuple:
@@ -1401,6 +1473,9 @@ func (vm *VM) diasporeLen(v Value) (int64, error) {
 	case *Dict:
 		return int64(t.Len()), nil
 	case *classDict:
+		if t.mapping != nil {
+			return int64(t.mapping.Len()), nil
+		}
 		return int64(len(t.cls.NS)), nil
 	case *Set:
 		return int64(t.Len()), nil
@@ -1409,7 +1484,7 @@ func (vm *VM) diasporeLen(v Value) (int64, error) {
 	case *DictView:
 		return int64(t.length()), nil
 	case *Range:
-		return t.Len(), nil
+		return t.Len()
 	case *Instance:
 		if _, ok := t.Class.Lookup("__len__"); !ok && t.Prim != nil {
 			return vm.diasporeLen(t.Prim)
@@ -1445,6 +1520,46 @@ func indexTypeError(container string, k Value) error {
 
 func (vm *VM) getIndex(o, k Value) (Value, error) {
 	switch t := o.(type) {
+	case *GenericAlias, *UnionType:
+		return vm.genericSubscript(t, k)
+	case *metadataNamespace:
+		v, found, err := t.get(k)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, newErrorArgs("KeyError", k)
+		}
+		return v, nil
+	case *BuiltinType:
+		switch t.Name {
+		case "list", "tuple", "dict", "set", "frozenset", "type":
+			return alias(t, k), nil
+		}
+	case *Class:
+		if t.Meta != nil {
+			if hook, ok := t.Meta.Lookup("__getitem__"); ok {
+				return vm.call(vm.bindAttr(hook, t, t.Meta), []Value{k}, nil)
+			}
+		}
+		if hook, err := vm.getAttr(t, "__class_getitem__"); err == nil {
+			if _, bound := hook.(*BoundMethod); !bound {
+				hook = &BoundMethod{Fn: hook, Recv: t}
+			}
+			return vm.call(hook, []Value{k}, nil)
+		}
+		if t.Prim != nil {
+			switch t.Prim.Name {
+			case "list", "tuple", "dict", "set", "frozenset", "type":
+				return alias(t, k), nil
+			}
+		}
+	case *NativeObject:
+		if method := t.methods["__getitem__"]; method != nil {
+			return vm.call(method, []Value{k}, nil)
+		}
+	case *ByteArray, *MemoryView:
+		return vm.bufferGet(t, k)
 	case *Instance:
 		if _, ok := t.Class.Lookup("__getitem__"); !ok && t.Prim != nil {
 			if d, ok := t.Prim.(*Dict); ok {
@@ -1493,14 +1608,14 @@ func (vm *VM) getIndex(o, k Value) (Value, error) {
 		}
 		return t.Items[i], nil
 	case string:
-		rs := []rune(t)
+		rs := pyRunes(t)
 		if sl, ok := k.(*Slice); ok {
 			start, stop, step, err := sliceIndices(sl, len(rs))
 			if err != nil {
 				return nil, err
 			}
 			var b strings.Builder
-			forSlice(start, stop, step, func(i int) { b.WriteRune(rs[i]) })
+			forSlice(start, stop, step, func(i int) { b.WriteString(pyRuneString(rs[i])) })
 			return b.String(), nil
 		}
 		n, ok := asInt(k)
@@ -1511,7 +1626,7 @@ func (vm *VM) getIndex(o, k Value) (Value, error) {
 		if err != nil {
 			return nil, err
 		}
-		return string(rs[i]), nil
+		return pyRuneString(rs[i]), nil
 	case []byte:
 		if sl, ok := k.(*Slice); ok {
 			start, stop, step, err := sliceIndices(sl, len(t))
@@ -1544,6 +1659,9 @@ func (vm *VM) getIndex(o, k Value) (Value, error) {
 		}
 		return v, nil
 	case *classDict:
+		if t.mapping != nil {
+			return vm.getIndex(t.mapping, k)
+		}
 		if name, ok := k.(string); ok {
 			if value, found := t.cls.NS[name]; found {
 				return value, nil
@@ -1553,24 +1671,17 @@ func (vm *VM) getIndex(o, k Value) (Value, error) {
 		}
 		return nil, newErrorArgs("KeyError", k)
 	case *Range:
-		if sl, ok := k.(*Slice); ok {
-			return sliceRange(t, sl)
-		}
-		n, ok := asInt(k)
-		if !ok {
-			return nil, indexTypeError("range", k)
-		}
-		i, err := seqIndexCheck(int(t.Len()), n, "range object index out of range")
-		if err != nil {
-			return nil, err
-		}
-		return t.Start + int64(i)*t.Step, nil
+		return vm.rangeGetIndex(t, k)
 	}
 	return nil, newErrorf("TypeError", "'%s' object is not subscriptable", typeName(o))
 }
 
 func (vm *VM) setIndex(o, k, v Value) error {
 	switch t := o.(type) {
+	case *metadataNamespace:
+		return t.set(k, v)
+	case *ByteArray, *MemoryView:
+		return vm.bufferSet(t, k, v, false)
 	case *Instance:
 		if _, ok := t.Class.Lookup("__setitem__"); !ok && t.Prim != nil {
 			return vm.setIndex(t.Prim, k, v)
@@ -1636,6 +1747,10 @@ func (vm *VM) setListSlice(l *List, sl *Slice, v Value) error {
 
 func (vm *VM) delIndex(o, k Value) error {
 	switch t := o.(type) {
+	case *metadataNamespace:
+		return t.del(k)
+	case *ByteArray, *MemoryView:
+		return vm.bufferSet(t, k, nil, true)
 	case *Instance:
 		if _, ok := t.Class.Lookup("__delitem__"); !ok && t.Prim != nil {
 			return vm.delIndex(t.Prim, k)
@@ -1762,20 +1877,6 @@ func sliceSeq(items []Value, start, stop, step int) []Value {
 	out := []Value{}
 	forSlice(start, stop, step, func(i int) { out = append(out, items[i]) })
 	return out
-}
-
-func sliceRange(r *Range, sl *Slice) (Value, error) {
-	n := int(r.Len())
-	start, stop, step, err := sliceIndices(sl, n)
-	if err != nil {
-		return nil, err
-	}
-	count := 0
-	forSlice(start, stop, step, func(int) { count++ })
-	newStart := r.Start + int64(start)*r.Step
-	newStep := r.Step * int64(step)
-	newStop := newStart + int64(count)*newStep
-	return &Range{Start: newStart, Stop: newStop, Step: newStep}, nil
 }
 
 // stableSort is a stable merge sort using only the provided less function

@@ -4,17 +4,19 @@
 import {
   type Value,
   type G,
+  type PyString,
+  isPyString,
+  strFromChars,
+  strConcat,
+  strRepeat,
   chars,
   typeName,
-  DiasporeList,
-  DiasporeTuple,
-  DiasporeDict,
-  DiasporeSet,
+  DiasporeInstance,
   DiasporeRange,
-  PyNoneT,
   diasporeErr,
 } from "./values.ts";
 import type { Interp } from "./interp.ts";
+import { isPrintableCodePoint } from "./unicode15.ts";
 
 // --------------------------------------------------------------------------
 // pyFloatStr: CPython repr(float)
@@ -128,19 +130,23 @@ export function parseComplex(orig: string): Complex {
 // --------------------------------------------------------------------------
 // str / bytes reprs
 
-/** Render a Python string literal with escaping and quote selection. */
-export function reprString(s: string): string {
+/** Render a Python literal, escaping nonprintable code points independently. */
+export function reprString(s: PyString): string {
   let q = "'";
-  if (s.includes("'") && !s.includes('"')) q = '"';
+  const points = chars(s);
+  if (points.includes("'") && !points.includes('"')) q = '"';
   let b = q;
-  for (const r of s) {
+  for (const r of points) {
     const c = r.codePointAt(0) as number;
     if (r === "\\") b += "\\\\";
     else if (r === q) b += "\\" + q;
     else if (r === "\n") b += "\\n";
     else if (r === "\r") b += "\\r";
     else if (r === "\t") b += "\\t";
-    else if (c < 0x20 || c === 0x7f) b += "\\x" + c.toString(16).padStart(2, "0");
+    else if (!isPrintableCodePoint(c)) {
+      const width = c <= 0xff ? 2 : c <= 0xffff ? 4 : 8;
+      b += (width === 2 ? "\\x" : width === 4 ? "\\u" : "\\U") + c.toString(16).padStart(width, "0");
+    }
     else b += r;
   }
   return b + q;
@@ -253,24 +259,24 @@ export function expStr(af: number, prec: number): string {
 
 /** %g-style formatting of |f| with prec significant digits (Go/CPython rules:
  * scientific iff exp < -4 or exp >= prec; trailing zeros stripped). */
-export function gStr(af: number, prec: number): string {
+export function gStr(af: number, prec: number, alternate = false): string {
   if (!Number.isFinite(af)) return Number.isNaN(af) ? "nan" : "inf";
   if (prec < 1) prec = 1;
-  if (af === 0) return "0";
+  if (af === 0) return alternate ? "0." + "0".repeat(prec - 1) : "0";
   const { digits, exp10 } = sigRound(af, prec);
   if (exp10 < -4 || exp10 >= prec) {
-    let frac = digits.slice(1).replace(/0+$/, "");
-    const mant = frac.length > 0 ? digits[0] + "." + frac : digits[0];
+    const frac = alternate ? digits.slice(1) : digits.slice(1).replace(/0+$/, "");
+    const mant = frac.length > 0 || alternate ? digits[0] + "." + frac : digits[0];
     return mant + "e" + expString(exp10);
   }
   if (exp10 >= digits.length - 1) {
-    return digits + "0".repeat(exp10 - digits.length + 1);
+    return digits + "0".repeat(exp10 - digits.length + 1) + (alternate ? "." : "");
   }
   if (exp10 >= 0) {
-    const frac = digits.slice(exp10 + 1).replace(/0+$/, "");
-    return frac.length > 0 ? digits.slice(0, exp10 + 1) + "." + frac : digits.slice(0, exp10 + 1);
+    const frac = alternate ? digits.slice(exp10 + 1) : digits.slice(exp10 + 1).replace(/0+$/, "");
+    return frac.length > 0 || alternate ? digits.slice(0, exp10 + 1) + "." + frac : digits.slice(0, exp10 + 1);
   }
-  const frac = ("0".repeat(-exp10 - 1) + digits).replace(/0+$/, "");
+  const frac = "0".repeat(-exp10 - 1) + (alternate ? digits : digits.replace(/0+$/, ""));
   return frac.length > 0 ? "0." + frac : "0";
 }
 
@@ -281,6 +287,7 @@ interface FmtSpec {
   fill: string;
   align: string; // "" | "<" | ">" | "^" | "="
   sign: string; // "" | "+" | "-" | " "
+  alternate: boolean;
   zero: boolean;
   width: number;
   comma: boolean;
@@ -290,11 +297,12 @@ interface FmtSpec {
 }
 
 /** Parse the supported Python format-spec mini-language. */
-export function parseFmtSpec(spec: string): FmtSpec {
+export function parseFmtSpec(spec: PyString): FmtSpec {
   const fs: FmtSpec = {
     fill: " ",
     align: "",
     sign: "",
+    alternate: false,
     zero: false,
     width: 0,
     comma: false,
@@ -315,6 +323,10 @@ export function parseFmtSpec(spec: string): FmtSpec {
   }
   if (i < rs.length && (rs[i] === "+" || rs[i] === "-" || rs[i] === " ")) {
     fs.sign = rs[i];
+    i++;
+  }
+  if (rs[i] === "#") {
+    fs.alternate = true;
     i++;
   }
   if (i < rs.length && rs[i] === "0") {
@@ -351,68 +363,52 @@ export function parseFmtSpec(spec: string): FmtSpec {
   if (i !== rs.length) {
     throw diasporeErr("ValueError", `Invalid format specifier ${reprString(spec)}`);
   }
-  if (!"dboxXfeg%s".includes(fs.typ) && fs.typ !== "") {
+  if (!"dboxXfFeEgG%s".includes(fs.typ) && fs.typ !== "") {
     throw diasporeErr("ValueError", `Unknown format code '${fs.typ}'`);
   }
   return fs;
 }
 
-/** Format a sandbox value using a Python format specification. */
-export function* formatValue(I: Interp, v: Value, spec: string): G<string> {
-  switch (typeof v) {
-    case "bigint":
-    case "number":
-    case "boolean":
-    case "string":
-      break;
-    default:
-      if (
-        !(
-          v instanceof Uint8Array ||
-          v instanceof PyNoneT ||
-          v instanceof DiasporeList ||
-          v instanceof DiasporeTuple ||
-          v instanceof DiasporeDict ||
-          v instanceof DiasporeSet ||
-          v instanceof DiasporeRange
-        )
-      ) {
-        v = yield* I.str(v);
-      }
+/** Honor __format__ and preserve logical code-point boundaries in text padding. */
+export function* formatValue(I: Interp, v: Value, spec: PyString): G<PyString> {
+  if (v instanceof DiasporeInstance && v.cls.lookup("__format__") !== undefined) {
+    const result = yield* I.callDunder(v, "__format__", [spec]);
+    if (!isPyString(result)) throw diasporeErr("TypeError", `__format__ must return a str, not ${typeName(result)}`);
+    return result;
   }
-  if (spec === "") return yield* I.str(v);
+  if (chars(spec).length === 0) return yield* I.str(v);
+  if (v instanceof DiasporeInstance && v.prim !== null) v = v.prim;
+  if (!isPyString(v) && typeof v !== "bigint" && typeof v !== "number" && typeof v !== "boolean") {
+    throw diasporeErr("TypeError", `unsupported format string passed to ${typeName(v)}.__format__`);
+  }
   const fs = parseFmtSpec(spec);
-  if (typeof v === "boolean" && fs.typ !== "s") {
-    v = v ? 1n : 0n;
-  }
+  if (isPyString(v)) return formatStr(v, fs);
+  if (typeof v === "boolean") v = v ? 1n : 0n;
   if (typeof v === "bigint") return formatInt(v, fs);
   if (typeof v === "number") return formatFloat(v, fs);
-  if (typeof v === "string") return formatStr(v, fs);
-  if (typeof v === "boolean") return formatStr(v ? "True" : "False", fs);
-  if (fs.typ === "s" || fs.typ === "") {
-    return formatStr(yield* I.str(v), fs);
-  }
   throw diasporeErr("TypeError", `unsupported format string passed to ${typeName(v)}.__format__`);
 }
 
-function formatStr(s: string, fs: FmtSpec): string {
+function formatStr(s: PyString, fs: FmtSpec): PyString {
   if (fs.typ !== "" && fs.typ !== "s") {
     throw diasporeErr("ValueError", `Unknown format code '${fs.typ}' for object of type 'str'`);
   }
   if (fs.sign !== "") {
     throw diasporeErr("ValueError", "Sign not allowed in string format specifier");
   }
+  if (fs.alternate) throw diasporeErr("ValueError", "Alternate form (#) not allowed in string format specifier");
   if (fs.align === "=") {
     throw diasporeErr("ValueError", "'=' alignment not allowed in string format specifier");
   }
   let rs = chars(s).slice();
   if (fs.hasPrec && rs.length > fs.prec) rs = rs.slice(0, fs.prec);
   const align = fs.align === "" ? "<" : fs.align;
-  return pad(rs.join(""), rs.length, align, fs.fill, fs.width);
+  return pad(strFromChars(rs), rs.length, align, fs.fill, fs.width);
 }
 
-function formatInt(n: bigint, fs: FmtSpec): string {
-  if (fs.typ === "f" || fs.typ === "e" || fs.typ === "g" || fs.typ === "%") {
+function formatInt(n: bigint, fs: FmtSpec): PyString {
+  if ("fFeEgG%".includes(fs.typ) && fs.typ !== "") {
+    if (!Number.isFinite(Number(n))) throw diasporeErr("OverflowError", "int too large to convert to float");
     return formatFloat(Number(n), fs);
   }
   if (fs.hasPrec) {
@@ -439,16 +435,19 @@ function formatInt(n: bigint, fs: FmtSpec): string {
     case "X":
       body = mag.toString(16).toUpperCase();
       break;
+    default:
+      throw diasporeErr("ValueError", `Unknown format code '${fs.typ}' for object of type 'int'`);
   }
-  return padNumber(body, neg, fs);
+  const prefix = fs.alternate && "boxX".includes(fs.typ) && fs.typ !== "" ? "0" + fs.typ : "";
+  return padNumber(body, neg, fs, prefix);
 }
 
-function formatFloat(f: number, fs: FmtSpec): string {
+function formatFloat(f: number, fs: FmtSpec): PyString {
   const neg = !Number.isNaN(f) && (f < 0 || Object.is(f, -0));
   const av = Math.abs(f);
   let prec = fs.hasPrec ? fs.prec : 6;
   let body: string;
-  switch (fs.typ) {
+  switch (fs.typ.toLowerCase()) {
     case "f":
       body = fixedStr(av, prec);
       break;
@@ -459,11 +458,11 @@ function formatFloat(f: number, fs: FmtSpec): string {
       body = Number.isFinite(av) ? fixedStr(av * 100, prec) + "%" : fixedStr(av, prec);
       break;
     case "g":
-      body = gStr(av, prec);
+      body = gStr(av, prec, fs.alternate);
       break;
     case "":
       if (fs.hasPrec) {
-        body = gStr(av, prec);
+        body = gStr(av, prec, fs.alternate);
       } else {
         const s = pyFloatStr(av);
         body = s.startsWith("-") ? s.slice(1) : s;
@@ -472,8 +471,13 @@ function formatFloat(f: number, fs: FmtSpec): string {
     default:
       throw diasporeErr("ValueError", `Unknown format code '${fs.typ}' for object of type 'float'`);
   }
+  if (fs.alternate && Number.isFinite(av) && !body.includes(".")) {
+    const exponent = body.search(/[e%]/);
+    body = exponent < 0 ? body + "." : body.slice(0, exponent) + "." + body.slice(exponent);
+  }
+  if (fs.typ === "F" || fs.typ === "E" || fs.typ === "G") body = body.toUpperCase();
   if (fs.comma) {
-    const dot = body.search(/[.e%]/);
+    const dot = body.search(/[.eE%]/);
     if (dot >= 0) {
       body = groupWithZeroFill(body.slice(0, dot), body.slice(dot), neg, fs);
     } else {
@@ -510,32 +514,32 @@ function groupDigits(s: string): string {
   return b;
 }
 
-function padNumber(body: string, neg: boolean, fs: FmtSpec): string {
+function padNumber(body: string, neg: boolean, fs: FmtSpec, prefix = ""): PyString {
   let sign = "";
   if (neg) sign = "-";
   else if (fs.sign === "+") sign = "+";
   else if (fs.sign === " ") sign = " ";
   let align = fs.align === "" ? ">" : fs.align;
   if (align === "=") {
-    let n = fs.width - sign.length - chars(body).length;
+    let n = fs.width - sign.length - prefix.length - chars(body).length;
     if (n < 0) n = 0;
-    return sign + fs.fill.repeat(n) + body;
+    return strConcat(sign + prefix, strRepeat(fs.fill, n), body);
   }
-  const s = sign + body;
+  const s = sign + prefix + body;
   return pad(s, chars(s).length, align, fs.fill, fs.width);
 }
 
-function pad(s: string, runeLen: number, align: string, fill: string, width: number): string {
+function pad(s: PyString, runeLen: number, align: string, fill: string, width: number): PyString {
   const n = width - runeLen;
   if (n <= 0) return s;
   switch (align) {
     case "<":
-      return s + fill.repeat(n);
+      return strConcat(s, strRepeat(fill, n));
     case ">":
-      return fill.repeat(n) + s;
+      return strConcat(strRepeat(fill, n), s);
     case "^": {
       const left = Math.floor(n / 2);
-      return fill.repeat(left) + s + fill.repeat(n - left);
+      return strConcat(strRepeat(fill, left), s, strRepeat(fill, n - left));
     }
   }
   return s;

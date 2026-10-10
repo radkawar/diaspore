@@ -25,6 +25,10 @@ type retValIterator interface {
 // getIter returns an iterator over v, or a TypeError.
 func (vm *VM) getIter(v Value) (Iterator, error) {
 	switch t := v.(type) {
+	case *GenericAlias:
+		return genericIterator(t), nil
+	case *metadataNamespace:
+		return vm.getIter(&List{Items: t.keys()})
 	case *Generator:
 		return t, nil
 	case Iterator:
@@ -34,11 +38,18 @@ func (vm *VM) getIter(v Value) (Iterator, error) {
 	case *Tuple:
 		return &seqIter{items: t.Items}, nil
 	case string:
-		return &strIter{rs: []rune(t)}, nil
+		return &strIter{rs: pyRunes(t)}, nil
 	case []byte:
 		return &bytesIter{b: t}, nil
+	case *ByteArray:
+		return &bufferIterator{vm: vm, value: t}, nil
+	case *MemoryView:
+		if _, err := t.lenValue(); err != nil {
+			return nil, err
+		}
+		return &bufferIterator{vm: vm, value: t}, nil
 	case *Range:
-		return &rangeIter{cur: t.Start, step: t.Step, left: t.Len()}, nil
+		return vm.rangeIterator(t), nil
 	case *Dict:
 		return (&DictView{dict: t, kind: "keys"}).iterator(false), nil
 	case *classDict:
@@ -54,6 +65,16 @@ func (vm *VM) getIter(v Value) (Iterator, error) {
 			return t.iterFn(), nil
 		}
 		return nil, newErrorf("TypeError", "'%s' object is not iterable", t.Kind)
+	case *Class:
+		if t.Meta != nil {
+			if _, found := t.Meta.Lookup("__iter__"); found {
+				result, err := vm.callClassIteratorMethod(t, "__iter__")
+				if err != nil {
+					return nil, err
+				}
+				return vm.iteratorResult(result)
+			}
+		}
 	case *Instance:
 		_, hasIter := t.Class.Lookup("__iter__")
 		_, hasNext := t.Class.Lookup("__next__")
@@ -65,15 +86,7 @@ func (vm *VM) getIter(v Value) (Iterator, error) {
 			if err != nil {
 				return nil, err
 			}
-			switch r := it.(type) {
-			case *Generator:
-				return r, nil
-			case Iterator:
-				return r, nil
-			case *Instance:
-				return &instIter{vm: vm, obj: r, retval: None}, nil
-			}
-			return vm.getIter(it)
+			return vm.iteratorResult(it)
 		}
 		if _, ok := t.Class.Lookup("__next__"); ok {
 			return &instIter{vm: vm, obj: t, retval: None}, nil
@@ -81,6 +94,48 @@ func (vm *VM) getIter(v Value) (Iterator, error) {
 		return nil, newErrorf("TypeError", "'%s' object is not iterable", t.Class.Name)
 	}
 	return nil, newErrorf("TypeError", "'%s' object is not iterable", typeName(v))
+}
+
+func (vm *VM) iteratorResult(value Value) (Iterator, error) {
+	switch result := value.(type) {
+	case Iterator:
+		return result, nil
+	case *Instance:
+		if _, found := result.Class.Lookup("__next__"); found {
+			return &instIter{vm: vm, obj: result, retval: None}, nil
+		}
+	case *Class:
+		if result.Meta != nil {
+			if _, found := result.Meta.Lookup("__next__"); found {
+				return &instIter{vm: vm, obj: result, retval: None}, nil
+			}
+		}
+	}
+	return nil, newErrorf("TypeError", "iter() returned non-iterator of type '%s'", typeName(value))
+}
+
+func (vm *VM) callClassIteratorMethod(cls *Class, name string) (Value, error) {
+	method, found := cls.Meta.Lookup(name)
+	if !found {
+		return nil, newErrorf("TypeError", "'%s' object is not an iterator", cls.Meta.Name)
+	}
+	var bound Value
+	var err error
+	if _, property := propertyValue(method); property {
+		bound, err = vm.propertyGet(method, cls, cls.Meta)
+	} else if descriptor, ok := method.(*Instance); ok {
+		if _, get := descriptor.Class.Lookup("__get__"); get {
+			bound, err = vm.callDunder(descriptor, "__get__", []Value{cls, cls.Meta})
+		} else {
+			bound = method
+		}
+	} else {
+		bound = vm.bindAttr(method, cls, cls.Meta)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return vm.call(bound, nil, nil)
 }
 
 func (vm *VM) iterToSlice(v Value) ([]Value, error) {
@@ -163,7 +218,7 @@ func (it *strIter) Next() (Value, bool, error) {
 	if it.i >= len(it.rs) {
 		return nil, false, nil
 	}
-	v := string(it.rs[it.i])
+	v := pyRuneString(it.rs[it.i])
 	it.i++
 	return v, true, nil
 }
@@ -212,7 +267,7 @@ func (it *rangeIter) KindName() string { return "range_iterator" }
 // instIter adapts a diaspore object implementing __next__.
 type instIter struct {
 	vm     *VM
-	obj    *Instance
+	obj    Value
 	retval Value
 	done   bool
 }
@@ -222,7 +277,14 @@ func (it *instIter) Next() (Value, bool, error) {
 	if it.done {
 		return nil, false, nil
 	}
-	v, err := it.vm.callDunder(it.obj, "__next__", nil)
+	var v Value
+	var err error
+	switch obj := it.obj.(type) {
+	case *Class:
+		v, err = it.vm.callClassIteratorMethod(obj, "__next__")
+	case *Instance:
+		v, err = it.vm.callDunder(obj, "__next__", nil)
+	}
 	if err != nil {
 		if r, ok := raisedAs(err, "StopIteration"); ok {
 			it.done = true
@@ -471,6 +533,8 @@ func (g *Generator) advance(tok genToken) (v Value, done bool, err error) {
 	if ch.done.Load() {
 		return nil, true, nil
 	}
+	g.vm.enterMetadataFrame(g.frame)
+	defer g.vm.leaveMetadataFrame(g.frame)
 	if !ch.started.Load() {
 		ch.started.Store(true)
 		go runGenBody(g.vm, g.fn.cf.body, g.frame, ch)
@@ -480,6 +544,9 @@ func (g *Generator) advance(tok genToken) (v Value, done bool, err error) {
 	}
 	ch.resume <- tok
 	m := <-ch.out
+	if raised, ok := m.err.(*Raised); ok {
+		g.vm.recordMetadataTraceback(raised, g.frame)
+	}
 	if g.vm.tracer != nil {
 		if m.kind == 'y' {
 			g.vm.traceEmit("yield", g.frame, traceRepr(m.v, 0))

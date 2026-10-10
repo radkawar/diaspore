@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
+	"math/bits"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +18,9 @@ type node = map[string]any
 
 // VM is an embeddable Diaspore virtual machine executing one bundle.
 type VM struct {
+	metadata        metadataState
+	closed          bool
+	suspended       bool
 	main            string
 	argv            []string
 	bindings        map[string]map[string]NativeFunc
@@ -26,16 +31,23 @@ type VM struct {
 	steps           int64 // guarded by the gil / handoff ordering
 	depth           int
 	gil             sync.Mutex // the interpreter lock (spec 11.9)
+	taskID          int64
+	nextTaskID      int64
 	stdout          io.Writer
 	stderr          io.Writer
 	stdin           *bufio.Reader
 	modules         map[string]Value
+	moduleDict      *Dict
 	modcode         map[string]execFn
 	modCells        map[string]map[string]*cell
 	modMeta         map[string]moduleMeta
+	closeFDs        func()
 	bundle          map[string]any
+	stdlib          *stdlibStore
+	stdlibID        string
 	policy          map[string]map[string][]string
 	fsOverlay       map[string]string
+	overlayDirs     map[string]bool
 	virtualFiles    map[string]string
 	durable         bool
 	determin        bool
@@ -45,6 +57,7 @@ type VM struct {
 	snippetCompiler func(source, mode string) ([]any, error)
 	execSeq         int
 	excStack        []Value
+	auditHooks      []Value
 	repring         map[Value]bool
 	builtins        map[string]Value
 	types           map[string]*BuiltinType
@@ -138,17 +151,18 @@ func WithSnippetCompiler(fn func(source, mode string) ([]any, error)) Option {
 // here, once; a malformed bundle is reported by Run / Call rather than here.
 func New(bundle map[string]any, opts ...Option) *VM {
 	vm := &VM{
-		bindings: map[string]map[string]NativeFunc{},
-		caps:     map[string]bool{},
-		maxDepth: 1000,
-		stdout:   os.Stdout,
-		stderr:   os.Stderr,
-		stdin:    bufio.NewReader(os.Stdin),
-		modules:  map[string]Value{},
-		modcode:  map[string]execFn{},
-		modCells: map[string]map[string]*cell{},
-		modMeta:  map[string]moduleMeta{},
-		repring:  map[Value]bool{},
+		bindings:   map[string]map[string]NativeFunc{},
+		caps:       map[string]bool{},
+		maxDepth:   1000,
+		stdout:     os.Stdout,
+		stderr:     os.Stderr,
+		stdin:      bufio.NewReader(os.Stdin),
+		modules:    map[string]Value{},
+		moduleDict: NewDict(),
+		modcode:    map[string]execFn{},
+		modCells:   map[string]map[string]*cell{},
+		modMeta:    map[string]moduleMeta{},
+		repring:    map[Value]bool{},
 	}
 	for _, o := range opts {
 		o(vm)
@@ -169,6 +183,15 @@ func New(bundle map[string]any, opts ...Option) *VM {
 	if ver != 1 || main == "" || mods == nil {
 		vm.badBundle = errors.New("not a diaspore v1 bundle")
 		return vm
+	}
+	store, err := linkedStdlib(bundle)
+	if err != nil {
+		vm.badBundle = err
+		return vm
+	}
+	vm.stdlib = store
+	if store != nil {
+		vm.stdlibID = store.id
 	}
 	vm.main = main
 	if vm.argv == nil {
@@ -199,7 +222,17 @@ func (vm *VM) AddModules(bundle map[string]any) error {
 	if ver != 1 || mods == nil {
 		return errors.New("not a diaspore v1 bundle")
 	}
-	return vm.addModules(mods)
+	store, err := linkedStdlib(bundle)
+	if err != nil {
+		return err
+	}
+	if err := vm.addModules(mods); err != nil {
+		return err
+	}
+	if store != nil {
+		vm.stdlib, vm.stdlibID = store, store.id
+	}
+	return nil
 }
 
 func (vm *VM) addModules(mods map[string]any) (err error) {
@@ -219,30 +252,11 @@ func (vm *VM) addModules(mods map[string]any) (err error) {
 		if _, exists := vm.modules[name]; exists {
 			continue
 		}
-		mn, ok := m.(map[string]any)
-		if !ok {
-			return fmt.Errorf("module %q is not an object", name)
-		}
-		body, ok := mn["body"].([]any)
-		if !ok && mn["body"] != nil {
-			return fmt.Errorf("module %q body is not an array", name)
-		}
-		code, compileErr := compileModule(vm, name, body)
-		codes[name] = code
+		code, meta, compileErr := vm.compileModuleIR(name, m)
 		if compileErr != nil {
 			return compileErr
 		}
-		meta := moduleMeta{file: name}
-		if f, ok := mn["file"].(string); ok {
-			meta.file = f
-		}
-		if raw, ok := mn["src"].([]any); ok {
-			meta.src = make([]string, 0, len(raw))
-			for _, line := range raw {
-				ls, _ := line.(string)
-				meta.src = append(meta.src, ls)
-			}
-		}
+		codes[name] = code
 		metadata[name] = meta
 	}
 	for name, code := range codes {
@@ -250,6 +264,33 @@ func (vm *VM) addModules(mods map[string]any) (err error) {
 		vm.modMeta[name] = metadata[name]
 	}
 	return nil
+}
+
+func (vm *VM) compileModuleIR(name string, raw any) (execFn, moduleMeta, error) {
+	mn, ok := raw.(map[string]any)
+	if !ok {
+		return nil, moduleMeta{}, fmt.Errorf("module %q is not an object", name)
+	}
+	body, ok := mn["body"].([]any)
+	if !ok && mn["body"] != nil {
+		return nil, moduleMeta{}, fmt.Errorf("module %q body is not an array", name)
+	}
+	code, err := compileModule(vm, name, body)
+	if err != nil {
+		delete(vm.modCells, name)
+		return nil, moduleMeta{}, err
+	}
+	meta := moduleMeta{file: name, source: mn}
+	if file, ok := mn["file"].(string); ok {
+		meta.file = file
+	}
+	if raw, ok := mn["src"].([]any); ok {
+		meta.src = make([]string, len(raw))
+		for i, line := range raw {
+			meta.src[i], _ = line.(string)
+		}
+	}
+	return code, meta, nil
 }
 
 // setArgv replaces sys.argv before the program runs (used by Resume, which
@@ -267,8 +308,9 @@ func (vm *VM) setArgv(argv []string) {
 
 // moduleMeta carries per-module traceback metadata from the bundle.
 type moduleMeta struct {
-	file string
-	src  []string
+	file   string
+	src    []string
+	source node
 }
 
 // Steps returns the number of fuel units consumed so far.
@@ -295,6 +337,32 @@ func (vm *VM) Run() int {
 	}
 	vm.gil.Unlock()
 	return code
+}
+
+// Close releases VM-owned file descriptors. Call it when the VM is no longer used.
+func (vm *VM) Close() {
+	vm.gil.Lock()
+	defer vm.gil.Unlock()
+	if vm.closed {
+		return
+	}
+	vm.closed = true
+	if !vm.suspended {
+		for _, hook := range [][2]string{{"threading", "_shutdown"}, {"atexit", "_run_exitfuncs"}} {
+			if module, imported := vm.moduleDict.GetStr(hook[0]); imported {
+				if callback, err := vm.getAttr(module, hook[1]); err == nil {
+					if _, err := vm.call(callback, nil, nil); err != nil {
+						vm.ReportError(err)
+					}
+				}
+			}
+		}
+	}
+	if vm.closeFDs != nil {
+		vm.closeFDs()
+		vm.closeFDs = nil
+	}
+	vm.flushOut()
 }
 
 // flushOut flushes the stdout writer if it is buffered, so long-running
@@ -362,7 +430,7 @@ func (vm *VM) printTraceback(r *Raised) {
 	name := typeName(r.Exc)
 	msg := ""
 	if inst, ok := r.Exc.(*Instance); ok {
-		name = inst.Class.Name
+		name = vm.exceptionDisplayName(inst.Class)
 		if s, err := vm.excStr(inst); err == nil {
 			msg = s
 		}
@@ -439,8 +507,25 @@ func mkInt(n int64) Value {
 }
 
 func (vm *VM) importModule(name string) (Value, error) {
-	if m, ok := vm.modules[name]; ok {
+	if m, ok := vm.moduleDict.GetStr(name); ok {
+		if _, halted := m.(NoneType); halted {
+			return nil, newErrorf("ModuleNotFoundError", "import of %s halted; None in sys.modules", name)
+		}
+		vm.modules[name] = m
 		return m, nil
+	}
+	if _, compiled := vm.modcode[name]; !compiled && vm.stdlib != nil {
+		if source, found := vm.stdlib.modules[name]; found {
+			ir, err := source.load()
+			if err != nil {
+				return nil, fmt.Errorf("cannot load stdlib module %q: %w", name, err)
+			}
+			code, meta, err := vm.compileModuleIR(name, ir)
+			if err != nil {
+				return nil, err
+			}
+			vm.modcode[name], vm.modMeta[name] = code, meta
+		}
 	}
 	if code, ok := vm.modcode[name]; ok {
 		var parent *Module
@@ -475,11 +560,31 @@ func (vm *VM) importModule(name string) (Value, error) {
 			cells["__file__"] = fileCell
 		}
 		fileCell.v = vm.modMeta[name].file
+		docCell, ok := cells["__doc__"]
+		if !ok {
+			docCell = &cell{}
+			cells["__doc__"] = docCell
+		}
+		docCell.v = None
 		mod := &Module{Name: name, frame: fr}
 		vm.modules[name] = mod
+		vm.moduleDict.SetStr(name, mod)
+		if name == vm.main && name != "__main__" {
+			vm.modules["__main__"] = mod
+			vm.moduleDict.SetStr("__main__", mod)
+		}
+		vm.enterMetadataFrame(fr)
+		defer vm.leaveMetadataFrame(fr)
 		if err := code(fr); err != nil {
+			delete(vm.modules, name)
+			vm.moduleDict.Delete(name)
+			if name == vm.main && name != "__main__" {
+				delete(vm.modules, "__main__")
+				vm.moduleDict.Delete("__main__")
+			}
 			var r *Raised
 			if errors.As(err, &r) {
+				vm.recordMetadataTraceback(r, fr)
 				r.TB = append(r.TB, tbEntry{name, "<module>", fr.line})
 			}
 			return nil, err
@@ -497,7 +602,7 @@ func (vm *VM) importModule(name string) (Value, error) {
 		ns := map[string]Value{}
 		for fname, fn := range fns {
 			f := fn
-			ns[fname] = vm.journaled(name, fname, &Builtin{Name: fname, Fn: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			ns[fname] = vm.journaled(name, fname, &Builtin{Name: fname, NoBind: true, Fn: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 				if len(kw) > 0 {
 					return nil, newErrorf("TypeError", "%s() takes no keyword arguments", fname)
 				}
@@ -517,10 +622,12 @@ func (vm *VM) importModule(name string) (Value, error) {
 		}
 		mod := &NativeModule{Name: name, NS: ns}
 		vm.modules[name] = mod
+		vm.moduleDict.SetStr(name, mod)
 		return mod, nil
 	}
 	if mod, ok := vm.natives[name]; ok {
 		vm.modules[name] = mod
+		vm.moduleDict.SetStr(name, mod)
 		return mod, nil
 	}
 	return nil, newErrorf("ModuleNotFoundError", "No module named '%s'", name)
@@ -534,20 +641,24 @@ type cell struct{ v Value }
 // frame is one runtime scope. Function frames are slot-indexed (slots +
 // layout); module frames are cell-based; class frames are map-based (vars).
 type frame struct {
-	slots      []Value
-	vars       map[string]Value // class frames only
-	varOrder   []string         // class frames: first-assignment order
-	cells      map[string]*cell // module frames only
-	layout     map[string]int
-	parent     *frame
-	globals    map[string]*cell // the defining module's cells
-	gen        *genChannel
-	ret        Value // return value in flight (errReturn)
-	line       int
-	fname      string
-	moduleName string
-	defclass   *Class
-	self       Value
+	metadata      frameMetadata
+	slots         []Value
+	closureCells  []*lexicalCell   // reconstructed function closure bindings
+	vars          map[string]Value // class frames only
+	varOrder      []string         // class frames: first-assignment order
+	namespace     Value            // custom metaclass-prepared mapping, nil for ordinary classes
+	cells         map[string]*cell // module frames only
+	layout        map[string]int
+	parent        *frame
+	globals       map[string]*cell // the defining module's cells
+	globalMapping Value            // supplied FunctionType globals, when not cell-backed
+	gen           *genChannel
+	ret           Value // return value in flight (errReturn)
+	line          int
+	fname         string
+	moduleName    string
+	defclass      *Class
+	self          Value
 }
 
 func nStr(n node, k string) string {
@@ -591,7 +702,7 @@ func (vm *VM) makeFunction(cf *compiledFunc, fr *frame) (*Function, error) {
 	for i := 0; i < cf.classHops; i++ {
 		closure = closure.parent
 	}
-	fn := &Function{cf: cf, closure: closure}
+	fn := &Function{cf: cf, closure: closure, doc: cf.doc}
 	if len(cf.defaults) > 0 {
 		fn.defaults = make([]Value, len(cf.defaults))
 		for i, dFn := range cf.defaults {
@@ -622,11 +733,29 @@ func (vm *VM) call(f Value, args []Value, kwargs []KwArg) (Value, error) {
 		return nil, err
 	}
 	switch t := f.(type) {
+	case *jsonScanner:
+		return t.call(vm, args, kwargs)
+	case *jsonEncoder:
+		return t.call(vm, args, kwargs)
+	case *metadataDescriptor:
+		return t.call(vm, args, kwargs)
+	case *GenericAlias:
+		return vm.callGenericAlias(t, args, kwargs)
+	case *StaticMethod:
+		if t.Fn == nil {
+			return nil, newError("RuntimeError", "uninitialized staticmethod object")
+		}
+		return vm.call(t.Fn, args, kwargs)
 	case *Function:
 		return vm.callFunction(t, args, kwargs)
 	case *BoundMethod:
 		return vm.call(t.Fn, append([]Value{t.Recv}, args...), kwargs)
 	case *Class:
+		if t.Meta != nil {
+			if hook, ok := t.Meta.Lookup("__call__"); ok {
+				return vm.call(vm.bindAttr(hook, t, t.Meta), args, kwargs)
+			}
+		}
 		return vm.instantiate(t, args, kwargs)
 	case *BuiltinType:
 		return t.ctor(vm, args, kwargs)
@@ -635,6 +764,9 @@ func (vm *VM) call(f Value, args []Value, kwargs []KwArg) (Value, error) {
 	case *Instance:
 		if _, ok := t.Class.Lookup("__call__"); ok {
 			return vm.callDunderKw(t, "__call__", args, kwargs)
+		}
+		if callableDescriptorKind(t) == "staticmethod" {
+			return vm.call(t.Prim, args, kwargs)
 		}
 		return nil, newErrorf("TypeError", "'%s' object is not callable", t.Class.Name)
 	case *superMarkerT:
@@ -646,10 +778,14 @@ func (vm *VM) call(f Value, args []Value, kwargs []KwArg) (Value, error) {
 func (vm *VM) callFunction(fn *Function, args []Value, kwargs []KwArg) (Value, error) {
 	cf := fn.cf
 	fr := cf.getFrame()
+	if fn.metadata != nil {
+		fr.metadata.override = fn.metadata.code
+	}
 	fr.parent = fn.closure
 	fr.defclass = fn.defclass
 	if fn.closure != nil {
 		fr.globals = fn.closure.globals
+		fr.globalMapping = fn.closure.globalMapping
 	}
 	if err := vm.bindArgs(fn, args, kwargs, fr.slots); err != nil {
 		cf.putFrame(fr)
@@ -674,6 +810,8 @@ func (vm *VM) runFrame(cf *compiledFunc, fr *frame) (Value, error) {
 		return nil, newError("RecursionError", "maximum recursion depth exceeded")
 	}
 	vm.depth++
+	vm.enterMetadataFrame(fr)
+	defer vm.leaveMetadataFrame(fr)
 	if vm.tracer != nil {
 		vm.traceCall(fr)
 	}
@@ -693,6 +831,7 @@ func (vm *VM) runFrame(cf *compiledFunc, fr *frame) (Value, error) {
 	}
 	var r *Raised
 	if errors.As(err, &r) {
+		vm.recordMetadataTraceback(r, fr)
 		r.TB = append(r.TB, tbEntry{fr.moduleName, cf.name, fr.line})
 	}
 	cf.putFrame(fr)
@@ -763,6 +902,13 @@ func (vm *VM) bindArgs(fn *Function, args []Value, kwargs []KwArg, slots []Value
 		for _, kw := range kwargs {
 			for i, n := range names {
 				if n == kw.Name {
+					if i < p.posonly {
+						if p.kwargIdx >= 0 {
+							extra = append(extra, kw)
+							continue kwLoop
+						}
+						return newErrorf("TypeError", "%s() got some positional-only arguments passed as keyword arguments: '%s'", cf.name, n)
+					}
 					if slots[p.argIdx[i]] != nil {
 						return newErrorf("TypeError", "%s() got multiple values for argument '%s'",
 							cf.name, kw.Name)
@@ -795,9 +941,14 @@ func (vm *VM) bindArgs(fn *Function, args []Value, kwargs []KwArg, slots []Value
 		slots[p.kwargIdx] = NewDict()
 	}
 	nd := len(fn.defaults)
+	defaultStart := 0
+	if nd > len(names) {
+		defaultStart = nd - len(names)
+		nd = len(names)
+	}
 	nreq := len(names) - nd
 	var missing []string
-	for i := 0; i < nreq; i++ {
+	for i := range nreq {
 		if slots[p.argIdx[i]] == nil {
 			missing = append(missing, names[i])
 		}
@@ -806,15 +957,15 @@ func (vm *VM) bindArgs(fn *Function, args []Value, kwargs []KwArg, slots []Value
 		return newErrorf("TypeError", "%s() missing %d required positional %s: %s",
 			cf.name, len(missing), plural(len(missing), "argument"), nameList(missing))
 	}
-	for i := 0; i < nd; i++ {
+	for i := range nd {
 		if slots[p.argIdx[nreq+i]] == nil {
-			slots[p.argIdx[nreq+i]] = fn.defaults[i]
+			slots[p.argIdx[nreq+i]] = fn.defaults[defaultStart+i]
 		}
 	}
 	var missKw []string
 	for i, n := range p.kwonly {
 		if slots[p.kwonlyIdx[i]] == nil {
-			if d, ok := fn.kwdefaults[n]; ok {
+			if d, ok := fn.metadataKeywordDefault(n); ok {
 				slots[p.kwonlyIdx[i]] = d
 			} else {
 				missKw = append(missKw, n)
@@ -829,11 +980,66 @@ func (vm *VM) bindArgs(fn *Function, args []Value, kwargs []KwArg, slots []Value
 }
 
 func (vm *VM) instantiate(cls *Class, args []Value, kwargs []KwArg) (Value, error) {
-	inst := &Instance{Class: cls, D: map[string]Value{}}
+	if abstract, ok := cls.Lookup("__abstractmethods__"); ok {
+		nonempty, err := vm.truth(abstract)
+		if err != nil {
+			return nil, err
+		}
+		if nonempty {
+			return nil, newErrorf("TypeError", "Can't instantiate abstract class %s", cls.Name)
+		}
+	}
+	if cls.Prim != nil && cls.Prim.Name == "type" {
+		return vm.instantiateMeta(cls, args, kwargs)
+	}
+	if constructor, ok := cls.Lookup("__new__"); ok {
+		if sm, ok := constructor.(*StaticMethod); ok {
+			constructor = sm.Fn
+		}
+		value, err := vm.call(constructor, append([]Value{cls}, args...), kwargs)
+		if err != nil {
+			return nil, err
+		}
+		instance, ok := value.(*Instance)
+		if !ok || !instance.Class.IsSub(cls) {
+			return value, nil
+		}
+		if init, ok := instance.Class.Lookup("__init__"); ok {
+			r, err := vm.call(vm.bindAttr(init, instance, instance.Class), args, kwargs)
+			if err != nil {
+				return nil, err
+			}
+			if _, ok := r.(NoneType); !ok {
+				return nil, newError("TypeError", "__init__() should return None")
+			}
+		} else if instance.Class.Prim != nil && instance.Class.Prim.Name == "dict" {
+			if err := dictInitialize(vm, rawPrim(instance), args, kwargs); err != nil {
+				return nil, err
+			}
+		} else if instance.Class.Prim != nil && instance.Class.Prim.Name == "bytearray" {
+			storage, ok := rawPrim(instance).(*ByteArray)
+			if !ok {
+				return nil, newError("TypeError", "bytearray.__init__ requires a bytearray instance")
+			}
+			if err := bytearrayInitialize(vm, storage, args, kwargs); err != nil {
+				return nil, err
+			}
+		} else if _, property := propertyValue(instance); property {
+			if err := vm.initProperty(instance, args, kwargs); err != nil {
+				return nil, err
+			}
+		} else if callableDescriptorKind(instance) != "" {
+			if err := vm.initCallableDescriptor(instance, args, kwargs); err != nil {
+				return nil, err
+			}
+		}
+		return instance, nil
+	}
+	inst := newInstance(cls, nil)
 	if cls.Prim != nil {
 		base := cls.Prim.Name
 		switch base {
-		case "str", "bytes", "int", "float", "tuple", "frozenset", "bool":
+		case "str", "bytes", "int", "float", "tuple", "frozenset", "bool", "GenericAlias":
 			// Immutable primitives take their value from the constructor args.
 			if len(args) > 0 || len(kwargs) > 0 {
 				pv, err := cls.Prim.ctor(vm, args, kwargs)
@@ -850,6 +1056,15 @@ func (vm *VM) instantiate(cls *Class, args []Value, kwargs []KwArg) (Value, erro
 	}
 	init, ok := cls.Lookup("__init__")
 	if !ok {
+		if cls.Prim != nil && cls.Prim.Name == "bytearray" {
+			return inst, bytearrayInitialize(vm, inst.Prim.(*ByteArray), args, kwargs)
+		}
+		if _, property := propertyValue(inst); property {
+			return inst, vm.initProperty(inst, args, kwargs)
+		}
+		if callableDescriptorKind(inst) != "" {
+			return inst, vm.initCallableDescriptor(inst, args, kwargs)
+		}
 		if len(args) > 0 || len(kwargs) > 0 {
 			if cls.Prim != nil && (cls.Prim.Name == "dict" || cls.Prim.Name == "list" || cls.Prim.Name == "set") {
 				pv, err := cls.Prim.ctor(vm, args, kwargs)
@@ -878,6 +1093,12 @@ func (vm *VM) instantiate(cls *Class, args []Value, kwargs []KwArg) (Value, erro
 // primEmpty returns an empty primitive value of the given builtin base name.
 func primEmpty(base string) Value {
 	switch base {
+	case "property":
+		return &Property{}
+	case "staticmethod":
+		return &StaticMethod{}
+	case "classmethod":
+		return &ClassMethod{}
 	case "dict":
 		return NewDict()
 	case "list":
@@ -892,6 +1113,8 @@ func primEmpty(base string) Value {
 		return ""
 	case "bytes":
 		return []byte{}
+	case "bytearray":
+		return &ByteArray{}
 	case "int", "bool":
 		return int64(0)
 	case "float":
@@ -937,6 +1160,11 @@ func (vm *VM) makeSuper(args []Value, fr *frame) (Value, error) {
 
 func (vm *VM) bindAttr(v Value, inst Value, cls *Class) Value {
 	switch t := v.(type) {
+	case *metadataDescriptor:
+		if t.kind == "classmethod_descriptor" {
+			return t.bind(cls)
+		}
+		return t.bind(inst)
 	case *Function:
 		return &BoundMethod{Fn: t, Recv: inst}
 	case *StaticMethod:
@@ -944,83 +1172,165 @@ func (vm *VM) bindAttr(v Value, inst Value, cls *Class) Value {
 	case *ClassMethod:
 		return &BoundMethod{Fn: t.Fn, Recv: cls}
 	case *Builtin:
+		if t.NoBind {
+			return t
+		}
 		return &BoundMethod{Fn: t, Recv: inst}
 	}
 	return v
 }
 
 func (vm *VM) getAttr(o Value, n string) (Value, error) {
-	switch t := o.(type) {
-	case *Instance:
-		if n == "__class__" {
-			return t.Class, nil
+	if _, instance := o.(*Instance); !instance {
+		if value, handled, err := vm.metadataAttr(o, n); handled {
+			return value, err
 		}
-		v, found := t.Class.Lookup(n)
-		if prop, ok := v.(*Property); ok {
-			if prop.Fget == nil {
-				return nil, newErrorf("AttributeError",
-					"property '%s' of '%s' object has no getter", n, t.Class.Name)
+	}
+	if n == "__class__" {
+		if _, instance := o.(*Instance); !instance {
+			return ctorType(vm, []Value{o}, nil)
+		}
+	}
+	switch o.(type) {
+	case *Instance, *Class, *BuiltinType:
+		// User instances and types perform their own MRO lookup below.
+	default:
+		if owner := vm.types[typeName(o)]; owner != nil {
+			if n == "__new__" {
+				return vm.primitiveNew(owner), nil
 			}
-			return vm.call(vm.bindAttr(prop.Fget, t, t.Class), nil, nil)
-		}
-		if descriptor, ok := v.(*Instance); ok {
-			_, sets := descriptor.Class.Lookup("__set__")
-			_, deletes := descriptor.Class.Lookup("__delete__")
-			if sets || deletes {
-				if _, gets := descriptor.Class.Lookup("__get__"); gets {
-					return vm.callDunder(descriptor, "__get__", []Value{t, t.Class})
+			if descriptor := vm.builtinMetadataDescriptor(owner, n); descriptor != nil && !descriptor.getter {
+				if descriptor.kind == "classmethod_descriptor" {
+					return descriptor.bind(owner), nil
 				}
+				return descriptor.bind(o), nil
 			}
 		}
-		if value, ok := t.D[n]; ok {
+	}
+	switch t := o.(type) {
+	case *hashEngine:
+		if value, ok := t.attr(n); ok {
 			return value, nil
 		}
-		if found {
-			if descriptor, ok := v.(*Instance); ok {
-				if _, has := descriptor.Class.Lookup("__get__"); has {
-					return vm.callDunder(descriptor, "__get__", []Value{t, t.Class})
+		return nil, newErrorf("AttributeError", "'_diaspore_hash._HashEngine' object has no attribute '%s'", n)
+	case *jsonScanner:
+		if value, ok := t.attr(n); ok {
+			return value, nil
+		}
+		return nil, newErrorf("AttributeError", "'_json.Scanner' object has no attribute '%s'", n)
+	case *jsonEncoder:
+		if value, ok := t.attr(n); ok {
+			return value, nil
+		}
+		return nil, newErrorf("AttributeError", "'_json.Encoder' object has no attribute '%s'", n)
+	case *GenericAlias, *UnionType:
+		return vm.genericAttr(t, n)
+	case *Range:
+		return vm.rangeAttr(t, n)
+	case *rangeIter, *longRangeIter:
+		return vm.rangeIteratorAttr(t, n)
+	case *ByteArray, *MemoryView:
+		return vm.bufferAttr(t, n)
+	case *Instance:
+		if hook, ok := t.Class.Lookup("__getattribute__"); ok {
+			value, err := vm.call(vm.bindAttr(hook, t, t.Class), []Value{n}, nil)
+			if _, missing := raisedAs(err, "AttributeError"); missing {
+				if fallback, found := t.Class.Lookup("__getattr__"); found {
+					return vm.call(vm.bindAttr(fallback, t, t.Class), []Value{n}, nil)
 				}
 			}
-			return vm.bindAttr(v, t, t.Class), nil
+			return value, err
 		}
-		if t.Prim != nil {
-			if m, err := vm.builtinMethod(t.Prim, n); err == nil {
-				return m, nil
+		value, err := vm.baseGetAttr(t, n)
+		if _, missing := raisedAs(err, "AttributeError"); missing {
+			if fallback, found := t.Class.Lookup("__getattr__"); found {
+				return vm.call(vm.bindAttr(fallback, t, t.Class), []Value{n}, nil)
 			}
 		}
-		if ga, ok := t.Class.Lookup("__getattr__"); ok {
-			return vm.call(vm.bindAttr(ga, t, t.Class), []Value{n}, nil)
-		}
-		return nil, newErrorf("AttributeError", "'%s' object has no attribute '%s'",
-			t.Class.Name, n)
+		return value, err
 	case *Class:
+		if n == "__class__" {
+			if t.Meta != nil {
+				return t.Meta, nil
+			}
+			return vm.types["type"], nil
+		}
 		v, ok := t.Lookup(n)
+		if builtin, found := v.(*Builtin); found && objectClass.NS[n] == builtin {
+			if descriptor := vm.objectMetadataDescriptor(n); descriptor != nil {
+				return descriptor, nil
+			}
+		}
 		if !ok {
+			if t.Meta != nil {
+				if value, found := t.Meta.Lookup(n); found {
+					if _, property := propertyValue(value); property {
+						return vm.propertyGet(value, t, t.Meta)
+					}
+					if callableDescriptorKind(value) != "" {
+						return vm.callableDescriptorGet(value, t, t.Meta)
+					}
+					if descriptor, ok := value.(*Instance); ok {
+						if _, has := descriptor.Class.Lookup("__get__"); has {
+							return vm.callDunder(descriptor, "__get__", []Value{t, t.Meta})
+						}
+					}
+					return vm.bindAttr(value, t, t.Meta), nil
+				}
+			}
 			switch n {
+			case "__new__":
+				if t.Prim != nil {
+					return vm.primitiveNew(t.Prim), nil
+				}
+				return vm.objectNewBuiltin(), nil
+			case "__subclasshook__":
+				return bi(n, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+					if err := argCount(n, args, 1, 1); err != nil {
+						return nil, err
+					}
+					return NotImplemented, noKw(n, kw)
+				}), nil
+			case "__subclasses__":
+				return bi(n, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+					if err := noArgs(n, args, kw); err != nil {
+						return nil, err
+					}
+					items := make([]Value, len(t.subclasses))
+					for i, child := range t.subclasses {
+						items[i] = child
+					}
+					return &List{Items: items}, nil
+				}), nil
 			case "__name__", "__qualname__":
 				return t.Name, nil
-			case "__mro__":
-				items := make([]Value, len(t.MRO))
-				for i, c := range t.MRO {
-					items[i] = c
-				}
-				return &Tuple{Items: items}, nil
-			case "__bases__":
-				if len(t.Bases) == 0 && t.directPrim == nil && t != objectClass {
-					return &Tuple{Items: []Value{objectClass}}, nil
-				}
-				return &Tuple{Items: baseValues(t.Bases, t.directPrim, t.primIndex)}, nil
+			case "__mro__", "__bases__", "__base__":
+				value, _, err := vm.typeMetadataGet(t, n)
+				return value, err
 			case "__dict__":
 				return &classDict{cls: t}, nil
+			}
+			if t.Prim != nil {
+				if value, err := vm.getAttr(t.Prim, n); err == nil {
+					return value, nil
+				}
+			}
+			if descriptor := vm.objectMetadataDescriptor(n); descriptor != nil {
+				if descriptor.kind == "classmethod_descriptor" {
+					return descriptor.bind(t), nil
+				}
+				return descriptor, nil
 			}
 			return nil, newErrorf("AttributeError", "type object '%s' has no attribute '%s'",
 				t.Name, n)
 		}
+		if _, property := propertyValue(v); property {
+			return vm.propertyGet(v, None, t)
+		}
+		if callableDescriptorKind(v) != "" {
+			return vm.callableDescriptorGet(v, None, t)
+		}
 		switch w := v.(type) {
-		case *ClassMethod:
-			return &BoundMethod{Fn: w.Fn, Recv: t}, nil
-		case *StaticMethod:
-			return w.Fn, nil
 		case *Instance:
 			if _, has := w.Class.Lookup("__get__"); has {
 				return vm.callDunder(w, "__get__", []Value{None, t})
@@ -1033,7 +1343,11 @@ func (vm *VM) getAttr(o Value, n string) (Value, error) {
 		case *Instance:
 			mro = obj.Class.MRO
 		case *Class:
-			mro = obj.MRO
+			if obj.IsSub(t.Cls) {
+				mro = obj.MRO
+			} else if obj.Meta != nil {
+				mro = obj.Meta.MRO
+			}
 		}
 		start := 0
 		for i, c := range mro {
@@ -1044,8 +1358,45 @@ func (vm *VM) getAttr(o Value, n string) (Value, error) {
 		}
 		for _, c := range mro[start:] {
 			if v, ok := c.NS[n]; ok {
+				if _, property := propertyValue(v); property {
+					return vm.propertyGet(v, t.Obj, c)
+				}
+				if callableDescriptorKind(v) != "" {
+					return vm.callableDescriptorGet(v, t.Obj, c)
+				}
+				if descriptor, ok := v.(*metadataDescriptor); ok && descriptor.storage != slotNone {
+					return descriptor.storageGet(vm, t.Obj)
+				}
+				if descriptor, ok := v.(*Instance); ok {
+					if _, has := descriptor.Class.Lookup("__get__"); has {
+						owner, err := ctorType(vm, []Value{t.Obj}, nil)
+						if err != nil {
+							return nil, err
+						}
+						return vm.callDunder(descriptor, "__get__", []Value{t.Obj, owner})
+					}
+				}
 				return vm.bindAttr(v, t.Obj, c), nil
 			}
+		}
+		if t.Cls.Prim != nil {
+			if value, err := vm.getAttr(t.Cls.Prim, n); err == nil {
+				if n == "__new__" {
+					return value, nil
+				}
+				return &BoundMethod{Fn: value, Recv: t.Obj}, nil
+			}
+		}
+		if n == "__new__" {
+			return vm.objectNewBuiltin(), nil
+		}
+		if descriptor := vm.objectMetadataDescriptor(n); descriptor != nil {
+			if descriptor.kind == "classmethod_descriptor" {
+				if instance, ok := t.Obj.(*Instance); ok {
+					return descriptor.bind(instance.Class), nil
+				}
+			}
+			return descriptor.bind(t.Obj), nil
 		}
 		return nil, newErrorf("AttributeError", "'super' object has no attribute '%s'", n)
 	case *Module:
@@ -1105,34 +1456,21 @@ func (vm *VM) getAttr(o Value, n string) (Value, error) {
 	case *File:
 		return t.method(n)
 	case *NativeObject:
-		if !strings.HasPrefix(n, ".") && !strings.HasPrefix(n, "__") {
+		if !strings.HasPrefix(n, ".") {
+			if value, ok := t.attrs[n]; ok {
+				return value, nil
+			}
+		}
+		if !strings.HasPrefix(n, ".") {
 			if m, ok := t.methods[n]; ok {
 				return m, nil
 			}
 		}
 		return nil, newErrorf("AttributeError", "'%s' object has no attribute '%s'", t.Kind, n)
 	case *Property:
-		switch n {
-		case "setter":
-			return bi("setter", func(vm *VM, a []Value, kw []KwArg) (Value, error) {
-				return &Property{Fget: t.Fget, Fset: a[0], Fdel: t.Fdel, Doc: t.Doc}, nil
-			}), nil
-		case "getter":
-			return bi("getter", func(vm *VM, a []Value, kw []KwArg) (Value, error) {
-				return &Property{Fget: a[0], Fset: t.Fset, Fdel: t.Fdel, Doc: t.Doc}, nil
-			}), nil
-		case "deleter":
-			return bi("deleter", func(vm *VM, a []Value, kw []KwArg) (Value, error) {
-				return &Property{Fget: t.Fget, Fset: t.Fset, Fdel: a[0], Doc: t.Doc}, nil
-			}), nil
-		case "fget":
-			return orNone(t.Fget), nil
-		case "fset":
-			return orNone(t.Fset), nil
-		case "fdel":
-			return orNone(t.Fdel), nil
-		}
-		return nil, newErrorf("AttributeError", "'property' object has no attribute '%s'", n)
+		return vm.propertyAttr(t, n)
+	case *StaticMethod, *ClassMethod:
+		return vm.callableDescriptorAttr(t, n)
 	case *Function:
 		if v, ok := t.attrs[n]; ok {
 			return v, nil
@@ -1140,8 +1478,6 @@ func (vm *VM) getAttr(o Value, n string) (Value, error) {
 		switch n {
 		case "__name__":
 			return funcName(t), nil
-		case "__doc__":
-			return orNone(t.attrs["__doc__"]), nil
 		case "__dict__":
 			d := NewDict()
 			for k, val := range t.attrs {
@@ -1200,6 +1536,56 @@ func (vm *VM) getAttr(o Value, n string) (Value, error) {
 		}
 		return nil, newErrorf("AttributeError", "'complex' object has no attribute '%s'", n)
 	case *BuiltinType:
+		if t.Name == "property" {
+			if value := vm.propertyTypeAttr(n); value != nil {
+				return value, nil
+			}
+		}
+		if t.Name == "staticmethod" || t.Name == "classmethod" {
+			if value := vm.callableDescriptorTypeAttr(t.Name, n); value != nil {
+				return value, nil
+			}
+		}
+		switch n {
+		case "__module__":
+			switch t.Name {
+			case "Scanner", "Encoder":
+				return "_json", nil
+			case "_abc_data":
+				return "_abc", nil
+			case "_HashEngine":
+				return "_diaspore_hash", nil
+			case "GenericAlias", "UnionType":
+				return "types", nil
+			default:
+				return "builtins", nil
+			}
+		case "__qualname__":
+			return t.Name, nil
+		case "__new__":
+			return vm.primitiveNew(t), nil
+		case "__mro__", "__bases__", "__base__":
+			value, _, err := vm.typeMetadataGet(t, n)
+			return value, err
+		case "__class__":
+			return vm.types["type"], nil
+		case "__prepare__":
+			if t.Name == "type" {
+				return bi(n, func(vm *VM, a []Value, kw []KwArg) (Value, error) { return NewDict(), nil }), nil
+			}
+		case "__init__":
+			if t.Name == "type" {
+				return bi(n, func(vm *VM, a []Value, kw []KwArg) (Value, error) {
+					if err := argCount("type.__init__", a, 2, 4); err != nil {
+						return nil, err
+					}
+					return None, nil
+				}), nil
+			}
+		}
+		if t.Name == "int" && n == "from_bytes" {
+			return bi("from_bytes", intFromBytes), nil
+		}
 		if n == "__name__" {
 			return t.Name, nil
 		}
@@ -1230,10 +1616,42 @@ func funcName(f *Function) string {
 
 // numericAttr handles int/float attribute access (real/imag/conjugate/...).
 func (vm *VM) numericAttr(o Value, n string) Value {
-	_, isInt := o.(int64)
-	_, isBool := o.(bool)
+	if (n == "__index__" || n == "__int__") && isIntKind(o) {
+		return bi(n, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs(n, args, kw); err != nil {
+				return nil, err
+			}
+			if value, ok := asInt(o); ok {
+				return value, nil
+			}
+			return o, nil
+		})
+	}
+	if kind := unaryMethodKind(n); kind != "" && isNumber(o) && (kind != "invert" || isIntKind(o)) {
+		return bi(n, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs(n, args, kw); err != nil {
+				return nil, err
+			}
+			return vm.unary(kind, o)
+		})
+	}
+	if (n == "__abs__" || n == "__hash__") && isNumber(o) {
+		return bi(n, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs(n, args, kw); err != nil {
+				return nil, err
+			}
+			if n == "__hash__" {
+				return hashValue(o)
+			}
+			return biAbs(vm, []Value{o}, nil)
+		})
+	}
+	if n == "to_bytes" && isIntKind(o) {
+		return bi(n, func(vm *VM, args []Value, kw []KwArg) (Value, error) { return intToBytes(vm, o, args, kw) })
+	}
+	isInt := isIntKind(o)
 	fv, isFloat := o.(float64)
-	if !isInt && !isBool && !isFloat {
+	if !isInt && !isFloat {
 		return nil
 	}
 	switch n {
@@ -1256,22 +1674,33 @@ func (vm *VM) numericAttr(o Value, n string) Value {
 			return nil
 		}
 		return mkInt(1)
-	case "bit_length":
+	case "bit_length", "bit_count":
 		if isFloat {
 			return nil
 		}
-		iv, _ := asInt(o)
-		return bi("bit_length", func(vm *VM, a []Value, kw []KwArg) (Value, error) {
-			x := iv
-			if x < 0 {
-				x = -x
+		return bi(n, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs(n, args, kw); err != nil {
+				return nil, err
 			}
-			n := int64(0)
-			for x > 0 {
-				n++
-				x >>= 1
+			if value, ok := o.(*big.Int); ok {
+				if n == "bit_length" {
+					return int64(value.BitLen()), nil
+				}
+				count := 0
+				for _, word := range value.Bits() {
+					count += bits.OnesCount(uint(word))
+				}
+				return int64(count), nil
 			}
-			return mkInt(n), nil
+			value, _ := asInt(o)
+			magnitude := uint64(value)
+			if value < 0 {
+				magnitude = -magnitude
+			}
+			if n == "bit_count" {
+				return int64(bits.OnesCount64(magnitude)), nil
+			}
+			return int64(bits.Len64(magnitude)), nil
 		})
 	case "is_integer":
 		if !isFloat {
@@ -1285,6 +1714,17 @@ func (vm *VM) numericAttr(o Value, n string) Value {
 }
 
 func (vm *VM) setAttr(o Value, n string, v Value) error {
+	if _, instance := o.(*Instance); !instance {
+		if handled, err := vm.propertySetAttr(o, n, v, false); handled {
+			return err
+		}
+		if handled, err := vm.callableDescriptorSetAttr(o, n, v, false); handled {
+			return err
+		}
+	}
+	if handled, err := vm.metadataSetAttr(o, n, v); handled {
+		return err
+	}
 	switch t := o.(type) {
 	case *Function:
 		if n == "__name__" {
@@ -1308,8 +1748,8 @@ func (vm *VM) setAttr(o Value, n string, v Value) error {
 		}
 		return vm.baseSetAttr(t, n, v)
 	case *Class:
-		if t == objectClass || excClasses[t.Name] == t {
-			return newErrorf("TypeError", "cannot set attributes of immutable type '%s'", t.Name)
+		if t.nativeImmutable || t == objectClass || excClasses[t.Name] == t {
+			return newErrorf("TypeError", "cannot set '%s' attribute of immutable type '%s'", n, t.diagnosticName())
 		}
 		if _, ok := t.NS[n]; !ok {
 			t.dictOrder = append(t.dictOrder, n)
@@ -1318,6 +1758,9 @@ func (vm *VM) setAttr(o Value, n string, v Value) error {
 		if n == "__setattr__" || n == "__delattr__" {
 			t.invalidateAttributeHooks()
 		}
+		return nil
+	case *NativeModule:
+		t.NS[n] = v
 		return nil
 	case *Module:
 		c, ok := t.frame.cells[n]
@@ -1332,15 +1775,21 @@ func (vm *VM) setAttr(o Value, n string, v Value) error {
 }
 
 func (vm *VM) baseSetAttr(t *Instance, n string, v Value) error {
+	if handled, err := vm.propertySetAttr(t, n, v, false); handled {
+		return err
+	}
+	if handled, err := vm.callableDescriptorSetAttr(t, n, v, false); handled {
+		return err
+	}
 	if descriptor, ok := t.Class.Lookup(n); ok {
+		if _, property := propertyValue(descriptor); property {
+			return vm.propertySet(descriptor, t, v)
+		}
 		switch p := descriptor.(type) {
-		case *Property:
-			if p.Fset == nil {
-				return newErrorf("AttributeError",
-					"property '%s' of '%s' object has no setter", n, t.Class.Name)
+		case *metadataDescriptor:
+			if p.storage != slotNone {
+				return p.storageSet(vm, t, v, false)
 			}
-			_, err := vm.call(vm.bindAttr(p.Fset, t, t.Class), []Value{v}, nil)
-			return err
 		case *Instance:
 			if _, ok := p.Class.Lookup("__set__"); ok {
 				_, err := vm.callDunder(p, "__set__", []Value{t, v})
@@ -1351,20 +1800,28 @@ func (vm *VM) baseSetAttr(t *Instance, n string, v Value) error {
 			}
 		}
 	}
-	t.D[n] = v
-	return nil
+	if n == "__dict__" && instanceHasDict(t.Class) {
+		return vm.replaceInstanceDictionary(t, v)
+	}
+	return vm.instanceStore(t, n, v)
 }
 
 func (vm *VM) baseDelAttr(t *Instance, n string) error {
+	if handled, err := vm.propertySetAttr(t, n, nil, true); handled {
+		return err
+	}
+	if handled, err := vm.callableDescriptorSetAttr(t, n, nil, true); handled {
+		return err
+	}
 	if descriptor, ok := t.Class.Lookup(n); ok {
+		if _, property := propertyValue(descriptor); property {
+			return vm.propertyDelete(descriptor, t)
+		}
 		switch p := descriptor.(type) {
-		case *Property:
-			if p.Fdel == nil {
-				return newErrorf("AttributeError",
-					"property '%s' of '%s' object has no deleter", n, t.Class.Name)
+		case *metadataDescriptor:
+			if p.storage != slotNone {
+				return p.storageSet(vm, t, nil, true)
 			}
-			_, err := vm.call(vm.bindAttr(p.Fdel, t, t.Class), nil, nil)
-			return err
 		case *Instance:
 			if _, ok := p.Class.Lookup("__delete__"); ok {
 				_, err := vm.callDunder(p, "__delete__", []Value{t})
@@ -1375,14 +1832,25 @@ func (vm *VM) baseDelAttr(t *Instance, n string) error {
 			}
 		}
 	}
-	if _, ok := t.D[n]; ok {
-		delete(t.D, n)
+	if n == "__dict__" && instanceHasDict(t.Class) {
+		t.dictionary = nil
 		return nil
 	}
-	return newErrorf("AttributeError", "'%s' object has no attribute '%s'", t.Class.Name, n)
+	return vm.instanceDelete(t, n)
 }
 
 func (vm *VM) delAttr(o Value, n string) error {
+	if _, instance := o.(*Instance); !instance {
+		if handled, err := vm.propertySetAttr(o, n, nil, true); handled {
+			return err
+		}
+		if handled, err := vm.callableDescriptorSetAttr(o, n, nil, true); handled {
+			return err
+		}
+	}
+	if handled, err := vm.metadataDelAttr(o, n); handled {
+		return err
+	}
 	switch t := o.(type) {
 	case *Instance:
 		t.Class.attributeHooks()
@@ -1392,8 +1860,8 @@ func (vm *VM) delAttr(o Value, n string) error {
 		}
 		return vm.baseDelAttr(t, n)
 	case *Class:
-		if t == objectClass || excClasses[t.Name] == t {
-			return newErrorf("TypeError", "cannot delete attributes of immutable type '%s'", t.Name)
+		if t.nativeImmutable || t == objectClass || excClasses[t.Name] == t {
+			return newErrorf("TypeError", "cannot delete '%s' attribute of immutable type '%s'", n, t.diagnosticName())
 		}
 		if _, ok := t.NS[n]; ok {
 			delete(t.NS, n)
@@ -1413,6 +1881,11 @@ func (vm *VM) delAttr(o Value, n string) error {
 			delete(t.attrs, n)
 			return nil
 		}
+	case *NativeModule:
+		if _, present := t.NS[n]; present {
+			delete(t.NS, n)
+			return nil
+		}
 	case *Module:
 		if c, ok := t.frame.cells[n]; ok && c.v != nil {
 			c.v = nil
@@ -1427,18 +1900,13 @@ func (vm *VM) delAttr(o Value, n string) error {
 // called as metaclass(name, bases_tuple, ns_dict, **kwargs); otherwise class
 // kwargs dispatch to the nearest base's __init_subclass__.
 func (vm *VM) buildClass(name string, bases []*Class, ns map[string]Value,
-	nsOrder []string, metaclass Value, kwargs []KwArg, primBase *BuiltinType, primIndex int) (Value, error) {
+	nsOrder []string, metaclass Value, kwargs []KwArg, primBase *BuiltinType, primIndex int, rawMeta ...*Class) (Value, error) {
 	plainMeta := metaclass == nil
 	if bt, ok := metaclass.(*BuiltinType); ok && bt.Name == "type" {
 		plainMeta = true
 	}
-	if mc, ok := metaclass.(*Class); ok {
-		_, hasNew := mc.Lookup("__new__")
-		_, hasCall := mc.Lookup("__call__")
-		_, hasInit := mc.Lookup("__init__")
-		if !hasNew && !hasCall && !hasInit {
-			plainMeta = true
-		}
+	if mc, ok := metaclass.(*Class); ok && mc.Prim != nil && mc.Prim.Name == "type" {
+		plainMeta = false
 	}
 	if !plainMeta {
 		baseVals := baseValues(bases, primBase, primIndex)
@@ -1463,8 +1931,27 @@ func (vm *VM) buildClass(name string, bases []*Class, ns map[string]Value,
 			nsOrder = append(nsOrder, "__hash__")
 		}
 	}
+	if constructor, ok := ns["__new__"].(*Function); ok {
+		wrapped, err := ctorStaticMethod(vm, []Value{constructor}, nil)
+		if err != nil {
+			return nil, err
+		}
+		ns["__new__"] = wrapped
+	}
+	for _, method := range []string{"__init_subclass__", "__class_getitem__"} {
+		if function, ok := ns[method].(*Function); ok {
+			wrapped, err := ctorClassMethod(vm, []Value{function}, nil)
+			if err != nil {
+				return nil, err
+			}
+			ns[method] = wrapped
+		}
+	}
 	cls := &Class{Name: name, Bases: bases, NS: ns, Prim: primBase, vm: vm,
 		directPrim: primBase, primIndex: primIndex}
+	if len(rawMeta) != 0 {
+		cls.Meta = rawMeta[0]
+	}
 	if cls.Prim == nil {
 		for _, b := range bases {
 			if b.Prim != nil {
@@ -1489,16 +1976,32 @@ func (vm *VM) buildClass(name string, bases []*Class, ns map[string]Value,
 	}
 	cls.MRO = mro
 	cls.dictOrder = nsOrder
+	if err := vm.initializeSlots(cls); err != nil {
+		return nil, err
+	}
+	if _, documented := ns["__doc__"]; !documented {
+		ns["__doc__"] = None
+		cls.dictOrder = append(cls.dictOrder, "__doc__")
+	}
 	for _, base := range bases {
+		if cls.abcFlags&96 == 0 {
+			cls.abcFlags |= base.abcFlags & 96
+		}
 		if base != objectClass && excClasses[base.Name] != base {
 			base.subclasses = append(base.subclasses, cls)
 		}
 	}
 	for _, v := range cls.NS {
-		switch t := v.(type) {
+		switch t := rawPrim(v).(type) {
 		case *Function:
 			if t.defclass == nil {
 				t.defclass = cls
+			}
+		case *Property:
+			for _, accessor := range []Value{t.Fget, t.Fset, t.Fdel} {
+				if fn, ok := accessor.(*Function); ok && fn.defclass == nil {
+					fn.defclass = cls
+				}
 			}
 		case *StaticMethod:
 			if fn, ok := t.Fn.(*Function); ok && fn.defclass == nil {
@@ -1510,7 +2013,47 @@ func (vm *VM) buildClass(name string, bases []*Class, ns map[string]Value,
 			}
 		}
 	}
-	if len(kwargs) > 0 {
+	var named []KwArg
+	for _, key := range nsOrder {
+		value := ns[key]
+		_, hasHook := propertyValue(value)
+		if descriptor, ok := value.(*Instance); ok {
+			_, hasHook = descriptor.Class.Lookup("__set_name__")
+			if _, property := propertyValue(value); property {
+				hasHook = true
+			}
+		}
+		if hasHook {
+			// Hooks may delete, replace or append class attributes. Capture
+			// both names and values before invoking the first callback.
+			named = make([]KwArg, len(nsOrder))
+			for index, name := range nsOrder {
+				named[index] = KwArg{Name: name, Val: ns[name]}
+			}
+			break
+		}
+	}
+	for _, entry := range named {
+		key, value := entry.Name, entry.Val
+		if _, property := propertyValue(value); property {
+			method, err := vm.getAttr(value, "__set_name__")
+			if err != nil {
+				return nil, err
+			}
+			if _, err := vm.call(method, []Value{cls, key}, nil); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if descriptor, ok := value.(*Instance); ok {
+			if _, has := descriptor.Class.Lookup("__set_name__"); has {
+				if _, err := vm.callDunder(descriptor, "__set_name__", []Value{cls, key}); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	{
 		for _, base := range bases {
 			initSub, ok := base.Lookup("__init_subclass__")
 			if !ok {
@@ -1524,8 +2067,9 @@ func (vm *VM) buildClass(name string, bases []*Class, ns map[string]Value,
 			}
 			return cls, nil
 		}
-		return nil, newErrorf("TypeError",
-			"%s.__init_subclass__() takes no keyword arguments", name)
+		if len(kwargs) > 0 {
+			return nil, newErrorf("TypeError", "%s.__init_subclass__() takes no keyword arguments", name)
+		}
 	}
 	return cls, nil
 }
@@ -1603,7 +2147,7 @@ func (vm *VM) splitGroup(exc Value, t Value) (match Value, rest Value, err error
 	inst, ok := exc.(*Instance)
 	if ok && inst.Class.IsSub(excClasses["BaseExceptionGroup"]) {
 		var members []Value
-		if tup, ok := inst.D["exceptions"].(*Tuple); ok {
+		if tup, ok := inst.dictValue("exceptions").(*Tuple); ok {
 			members = tup.Items
 		}
 		var matched, unmatched []Value
@@ -1617,7 +2161,7 @@ func (vm *VM) splitGroup(exc Value, t Value) (match Value, rest Value, err error
 		if len(matched) == 0 {
 			return nil, exc, nil
 		}
-		msg, _ := inst.D["message"].(string)
+		msg, _ := inst.dictValue("message").(string)
 		mg := makeGroup(msg, matched, false)
 		if len(unmatched) > 0 {
 			return mg, makeGroup(msg, unmatched, false), nil
@@ -1646,4 +2190,78 @@ func (vm *VM) requireCap(cap string) error {
 			"diaspore: capability '%s' not granted (run with --allow-%s)", cap, cap)
 	}
 	return nil
+}
+
+func (vm *VM) baseGetAttr(t *Instance, n string) (Value, error) {
+	v, found := t.Class.Lookup(n)
+	if !found && n == "__class__" {
+		return t.Class, nil
+	}
+	if descriptor, ok := v.(*metadataDescriptor); ok && descriptor.storage != slotNone {
+		return descriptor.storageGet(vm, t)
+	}
+	if _, property := propertyValue(v); property {
+		return vm.propertyGet(v, t, t.Class)
+	}
+	if descriptor, ok := v.(*Instance); ok {
+		_, sets := descriptor.Class.Lookup("__set__")
+		_, deletes := descriptor.Class.Lookup("__delete__")
+		if sets || deletes {
+			if _, gets := descriptor.Class.Lookup("__get__"); gets {
+				return vm.callDunder(descriptor, "__get__", []Value{t, t.Class})
+			}
+		}
+	}
+	if !found {
+		switch n {
+		case "fget", "fset", "fdel", "__isabstractmethod__":
+			if _, property := propertyValue(t); property {
+				return vm.propertyAttr(t, n)
+			}
+		}
+		switch n {
+		case "__func__", "__wrapped__", "__isabstractmethod__":
+			if callableDescriptorKind(t) != "" {
+				return vm.callableDescriptorAttr(t, n)
+			}
+		}
+	}
+	if value, found, err := vm.instanceLookup(t, n); err != nil || found {
+		return value, err
+	}
+	if builtin, native := v.(*Builtin); native && t.Class.Prim != nil && objectClass.NS[n] == builtin {
+		if value, handled, err := vm.metadataAttr(t, n); handled {
+			return value, err
+		}
+	}
+	if found {
+		if callableDescriptorKind(v) != "" {
+			return vm.callableDescriptorGet(v, t, t.Class)
+		}
+		if descriptor, ok := v.(*Instance); ok {
+			if _, has := descriptor.Class.Lookup("__get__"); has {
+				return vm.callDunder(descriptor, "__get__", []Value{t, t.Class})
+			}
+		}
+		return vm.bindAttr(v, t, t.Class), nil
+	}
+	if n == "__dict__" {
+		return vm.instanceDictionary(t)
+	}
+	if value, handled, err := vm.metadataAttr(t, n); handled {
+		return value, err
+	}
+	if t.Prim != nil {
+		if _, property := propertyValue(t); property {
+			return vm.propertyAttr(t, n)
+		}
+		if callableDescriptorKind(t) != "" {
+			return vm.callableDescriptorAttr(t, n)
+		}
+		if m, err := vm.getAttr(t.Prim, n); err == nil {
+			return m, nil
+		}
+	}
+	return nil, newErrorf("AttributeError", "'%s' object has no attribute '%s'",
+		t.Class.diagnosticName(), n)
 }

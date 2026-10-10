@@ -3,7 +3,8 @@ datagrams
 file descriptor constructor
 connection timeout
 source address
-aggregated errors
+aggregated errors create_connection failed ['controlled connection failure', 'controlled connection failure'] 2
+last connection error controlled connection failure 2
 timeout
 zero timeout
 nonblocking

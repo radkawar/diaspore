@@ -26,6 +26,7 @@ class Codec:
         decode: Function that returns a bundle from container bytes.
         encode: Function accepting a bundle and pretty-print flag.
     """
+
     name: str
     extensions: tuple[str, ...]
     sniff: Callable[[bytes], bool]
@@ -35,9 +36,8 @@ class Codec:
 
 def _json_encode(bundle: dict, pretty: bool) -> bytes:
     if pretty:
-        return (json.dumps(bundle, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-    return (json.dumps(bundle, separators=(",", ":"), ensure_ascii=False)
-            + "\n").encode("utf-8")
+        return (json.dumps(bundle, indent=2, ensure_ascii=True) + "\n").encode("utf-8")
+    return (json.dumps(bundle, separators=(",", ":"), ensure_ascii=True) + "\n").encode("utf-8")
 
 
 JSON_CODEC = Codec(
@@ -61,18 +61,20 @@ GZIP_CODEC = Codec(
 
 def _dspb_encode(bundle: dict, pretty: bool) -> bytes:
     from . import dspb
+
     return dspb.encode(bundle)
 
 
 def _dspb_decode(data: bytes) -> dict:
     from . import dspb
+
     return dspb.decode(data)
 
 
 DSPB_CODEC = Codec(
     name="dspb",
     extensions=(".dspb",),
-    sniff=lambda b: b.startswith(b"DSPB01"),
+    sniff=lambda b: b.startswith((b"DSPB01", b"DSPB02")),
     decode=_dspb_decode,
     encode=_dspb_encode,
 )

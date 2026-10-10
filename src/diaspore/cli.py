@@ -29,7 +29,8 @@ def _caps_and_policy(args: argparse.Namespace) -> tuple[set, dict | None]:
                         f"diaspore: bad --allow-net spec {spec!r} "
                         f"(use listen:HOST:PORT or connect:HOST:PORT; if you meant "
                         f"a bare grant, put --allow-net after the target or use "
-                        f"--allow-net=all)")
+                        f"--allow-net=all)"
+                    )
                 pol[kind].append(addr)
             policy["net"] = pol
     if args.allow_fs:
@@ -42,8 +43,8 @@ def _caps_and_policy(args: argparse.Namespace) -> tuple[set, dict | None]:
                 kind, _, path = spec.partition(":")
                 if kind not in pol or not path:
                     raise SystemExit(
-                        f"diaspore: bad --allow-fs spec {spec!r} "
-                        f"(use read:PATH or write:PATH)")
+                        f"diaspore: bad --allow-fs spec {spec!r} (use read:PATH or write:PATH)"
+                    )
                 pol[kind].append(path)
             policy["fs"] = pol
     if args.allow_spawn:
@@ -54,19 +55,32 @@ def _caps_and_policy(args: argparse.Namespace) -> tuple[set, dict | None]:
 def _finish_durable(outcome, snapshot_path: str) -> int:
     if isinstance(outcome, Suspended):
         Path(snapshot_path).write_text(json.dumps(outcome.snapshot), encoding="utf-8")
-        print(f"diaspore: suspended (payload: {json.dumps(outcome.payload)}); "
-              f"snapshot -> {snapshot_path}", file=sys.stderr)
+        print(
+            f"diaspore: suspended (payload: {json.dumps(outcome.payload)}); "
+            f"snapshot -> {snapshot_path}",
+            file=sys.stderr,
+        )
         return 7
     return outcome.code
 
 
-def _load_bundle(target: str, validate: bool, bindings: list[str] | None = None,
-                 search_paths: list[str] | None = None) -> dict:
+def _load_bundle(
+    target: str,
+    validate: bool,
+    bindings: list[str] | None = None,
+    search_paths: list[str] | None = None,
+    self_contained: bool = False,
+) -> dict:
     path = Path(target)
     if path.suffix == ".py":
         # Embed source so in-memory compilation retains readable tracebacks.
-        bundle = compile_bundle(str(path), extra_modules=set(bindings or ()), debug=True,
-                                search_paths=search_paths)
+        bundle = compile_bundle(
+            str(path),
+            extra_modules=set(bindings or ()),
+            debug=True,
+            search_paths=search_paths or (),
+            self_contained=self_contained,
+        )
     else:
         bundle = load_bundle_file(path)
     if validate:
@@ -83,14 +97,21 @@ def cmd_build(args: argparse.Namespace) -> int:
     Returns:
         Zero on success.
     """
-    bundle = compile_bundle(args.entry, extra_modules=set(args.binding),
-                            debug=args.debug, search_paths=args.path)
+    bundle = compile_bundle(
+        args.entry,
+        extra_modules=set(args.binding),
+        debug=args.debug,
+        search_paths=args.path,
+        self_contained=args.self_contained,
+    )
     validate_bundle(bundle)
     out = args.output or str(Path(args.entry).with_suffix(".dsp.json"))
     size = write_bundle_file(bundle, out, pretty=args.pretty)
     n_modules = len(bundle["modules"])
-    print(f"diaspore: built {out} ({n_modules} module{'s' if n_modules != 1 else ''}, "
-          f"{size} bytes)", file=sys.stderr)
+    print(
+        f"diaspore: built {out} ({n_modules} module{'s' if n_modules != 1 else ''}, {size} bytes)",
+        file=sys.stderr,
+    )
     return 0
 
 
@@ -104,12 +125,19 @@ def cmd_check(args: argparse.Namespace) -> int:
         Zero on success.
     """
     unresolved: dict = {}
-    bundle = compile_bundle(args.entry, extra_modules=set(args.binding),
-                            unresolved_out=unresolved, search_paths=args.path)
+    bundle = compile_bundle(
+        args.entry,
+        extra_modules=set(args.binding),
+        unresolved_out=unresolved,
+        search_paths=args.path,
+        self_contained=args.self_contained,
+    )
     validate_bundle(bundle)
     for dep, src in unresolved.items():
-        print(f"diaspore: warning: import {dep!r} (from {src}) will raise "
-              f"ImportError if executed", file=sys.stderr)
+        print(
+            f"diaspore: warning: import {dep!r} (from {src}) will raise ImportError if executed",
+            file=sys.stderr,
+        )
     print(f"diaspore: ok ({', '.join(sorted(bundle['modules']))})", file=sys.stderr)
     return 0
 
@@ -123,23 +151,34 @@ def cmd_run(args: argparse.Namespace) -> int:
     Returns:
         The program exit code, or seven when execution suspends.
     """
-    bundle = _load_bundle(args.target, validate=not args.no_validate,
-                          bindings=args.binding, search_paths=args.path)
-    caps, policy = _caps_and_policy(args)
-    m = Machine(
-        bundle,
-        argv=[args.target, *args.args],
-        caps=caps,
-        policy=policy,
-        max_steps=args.max_steps,
-        max_depth=args.max_depth,
-        durable=args.durable,
-        deterministic=args.deterministic,
+    bundle = _load_bundle(
+        args.target,
+        validate=not args.no_validate,
+        bindings=args.binding,
+        search_paths=args.path,
+        self_contained=args.self_contained,
     )
-    if args.durable:
-        snap = args.snapshot or f"{args.target}.flow.json"
-        return _finish_durable(m.run_durable(), snap)
-    return m.run()
+    caps, policy = _caps_and_policy(args)
+    try:
+        m = Machine(
+            bundle,
+            argv=[args.target, *args.args],
+            caps=caps,
+            policy=policy,
+            max_steps=args.max_steps,
+            max_depth=args.max_depth,
+            durable=args.durable,
+            deterministic=args.deterministic,
+        )
+    except ValueError as e:
+        raise SystemExit(f"diaspore: {e}") from None
+    try:
+        if args.durable:
+            snap = args.snapshot or f"{args.target}.flow.json"
+            return _finish_durable(m.run_durable(), snap)
+        return m.run()
+    finally:
+        m.close()
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
@@ -162,9 +201,17 @@ def cmd_resume(args: argparse.Namespace) -> int:
     except json.JSONDecodeError:
         raise SystemExit(f"diaspore: --send must be JSON (got {args.send!r})") from None
     try:
-        m = Machine(bundle, argv=snapshot.get("argv") or None, durable=True,
-                    max_steps=args.max_steps, max_depth=args.max_depth)
-        outcome = m.resume(snapshot, send)
+        m = Machine(
+            bundle,
+            argv=snapshot.get("argv") or None,
+            durable=True,
+            max_steps=args.max_steps,
+            max_depth=args.max_depth,
+        )
+        try:
+            outcome = m.resume(snapshot, send)
+        finally:
+            m.close()
     except ValueError as e:
         raise SystemExit(f"diaspore: {e}") from None
     out = args.snapshot or args.snapshot_in
@@ -183,8 +230,11 @@ def cmd_schema(args: argparse.Namespace) -> int:
     try:
         from .ir import bundle_schema  # Keep Pydantic optional for other commands.
     except ImportError:
-        print("diaspore: schema export needs the dev tools: uv sync --group dev "
-              "(runtime validation itself is dependency-free)", file=sys.stderr)
+        print(
+            "diaspore: schema export needs the dev tools: uv sync --group dev "
+            "(runtime validation itself is dependency-free)",
+            file=sys.stderr,
+        )
         return 2
     text = json.dumps(bundle_schema(), indent=2)
     if args.output:
@@ -205,7 +255,7 @@ def cmd_dis(args: argparse.Namespace) -> int:
         Zero on success.
     """
     bundle = _load_bundle(args.target, validate=True)
-    print(json.dumps(bundle, indent=2, ensure_ascii=False))
+    print(json.dumps(bundle, indent=2, ensure_ascii=True))
     return 0
 
 
@@ -220,6 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Compile a Python subset to portable JSON; run it in a sandboxed VM.",
     )
     from . import __version__
+
     p.add_argument("--version", action="version", version=f"diaspore {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -227,55 +278,122 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("entry")
     b.add_argument("-o", "--output")
     b.add_argument("--pretty", action="store_true", help="indented JSON output")
-    b.add_argument("--binding", action="append", default=[], metavar="NAME",
-                   help="declare a host-binding module (repeatable)")
-    b.add_argument("--path", action="append", default=[], metavar="DIR",
-                   help="add a module search directory (repeatable)")
-    b.add_argument("--debug", action="store_true",
-                   help="embed source lines for source-mapped tracebacks")
+    b.add_argument(
+        "--binding",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="declare a host-binding module (repeatable)",
+    )
+    b.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="add a module search directory (repeatable)",
+    )
+    b.add_argument(
+        "--debug", action="store_true", help="embed source lines for source-mapped tracebacks"
+    )
+    b.add_argument(
+        "--self-contained",
+        action="store_true",
+        help="embed reachable stdlib modules instead of linking the installed stdlib",
+    )
     b.set_defaults(fn=cmd_build)
 
     c = sub.add_parser("check", help="compile + validate without writing output")
     c.add_argument("entry")
     c.add_argument("--binding", action="append", default=[], metavar="NAME")
-    c.add_argument("--path", action="append", default=[], metavar="DIR",
-                   help="add a module search directory (repeatable)")
+    c.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="add a module search directory (repeatable)",
+    )
+    c.add_argument(
+        "--self-contained",
+        action="store_true",
+        help="check with reachable stdlib modules embedded instead of linked",
+    )
     c.set_defaults(fn=cmd_check)
 
     r = sub.add_parser("run", help="run a .dsp.json bundle (or a .py, compiled in-memory)")
     r.add_argument("target")
     r.add_argument("args", nargs="*", help="argv for the program (after --)")
-    r.add_argument("--allow-net", nargs="?", const="all", action="append", default=[],
-                   metavar="SPEC",
-                   help="grant net; optionally scoped (listen:HOST:PORT / "
-                        "connect:HOST:PORT, '*' wildcards; repeatable)")
-    r.add_argument("--allow-fs", nargs="?", const="all", action="append", default=[],
-                   metavar="SPEC",
-                   help="grant fs; optionally scoped (read:PATH / write:PATH; repeatable)")
-    r.add_argument("--allow-spawn", action="store_true",
-                   help="grant the 'spawn' capability (tasks module)")
+    r.add_argument(
+        "--allow-net",
+        nargs="?",
+        const="all",
+        action="append",
+        default=[],
+        metavar="SPEC",
+        help="grant net; optionally scoped (listen:HOST:PORT / "
+        "connect:HOST:PORT, '*' wildcards; repeatable)",
+    )
+    r.add_argument(
+        "--allow-fs",
+        nargs="?",
+        const="all",
+        action="append",
+        default=[],
+        metavar="SPEC",
+        help="grant fs; optionally scoped (read:PATH / write:PATH; repeatable)",
+    )
+    r.add_argument(
+        "--allow-spawn", action="store_true", help="grant the 'spawn' capability (tasks module)"
+    )
     r.add_argument("--max-steps", type=int, default=None, help="step budget (trap on exhaustion)")
     r.add_argument("--max-depth", type=int, default=1000, help="max diaspore recursion depth")
     r.add_argument("--no-validate", action="store_true", help="skip IR schema validation")
-    r.add_argument("--binding", action="append", default=[], metavar="NAME",
-                   help="declare a host-binding module (repeatable; .py targets only)")
-    r.add_argument("--path", action="append", default=[], metavar="DIR",
-                   help="add a module search directory (repeatable; .py targets only)")
-    r.add_argument("--durable", action="store_true",
-                   help="durable run: flow.suspend() pauses to a portable snapshot")
-    r.add_argument("--snapshot", metavar="PATH",
-                   help="where to write the snapshot on suspend (default: TARGET.flow.json)")
-    r.add_argument("--deterministic", action="store_true",
-                   help="logical clock + seeded random (replayable runs)")
+    r.add_argument(
+        "--binding",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="declare a host-binding module (repeatable; .py targets only)",
+    )
+    r.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="add a module search directory (repeatable; .py targets only)",
+    )
+    r.add_argument(
+        "--self-contained",
+        action="store_true",
+        help="embed reachable stdlib modules instead of linking (.py targets only)",
+    )
+    r.add_argument(
+        "--durable",
+        action="store_true",
+        help="durable run: flow.suspend() pauses to a portable snapshot",
+    )
+    r.add_argument(
+        "--snapshot",
+        metavar="PATH",
+        help="where to write the snapshot on suspend (default: TARGET.flow.json)",
+    )
+    r.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="logical clock + seeded random (replayable runs)",
+    )
     r.set_defaults(fn=cmd_run)
 
     z = sub.add_parser("resume", help="resume a suspended durable run from its snapshot")
     z.add_argument("bundle", help="the same bundle the snapshot was taken from")
     z.add_argument("snapshot_in", metavar="snapshot", help="snapshot file from a suspended run")
-    z.add_argument("--send", metavar="JSON",
-                   help="value returned by the pending flow.suspend() (default null)")
-    z.add_argument("--snapshot", metavar="PATH",
-                   help="snapshot output on re-suspend (default: overwrite input)")
+    z.add_argument(
+        "--send", metavar="JSON", help="value returned by the pending flow.suspend() (default null)"
+    )
+    z.add_argument(
+        "--snapshot",
+        metavar="PATH",
+        help="snapshot output on re-suspend (default: overwrite input)",
+    )
     z.add_argument("--max-steps", type=int, default=None)
     z.add_argument("--max-depth", type=int, default=1000)
     z.add_argument("--no-validate", action="store_true")
@@ -305,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
     prog_args: list[str] = []
     if "--" in argv:
         cut = argv.index("--")
-        argv, prog_args = argv[:cut], argv[cut + 1:]
+        argv, prog_args = argv[:cut], argv[cut + 1 :]
     args = build_parser().parse_args(argv)
     if hasattr(args, "args"):
         args.args = list(args.args) + prog_args

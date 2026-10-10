@@ -1,7 +1,7 @@
 import {highlight, escapeHTML} from './common.js';
-import {ready, isReady, invoke} from './runtime.js';
+import {ready, isReady, invoke, compile} from './runtime.js';
 import {shareLink, restoreLink} from './share.js';
-import {stdlib, install} from './packages.js';
+import {install} from './packages.js';
 
 const $ = id => document.getElementById(id);
 const source = $('source'), paint = $('highlight'), marker = document.querySelector('.source-line');
@@ -136,7 +136,7 @@ async function debug() {
   $('trace-state').textContent = 'Running...';
   $('debug').textContent = 'Running...';
   try {
-    const compiled = await invoke('compile', source.value, JSON.stringify(files));
+    const compiled = await compile(source.value, files);
     if (compiled.code !== 0) {
       $('output').textContent = compiled.stderr;
       $('trace-state').textContent = 'Compile error';
@@ -210,7 +210,7 @@ $('share').onclick = async () => {
 source.value = examples.recursion;
 repaint();
 try {
-  await Promise.all([ready, stdlib().then(shims => Object.assign(files, shims))]);
+  await ready;
   const shared = await restoreLink();
   if (shared) {
     source.value = shared.source;

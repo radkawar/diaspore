@@ -1,0 +1,5771 @@
+{
+  "external_imports": [
+    "__main__",
+    "_abc",
+    "_ast",
+    "_asyncio",
+    "_bisect",
+    "_blake2",
+    "_bz2",
+    "_codecs",
+    "_codecs_cn",
+    "_codecs_hk",
+    "_codecs_iso2022",
+    "_codecs_jp",
+    "_codecs_kr",
+    "_codecs_tw",
+    "_collections",
+    "_contextvars",
+    "_csv",
+    "_ctypes",
+    "_datetime",
+    "_decimal",
+    "_elementtree",
+    "_frozen_importlib",
+    "_frozen_importlib_external",
+    "_functools",
+    "_hashlib",
+    "_heapq",
+    "_imp",
+    "_io",
+    "_json",
+    "_locale",
+    "_lzma",
+    "_md5",
+    "_multibytecodec",
+    "_multiprocessing",
+    "_opcode",
+    "_operator",
+    "_overlapped",
+    "_pickle",
+    "_posixshmem",
+    "_posixsubprocess",
+    "_queue",
+    "_random",
+    "_scproxy",
+    "_sha1",
+    "_sha2",
+    "_sha3",
+    "_signal",
+    "_socket",
+    "_ssl",
+    "_stat",
+    "_statistics",
+    "_string",
+    "_struct",
+    "_thread",
+    "_tokenize",
+    "_tracemalloc",
+    "_typing",
+    "_warnings",
+    "_weakref",
+    "_winapi",
+    "_winreg",
+    "_wmi",
+    "array",
+    "atexit",
+    "binascii",
+    "builtins",
+    "errno",
+    "fcntl",
+    "gc",
+    "grp",
+    "itertools",
+    "java.lang",
+    "marshal",
+    "math",
+    "mmap",
+    "msvcrt",
+    "nt",
+    "os.path",
+    "posix",
+    "pwd",
+    "pyexpat",
+    "re",
+    "readline",
+    "select",
+    "sys",
+    "termios",
+    "test",
+    "time",
+    "unicodedata",
+    "vms_lib",
+    "win32evtlog",
+    "win32evtlogutil",
+    "winreg",
+    "zlib"
+  ],
+  "license": {
+    "path": "LICENSE",
+    "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+    "source": "LICENSE"
+  },
+  "modules": [
+    {
+      "imports": [],
+      "name": "__future__",
+      "path": "__future__.py",
+      "sha256": "981d4c398849f9ebcab72300d9c1fe288fd6d7f28957b3b3fa3a493a5836d95c",
+      "source": "Lib/__future__.py"
+    },
+    {
+      "imports": [
+        "contextlib",
+        "os",
+        "subprocess",
+        "sys",
+        "sysconfig"
+      ],
+      "name": "_aix_support",
+      "path": "_aix_support.py",
+      "sha256": "0982f187c62fbfc1e8d368c8eb4104b56df71009a6b2823565a699e7b4cd945c",
+      "source": "Lib/_aix_support.py"
+    },
+    {
+      "imports": [
+        "abc",
+        "sys",
+        "warnings"
+      ],
+      "name": "_collections_abc",
+      "path": "_collections_abc.py",
+      "sha256": "d4945c8410c4bab351741b04bca3de066f7c27ed7e38df89e206a96617102ffb",
+      "source": "Lib/_collections_abc.py"
+    },
+    {
+      "imports": [],
+      "name": "_compat_pickle",
+      "path": "_compat_pickle.py",
+      "sha256": "12c8356a3d40bd0a336f13d7c6e2bed50d5c1a876563766a3175a6b328b5855e",
+      "source": "Lib/_compat_pickle.py"
+    },
+    {
+      "imports": [
+        "io",
+        "sys"
+      ],
+      "name": "_compression",
+      "path": "_compression.py",
+      "sha256": "3ad5d60627477a60939ee44fc1bb3a05dbe8fb52f0f75039b8f5d8f1a278b981",
+      "source": "Lib/_compression.py"
+    },
+    {
+      "imports": [
+        "re"
+      ],
+      "name": "_markupbase",
+      "path": "_markupbase.py",
+      "sha256": "cb14dd6f2e2439eb70b806cd49d19911363d424c2b6b9f4b73c9c08022d47030",
+      "source": "Lib/_markupbase.py"
+    },
+    {
+      "imports": [
+        "contextlib",
+        "os",
+        "re",
+        "sys",
+        "tempfile"
+      ],
+      "name": "_osx_support",
+      "path": "_osx_support.py",
+      "sha256": "363d3240acbba18a270bd3161f1ddb478f8492dc14fc451b2dc314db5c5ee09c",
+      "source": "Lib/_osx_support.py"
+    },
+    {
+      "imports": [
+        "_weakrefset"
+      ],
+      "name": "_py_abc",
+      "path": "_py_abc.py",
+      "sha256": "f9c6fe3dd9b51bd7d93f867356e9d362600c924febfd903ee1c6e298860dca92",
+      "source": "Lib/_py_abc.py"
+    },
+    {
+      "imports": [
+        "_strptime",
+        "math",
+        "operator",
+        "sys",
+        "time",
+        "warnings"
+      ],
+      "name": "_pydatetime",
+      "path": "_pydatetime.py",
+      "sha256": "a03268abe53ccab406fa29cdfcf75b89f7f485d9e6523e00c448ff7a9961dd26",
+      "source": "Lib/_pydatetime.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "contextvars",
+        "itertools",
+        "locale",
+        "math",
+        "numbers",
+        "re",
+        "sys"
+      ],
+      "name": "_pydecimal",
+      "path": "_pydecimal.py",
+      "sha256": "87a3372df4c4269adcdac5725e04675d306abcfa8d65e8dda59c1846e3d202ac",
+      "source": "Lib/_pydecimal.py"
+    },
+    {
+      "imports": [
+        "_io",
+        "_thread",
+        "abc",
+        "codecs",
+        "errno",
+        "io",
+        "locale",
+        "msvcrt",
+        "os",
+        "stat",
+        "sys",
+        "warnings"
+      ],
+      "name": "_pyio",
+      "path": "_pyio.py",
+      "sha256": "22a2730be3230802593c75c930387e635809c6d82420e5234ef8d9cd1166ac8d",
+      "source": "Lib/_pyio.py"
+    },
+    {
+      "imports": [
+        "_thread",
+        "calendar",
+        "datetime",
+        "locale",
+        "re",
+        "time"
+      ],
+      "name": "_strptime",
+      "path": "_strptime.py",
+      "sha256": "dcec0ad5efc41dd29fb125b477530ef22c70da117b59fa49cec39aae04e1f868",
+      "source": "Lib/_strptime.py"
+    },
+    {
+      "imports": [
+        "contextlib",
+        "threading",
+        "weakref"
+      ],
+      "name": "_threading_local",
+      "path": "_threading_local.py",
+      "sha256": "e1bf3dae66d0bfa63c8bb8a1d10c611203c35c636f7f5191fd56105788ef29cb",
+      "source": "Lib/_threading_local.py"
+    },
+    {
+      "imports": [
+        "_weakref",
+        "types"
+      ],
+      "name": "_weakrefset",
+      "path": "_weakrefset.py",
+      "sha256": "91895a451d06e9f521a1171b31b9b19bc9740f35af00d4fa106338ab7167c9ac",
+      "source": "Lib/_weakrefset.py"
+    },
+    {
+      "imports": [
+        "_abc",
+        "_py_abc"
+      ],
+      "name": "abc",
+      "path": "abc.py",
+      "sha256": "e558702a95cdce3febd289da021715d2b92bc43995b8a1bc58dfa1c3d8010287",
+      "source": "Lib/abc.py"
+    },
+    {
+      "imports": [
+        "copy",
+        "gettext",
+        "os",
+        "re",
+        "shutil",
+        "sys",
+        "textwrap",
+        "warnings"
+      ],
+      "name": "argparse",
+      "path": "argparse.py",
+      "sha256": "7cc582dcb3b76e2c957f78a3f74e9809d6c311d6aab7bcaa2c9954d0cbff5f30",
+      "source": "Lib/argparse.py"
+    },
+    {
+      "imports": [
+        "_ast",
+        "argparse",
+        "collections",
+        "contextlib",
+        "enum",
+        "inspect",
+        "re",
+        "sys",
+        "warnings"
+      ],
+      "name": "ast",
+      "path": "ast.py",
+      "sha256": "b515c23dbbc459329d3b802a3aac742cc456d7472e66f7ed6e9dc97e40596d7d",
+      "source": "Lib/ast.py"
+    },
+    {
+      "imports": [
+        "asyncio.base_events",
+        "asyncio.coroutines",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.futures",
+        "asyncio.locks",
+        "asyncio.protocols",
+        "asyncio.queues",
+        "asyncio.runners",
+        "asyncio.streams",
+        "asyncio.subprocess",
+        "asyncio.taskgroups",
+        "asyncio.tasks",
+        "asyncio.threads",
+        "asyncio.timeouts",
+        "asyncio.transports",
+        "asyncio.unix_events",
+        "asyncio.windows_events",
+        "sys"
+      ],
+      "name": "asyncio",
+      "path": "asyncio/__init__.py",
+      "sha256": "61102f2b5f8fb832f0558cb66391f227970b3dd34ea2a621455587b4295e89a1",
+      "source": "Lib/asyncio/__init__.py"
+    },
+    {
+      "imports": [
+        "ast",
+        "asyncio",
+        "asyncio.futures",
+        "code",
+        "concurrent.futures",
+        "contextvars",
+        "inspect",
+        "readline",
+        "sys",
+        "threading",
+        "types",
+        "warnings"
+      ],
+      "name": "asyncio.__main__",
+      "path": "asyncio/__main__.py",
+      "sha256": "c1e67c3b5f5d964029b407e71397d9d93d8b545abde482ffb0eab02dd16ad820",
+      "source": "Lib/asyncio/__main__.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.constants",
+        "asyncio.coroutines",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.futures",
+        "asyncio.log",
+        "asyncio.protocols",
+        "asyncio.sslproto",
+        "asyncio.staggered",
+        "asyncio.tasks",
+        "asyncio.timeouts",
+        "asyncio.transports",
+        "asyncio.trsock",
+        "collections",
+        "collections.abc",
+        "concurrent.futures",
+        "errno",
+        "heapq",
+        "itertools",
+        "os",
+        "socket",
+        "ssl",
+        "stat",
+        "subprocess",
+        "sys",
+        "threading",
+        "time",
+        "traceback",
+        "warnings",
+        "weakref"
+      ],
+      "name": "asyncio.base_events",
+      "path": "asyncio/base_events.py",
+      "sha256": "53b71bbbd79e7fb2251460119afc379ebd71bbc599d9018313cc62ef218ae795",
+      "source": "Lib/asyncio/base_events.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.format_helpers",
+        "reprlib"
+      ],
+      "name": "asyncio.base_futures",
+      "path": "asyncio/base_futures.py",
+      "sha256": "2f3798c4b82f5ac77647908b157c924f734f36871d98970e72849ea9a9a07856",
+      "source": "Lib/asyncio/base_futures.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.log",
+        "asyncio.protocols",
+        "asyncio.transports",
+        "collections",
+        "subprocess",
+        "warnings"
+      ],
+      "name": "asyncio.base_subprocess",
+      "path": "asyncio/base_subprocess.py",
+      "sha256": "d69ba8f97bf8c89564cadce49427574ddb98103a5db6f04b98798240332e7adf",
+      "source": "Lib/asyncio/base_subprocess.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.base_futures",
+        "asyncio.coroutines",
+        "linecache",
+        "reprlib",
+        "traceback"
+      ],
+      "name": "asyncio.base_tasks",
+      "path": "asyncio/base_tasks.py",
+      "sha256": "56efac65b63db927af336fa55eb5bda93c97a2defa4734ea8d695ed20fd6712a",
+      "source": "Lib/asyncio/base_tasks.py"
+    },
+    {
+      "imports": [
+        "enum"
+      ],
+      "name": "asyncio.constants",
+      "path": "asyncio/constants.py",
+      "sha256": "873fc2f9e66313c3c19c337269e704f204b59f9e91d6ecbec59f68335484d338",
+      "source": "Lib/asyncio/constants.py"
+    },
+    {
+      "imports": [
+        "collections.abc",
+        "inspect",
+        "os",
+        "sys",
+        "types"
+      ],
+      "name": "asyncio.coroutines",
+      "path": "asyncio/coroutines.py",
+      "sha256": "2feec17557c230a80cc2a6391bbb1c44b9f3341820b05667e36a4eb12b749436",
+      "source": "Lib/asyncio/coroutines.py"
+    },
+    {
+      "imports": [
+        "_asyncio",
+        "asyncio",
+        "asyncio.format_helpers",
+        "contextvars",
+        "os",
+        "signal",
+        "socket",
+        "subprocess",
+        "sys",
+        "threading",
+        "warnings"
+      ],
+      "name": "asyncio.events",
+      "path": "asyncio/events.py",
+      "sha256": "6a18b7eee5926622c146e61a7eb39726b4656e07ca41d36b06936ffb2354f0ed",
+      "source": "Lib/asyncio/events.py"
+    },
+    {
+      "imports": [],
+      "name": "asyncio.exceptions",
+      "path": "asyncio/exceptions.py",
+      "sha256": "a5971f88be14cd1417d59adf539ae48c5d818f95362a4e0eb00017e3690ab37b",
+      "source": "Lib/asyncio/exceptions.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.constants",
+        "functools",
+        "inspect",
+        "reprlib",
+        "sys",
+        "traceback"
+      ],
+      "name": "asyncio.format_helpers",
+      "path": "asyncio/format_helpers.py",
+      "sha256": "6377b672b3f4ba8b6f0f7a5f0ea00cde24c8cddc0ca764e3329f302763477f59",
+      "source": "Lib/asyncio/format_helpers.py"
+    },
+    {
+      "imports": [
+        "_asyncio",
+        "asyncio",
+        "asyncio.base_futures",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.format_helpers",
+        "concurrent.futures",
+        "contextvars",
+        "logging",
+        "sys",
+        "types"
+      ],
+      "name": "asyncio.futures",
+      "path": "asyncio/futures.py",
+      "sha256": "f6daaf2a051fc61ea146811d7d4b4db1cac31d7f4777aa4d10617812d78bd943",
+      "source": "Lib/asyncio/futures.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.exceptions",
+        "asyncio.mixins",
+        "collections",
+        "enum"
+      ],
+      "name": "asyncio.locks",
+      "path": "asyncio/locks.py",
+      "sha256": "5234295a0456e9a6ba2e80446848b602cd9195bca4fca2c711c6e3f41989cd86",
+      "source": "Lib/asyncio/locks.py"
+    },
+    {
+      "imports": [
+        "logging"
+      ],
+      "name": "asyncio.log",
+      "path": "asyncio/log.py",
+      "sha256": "80e4cc3ded4b138baba486519e7444801a23d6ac35f229d336a407a96af7e8d2",
+      "source": "Lib/asyncio/log.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.events",
+        "threading"
+      ],
+      "name": "asyncio.mixins",
+      "path": "asyncio/mixins.py",
+      "sha256": "8f4a3e16eca845ebfba422550cbcee7340ec8166d2bff6b750a8ed0de6b9ae3c",
+      "source": "Lib/asyncio/mixins.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.base_events",
+        "asyncio.constants",
+        "asyncio.exceptions",
+        "asyncio.futures",
+        "asyncio.log",
+        "asyncio.protocols",
+        "asyncio.sslproto",
+        "asyncio.transports",
+        "asyncio.trsock",
+        "collections",
+        "io",
+        "os",
+        "signal",
+        "socket",
+        "threading",
+        "warnings"
+      ],
+      "name": "asyncio.proactor_events",
+      "path": "asyncio/proactor_events.py",
+      "sha256": "62d15e99315cae52e8548f487391ae6c46827bf8e5b4bcf3382c777a494a759b",
+      "source": "Lib/asyncio/proactor_events.py"
+    },
+    {
+      "imports": [],
+      "name": "asyncio.protocols",
+      "path": "asyncio/protocols.py",
+      "sha256": "1d1b49988c338b4ef06e30f9e92d9db2e00080c341f0a3f573bb8312deb8aff6",
+      "source": "Lib/asyncio/protocols.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.locks",
+        "asyncio.mixins",
+        "collections",
+        "heapq",
+        "types"
+      ],
+      "name": "asyncio.queues",
+      "path": "asyncio/queues.py",
+      "sha256": "8f020744ebd1f557dcb051a1530b504447660df906c2127a94bbcc8450ea7ef9",
+      "source": "Lib/asyncio/queues.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.constants",
+        "asyncio.coroutines",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.tasks",
+        "contextvars",
+        "enum",
+        "functools",
+        "signal",
+        "threading"
+      ],
+      "name": "asyncio.runners",
+      "path": "asyncio/runners.py",
+      "sha256": "739e0ecbb335cfec821a39f9e225583b5911bb6e3894ef93782005f852c54263",
+      "source": "Lib/asyncio/runners.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.base_events",
+        "asyncio.constants",
+        "asyncio.events",
+        "asyncio.futures",
+        "asyncio.log",
+        "asyncio.protocols",
+        "asyncio.sslproto",
+        "asyncio.transports",
+        "asyncio.trsock",
+        "collections",
+        "errno",
+        "functools",
+        "itertools",
+        "os",
+        "selectors",
+        "socket",
+        "ssl",
+        "warnings",
+        "weakref"
+      ],
+      "name": "asyncio.selector_events",
+      "path": "asyncio/selector_events.py",
+      "sha256": "b77c4b8a85f1e1e2882a2bf3bd85a4b1c1fcfd7cb37ed0d8d8eb5f9a2ea44231",
+      "source": "Lib/asyncio/selector_events.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.constants",
+        "asyncio.exceptions",
+        "asyncio.log",
+        "asyncio.protocols",
+        "asyncio.transports",
+        "collections",
+        "enum",
+        "ssl",
+        "warnings"
+      ],
+      "name": "asyncio.sslproto",
+      "path": "asyncio/sslproto.py",
+      "sha256": "6c7fa1b81dc41850281cbf284c99ca18e824939fa5778860327040f3a80f6218",
+      "source": "Lib/asyncio/sslproto.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.locks",
+        "asyncio.tasks",
+        "contextlib"
+      ],
+      "name": "asyncio.staggered",
+      "path": "asyncio/staggered.py",
+      "sha256": "3998d04fcff2c8052af03f3f34dbd3bd510b2dadddd5f2629a2c1cccbecd136d",
+      "source": "Lib/asyncio/staggered.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.coroutines",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.format_helpers",
+        "asyncio.log",
+        "asyncio.protocols",
+        "asyncio.tasks",
+        "collections",
+        "socket",
+        "sys",
+        "warnings",
+        "weakref"
+      ],
+      "name": "asyncio.streams",
+      "path": "asyncio/streams.py",
+      "sha256": "6ec5c70fd95b0d51cc1e81cd21e8abe8c1b69650148d6bb75ab4aa4797319bd4",
+      "source": "Lib/asyncio/streams.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.events",
+        "asyncio.log",
+        "asyncio.protocols",
+        "asyncio.streams",
+        "asyncio.tasks",
+        "subprocess"
+      ],
+      "name": "asyncio.subprocess",
+      "path": "asyncio/subprocess.py",
+      "sha256": "7b70605716334f63cc482123b2aaa3b7c5bb7138eeab63a037bd8068d43307c1",
+      "source": "Lib/asyncio/subprocess.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.tasks"
+      ],
+      "name": "asyncio.taskgroups",
+      "path": "asyncio/taskgroups.py",
+      "sha256": "1d2bcd2da66524b45024841b94100cd6e7a7825a1b8f8ee125bf16b4ad0ca9bc",
+      "source": "Lib/asyncio/taskgroups.py"
+    },
+    {
+      "imports": [
+        "_asyncio",
+        "asyncio",
+        "asyncio.base_tasks",
+        "asyncio.coroutines",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.futures",
+        "asyncio.queues",
+        "asyncio.timeouts",
+        "concurrent.futures",
+        "contextvars",
+        "functools",
+        "inspect",
+        "itertools",
+        "types",
+        "warnings",
+        "weakref"
+      ],
+      "name": "asyncio.tasks",
+      "path": "asyncio/tasks.py",
+      "sha256": "6f6aad82d597fea1800004075b9a2481604da0035f1143af1eb267823ec460e3",
+      "source": "Lib/asyncio/tasks.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.events",
+        "contextvars",
+        "functools"
+      ],
+      "name": "asyncio.threads",
+      "path": "asyncio/threads.py",
+      "sha256": "39d37295383641565f0c08bd992e2f661dc8051eb17e890b834fce96bde0910e",
+      "source": "Lib/asyncio/threads.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.tasks",
+        "enum",
+        "types",
+        "typing"
+      ],
+      "name": "asyncio.timeouts",
+      "path": "asyncio/timeouts.py",
+      "sha256": "3e40ca0dca3e54776579797837cd4936d73d04aae09fe0cf83ce1e5449d00163",
+      "source": "Lib/asyncio/timeouts.py"
+    },
+    {
+      "imports": [],
+      "name": "asyncio.transports",
+      "path": "asyncio/transports.py",
+      "sha256": "940108bc133de399f38928cad3274f463096168d8a3ee5148f2478d3cb636f1c",
+      "source": "Lib/asyncio/transports.py"
+    },
+    {
+      "imports": [
+        "socket"
+      ],
+      "name": "asyncio.trsock",
+      "path": "asyncio/trsock.py",
+      "sha256": "c0eac37debcc51b702b808f6b7ed3e417343f5ff5f57125dad600a27eb082328",
+      "source": "Lib/asyncio/trsock.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "asyncio.base_events",
+        "asyncio.base_subprocess",
+        "asyncio.constants",
+        "asyncio.coroutines",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.futures",
+        "asyncio.log",
+        "asyncio.selector_events",
+        "asyncio.tasks",
+        "asyncio.transports",
+        "errno",
+        "io",
+        "itertools",
+        "os",
+        "selectors",
+        "signal",
+        "socket",
+        "stat",
+        "subprocess",
+        "sys",
+        "threading",
+        "warnings"
+      ],
+      "name": "asyncio.unix_events",
+      "path": "asyncio/unix_events.py",
+      "sha256": "1fff06cce78763800f05f4d2bebfcdbc07ebf9564ca7e7222e0d91e39dee08c9",
+      "source": "Lib/asyncio/unix_events.py"
+    },
+    {
+      "imports": [
+        "_overlapped",
+        "_winapi",
+        "asyncio",
+        "asyncio.base_subprocess",
+        "asyncio.events",
+        "asyncio.exceptions",
+        "asyncio.futures",
+        "asyncio.log",
+        "asyncio.proactor_events",
+        "asyncio.selector_events",
+        "asyncio.tasks",
+        "asyncio.windows_utils",
+        "errno",
+        "functools",
+        "math",
+        "msvcrt",
+        "socket",
+        "struct",
+        "sys",
+        "time",
+        "weakref"
+      ],
+      "name": "asyncio.windows_events",
+      "path": "asyncio/windows_events.py",
+      "sha256": "163927e5834c10c6c106d81cf3cfd568fd1ced7fa34d857836447d3c4cc7a9d3",
+      "source": "Lib/asyncio/windows_events.py"
+    },
+    {
+      "imports": [
+        "_winapi",
+        "itertools",
+        "msvcrt",
+        "os",
+        "subprocess",
+        "sys",
+        "tempfile",
+        "warnings"
+      ],
+      "name": "asyncio.windows_utils",
+      "path": "asyncio/windows_utils.py",
+      "sha256": "e6fcffefa2521666bc2aed0f5caf8e862c1c1014ad12d2ab5fbce09c2df9c6f0",
+      "source": "Lib/asyncio/windows_utils.py"
+    },
+    {
+      "imports": [
+        "binascii",
+        "getopt",
+        "re",
+        "struct",
+        "sys"
+      ],
+      "name": "base64",
+      "path": "base64.py",
+      "sha256": "8d1f608dbf030d11d6ec4df9e4c55b73fb68cdfbd9f53a7c91684a93b55564b5",
+      "source": "Lib/base64.py"
+    },
+    {
+      "imports": [
+        "__main__",
+        "contextlib",
+        "fnmatch",
+        "inspect",
+        "linecache",
+        "os",
+        "reprlib",
+        "sys"
+      ],
+      "name": "bdb",
+      "path": "bdb.py",
+      "sha256": "171ba6b07dc5d3b9f718f3890fedc97e1fe750e39855f4342d71514169ccc29a",
+      "source": "Lib/bdb.py"
+    },
+    {
+      "imports": [
+        "_bisect"
+      ],
+      "name": "bisect",
+      "path": "bisect.py",
+      "sha256": "f1cf7b85fc36b5da249813fc5ab97d9464f8cc1bc817f7146206fa2713e35999",
+      "source": "Lib/bisect.py"
+    },
+    {
+      "imports": [
+        "_bz2",
+        "_compression",
+        "builtins",
+        "io",
+        "os"
+      ],
+      "name": "bz2",
+      "path": "bz2.py",
+      "sha256": "76ab3252924e71e859d7d90e8d3db13b6554975cfcac0fdadced4de7f8779330",
+      "source": "Lib/bz2.py"
+    },
+    {
+      "imports": [
+        "argparse",
+        "datetime",
+        "enum",
+        "itertools",
+        "locale",
+        "sys",
+        "warnings"
+      ],
+      "name": "calendar",
+      "path": "calendar.py",
+      "sha256": "0010004d32c694e4afa554db2434952040819c09c438e88d465dcf6d9fb63718",
+      "source": "Lib/calendar.py"
+    },
+    {
+      "imports": [
+        "readline",
+        "string",
+        "sys"
+      ],
+      "name": "cmd",
+      "path": "cmd.py",
+      "sha256": "fb82a8c4e44e5b559c88d516d79051534cec69a463df97defe05ac8a261f0a0d",
+      "source": "Lib/cmd.py"
+    },
+    {
+      "imports": [
+        "argparse",
+        "codeop",
+        "readline",
+        "sys",
+        "traceback"
+      ],
+      "name": "code",
+      "path": "code.py",
+      "sha256": "dab54e60985a3770782a7f031b6a80f91009c372465a09cdd1221b2ca03080eb",
+      "source": "Lib/code.py"
+    },
+    {
+      "imports": [
+        "_codecs",
+        "builtins",
+        "encodings",
+        "sys"
+      ],
+      "name": "codecs",
+      "path": "codecs.py",
+      "sha256": "7b7839e53a77961153240aecfe11edc8054d05b1dedd83894450dae21ec05785",
+      "source": "Lib/codecs.py"
+    },
+    {
+      "imports": [
+        "__future__",
+        "warnings"
+      ],
+      "name": "codeop",
+      "path": "codeop.py",
+      "sha256": "3fb545862a1f9030c0d8f1ae6c72457d14a26d67a9b45de455e49900ff84a3a9",
+      "source": "Lib/codeop.py"
+    },
+    {
+      "imports": [
+        "_collections",
+        "_collections_abc",
+        "_weakref",
+        "copy",
+        "heapq",
+        "itertools",
+        "keyword",
+        "operator",
+        "reprlib",
+        "sys"
+      ],
+      "name": "collections",
+      "path": "collections/__init__.py",
+      "sha256": "7fdb04dd248ab37909f46d2085bfee56b32d7e91e49ad3a2fad99c453295659b",
+      "source": "Lib/collections/__init__.py"
+    },
+    {
+      "imports": [
+        "_collections_abc"
+      ],
+      "name": "collections.abc",
+      "path": "collections/abc.py",
+      "sha256": "9cb4208f99128a0489b6c8e6c61637617dd7d4250c59e065491957eda084dd10",
+      "source": "Lib/collections/abc.py"
+    },
+    {
+      "imports": [],
+      "name": "concurrent",
+      "path": "concurrent/__init__.py",
+      "sha256": "87ad5c8954dd56fbbca04517bf87477ff4dce575170c7dd1281d7ef1f4214ac8",
+      "source": "Lib/concurrent/__init__.py"
+    },
+    {
+      "imports": [
+        "concurrent.futures._base",
+        "concurrent.futures.process",
+        "concurrent.futures.thread"
+      ],
+      "name": "concurrent.futures",
+      "path": "concurrent/futures/__init__.py",
+      "sha256": "9b597f6de7da771109ca7bf96a1af5ea4d5fda69b27b39312d34966d987f73cd",
+      "source": "Lib/concurrent/futures/__init__.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "logging",
+        "threading",
+        "time",
+        "types"
+      ],
+      "name": "concurrent.futures._base",
+      "path": "concurrent/futures/_base.py",
+      "sha256": "8c6d5f09f7c535d40fa1c30ebfcb35e0601c2abf32286a82cf151af7ddf72473",
+      "source": "Lib/concurrent/futures/_base.py"
+    },
+    {
+      "imports": [
+        "concurrent.futures",
+        "concurrent.futures._base",
+        "functools",
+        "itertools",
+        "multiprocessing",
+        "multiprocessing.connection",
+        "multiprocessing.queues",
+        "multiprocessing.synchronize",
+        "os",
+        "queue",
+        "sys",
+        "threading",
+        "traceback",
+        "weakref"
+      ],
+      "name": "concurrent.futures.process",
+      "path": "concurrent/futures/process.py",
+      "sha256": "66b4fe880563a604ac4a094b72c6535b56b3bb8b14f4b6025705d53d28816fba",
+      "source": "Lib/concurrent/futures/process.py"
+    },
+    {
+      "imports": [
+        "concurrent.futures",
+        "concurrent.futures._base",
+        "itertools",
+        "os",
+        "queue",
+        "threading",
+        "types",
+        "weakref"
+      ],
+      "name": "concurrent.futures.thread",
+      "path": "concurrent/futures/thread.py",
+      "sha256": "fe940a20adc4d3e66a8ea42a4c7e6c16957b011e8ada50c4e7a7bddbcbbffa0d",
+      "source": "Lib/concurrent/futures/thread.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "collections.abc",
+        "functools",
+        "io",
+        "itertools",
+        "os",
+        "re",
+        "sys",
+        "warnings"
+      ],
+      "name": "configparser",
+      "path": "configparser.py",
+      "sha256": "8d822edd41d1085e0c697f1926f3f98e5c7889b4072361ae88726464b37f6460",
+      "source": "Lib/configparser.py"
+    },
+    {
+      "imports": [
+        "_collections_abc",
+        "abc",
+        "collections",
+        "functools",
+        "os",
+        "sys",
+        "types"
+      ],
+      "name": "contextlib",
+      "path": "contextlib.py",
+      "sha256": "8b7a477f978a8532852fd81e241c78182516bc4975d672d580a5848a76e11eb6",
+      "source": "Lib/contextlib.py"
+    },
+    {
+      "imports": [
+        "_contextvars"
+      ],
+      "name": "contextvars",
+      "path": "contextvars.py",
+      "sha256": "5ed260be8d1f4fe92261b7810b4bb1e8539c42093d7493f677d076e1a87f459a",
+      "source": "Lib/contextvars.py"
+    },
+    {
+      "imports": [
+        "copyreg",
+        "types",
+        "weakref"
+      ],
+      "name": "copy",
+      "path": "copy.py",
+      "sha256": "cbd25547933176fcf6bb05c2adc9f4796d15ac20b9b82dcf890daea7203daeab",
+      "source": "Lib/copy.py"
+    },
+    {
+      "imports": [
+        "functools",
+        "operator"
+      ],
+      "name": "copyreg",
+      "path": "copyreg.py",
+      "sha256": "c8eda41f05c6bf95a4da4726a530409d2485ae060b8d019b3a8034389a15d3e9",
+      "source": "Lib/copyreg.py"
+    },
+    {
+      "imports": [
+        "_csv",
+        "io",
+        "re",
+        "types"
+      ],
+      "name": "csv",
+      "path": "csv.py",
+      "sha256": "46004923196e98a67f87d30da64d070027c81f144f5ac91242fbfae33507dda8",
+      "source": "Lib/csv.py"
+    },
+    {
+      "imports": [
+        "_ctypes",
+        "ctypes._endian",
+        "nt",
+        "os",
+        "struct",
+        "sys",
+        "types"
+      ],
+      "name": "ctypes",
+      "path": "ctypes/__init__.py",
+      "sha256": "e0db1242e78267cba0124ee9fe5963b72d1c8a1832bb51a88abcf012a9cbce76",
+      "source": "Lib/ctypes/__init__.py"
+    },
+    {
+      "imports": [
+        "ctypes",
+        "os",
+        "re",
+        "subprocess",
+        "sys"
+      ],
+      "name": "ctypes._aix",
+      "path": "ctypes/_aix.py",
+      "sha256": "540e2821fa36981bde5c6ffb8f972474b06db4a37c1854c0e0e379b75d2b0fa3",
+      "source": "Lib/ctypes/_aix.py"
+    },
+    {
+      "imports": [
+        "ctypes",
+        "sys"
+      ],
+      "name": "ctypes._endian",
+      "path": "ctypes/_endian.py",
+      "sha256": "c5d692bdce10dfee242752620061bab684633bc72445a3def484961ef1bdbf3a",
+      "source": "Lib/ctypes/_endian.py"
+    },
+    {
+      "imports": [],
+      "name": "ctypes.macholib",
+      "path": "ctypes/macholib/__init__.py",
+      "sha256": "1e77c01eec8f167ed10b754f153c0c743c8e5196ae9c81dffc08f129ab56dbfd",
+      "source": "Lib/ctypes/macholib/__init__.py"
+    },
+    {
+      "imports": [
+        "_ctypes",
+        "ctypes.macholib.dylib",
+        "ctypes.macholib.framework",
+        "itertools",
+        "os"
+      ],
+      "name": "ctypes.macholib.dyld",
+      "path": "ctypes/macholib/dyld.py",
+      "sha256": "eb8e7b17f1533bc3e86e23e8695f7a5e4b7a99ef1b1575d10af54f389161b655",
+      "source": "Lib/ctypes/macholib/dyld.py"
+    },
+    {
+      "imports": [
+        "re"
+      ],
+      "name": "ctypes.macholib.dylib",
+      "path": "ctypes/macholib/dylib.py",
+      "sha256": "f19ee056b18165cc6735efab0b4ca3508be9405b9646c38113316c15e8278a6f",
+      "source": "Lib/ctypes/macholib/dylib.py"
+    },
+    {
+      "imports": [
+        "re"
+      ],
+      "name": "ctypes.macholib.framework",
+      "path": "ctypes/macholib/framework.py",
+      "sha256": "302439e40d9cbdd61b8b7cffd0b7e1278a6811b635044ee366a36e0d991f62da",
+      "source": "Lib/ctypes/macholib/framework.py"
+    },
+    {
+      "imports": [
+        "ctypes",
+        "ctypes._aix",
+        "ctypes.macholib.dyld",
+        "importlib.machinery",
+        "os",
+        "re",
+        "shutil",
+        "struct",
+        "subprocess",
+        "sys",
+        "tempfile"
+      ],
+      "name": "ctypes.util",
+      "path": "ctypes/util.py",
+      "sha256": "a54310b64a080b0103f3de5df86b21d884bc2985760f3596ab85d458eae8cba5",
+      "source": "Lib/ctypes/util.py"
+    },
+    {
+      "imports": [
+        "ctypes"
+      ],
+      "name": "ctypes.wintypes",
+      "path": "ctypes/wintypes.py",
+      "sha256": "5c4d9ba1a21683838ed1d1f007b6038304e42aacf34c576e820311d26cb243f3",
+      "source": "Lib/ctypes/wintypes.py"
+    },
+    {
+      "imports": [
+        "_thread",
+        "abc",
+        "copy",
+        "functools",
+        "inspect",
+        "itertools",
+        "keyword",
+        "re",
+        "sys",
+        "types"
+      ],
+      "name": "dataclasses",
+      "path": "dataclasses.py",
+      "sha256": "d242aea5fcf6408b1c1f622442f88f68b9526ce1f8bd2890d74a144677c427d9",
+      "source": "Lib/dataclasses.py"
+    },
+    {
+      "imports": [
+        "_datetime",
+        "_pydatetime"
+      ],
+      "name": "datetime",
+      "path": "datetime.py",
+      "sha256": "ef20dc6b3554cd585dddffdc573f1f9a7a54c522f2a3fb4576c44edbb1e14238",
+      "source": "Lib/datetime.py"
+    },
+    {
+      "imports": [
+        "_decimal",
+        "_pydecimal"
+      ],
+      "name": "decimal",
+      "path": "decimal.py",
+      "sha256": "c3e37c55ef72b3dd6cb7b466a907b966467b6a9c58d85302193e64cbb5fd53d0",
+      "source": "Lib/decimal.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "difflib",
+        "doctest",
+        "heapq",
+        "re",
+        "types"
+      ],
+      "name": "difflib",
+      "path": "difflib.py",
+      "sha256": "3eb2d371b4a171b063921de6bbf115108bc39de8bf72866315868ce2599213b7",
+      "source": "Lib/difflib.py"
+    },
+    {
+      "imports": [
+        "argparse",
+        "collections",
+        "io",
+        "opcode",
+        "sys",
+        "types"
+      ],
+      "name": "dis",
+      "path": "dis.py",
+      "sha256": "44c0b389c96124d8fb5cb0bc41c7a2aa7a6848ef4001b4000dcbd858efa4a1a2",
+      "source": "Lib/dis.py"
+    },
+    {
+      "imports": [
+        "__future__",
+        "argparse",
+        "builtins",
+        "collections",
+        "difflib",
+        "inspect",
+        "io",
+        "linecache",
+        "os",
+        "pdb",
+        "re",
+        "sys",
+        "traceback",
+        "unittest"
+      ],
+      "name": "doctest",
+      "path": "doctest.py",
+      "sha256": "8fb954ef7e775270461f1baf1331749cab6765a4006d0183cb8a0dfede1bbdc8",
+      "source": "Lib/doctest.py"
+    },
+    {
+      "imports": [
+        "email.parser"
+      ],
+      "name": "email",
+      "path": "email/__init__.py",
+      "sha256": "e4f46e3414c4602c9abb8b404a45e84412fc49dbe38a3d163f9575132dc7c93e",
+      "source": "Lib/email/__init__.py"
+    },
+    {
+      "imports": [
+        "base64",
+        "binascii",
+        "email",
+        "email.errors",
+        "functools",
+        "re",
+        "string"
+      ],
+      "name": "email._encoded_words",
+      "path": "email/_encoded_words.py",
+      "sha256": "4178321600c0a19ca04cfe8542ce44487f339d15d89a473b58cea63c0b230217",
+      "source": "Lib/email/_encoded_words.py"
+    },
+    {
+      "imports": [
+        "email",
+        "email._encoded_words",
+        "email.errors",
+        "email.utils",
+        "operator",
+        "re",
+        "string",
+        "sys",
+        "urllib"
+      ],
+      "name": "email._header_value_parser",
+      "path": "email/_header_value_parser.py",
+      "sha256": "f63e90ce5f1d418cce74cd036e224f226f0ccd1ec94e2b771899a4199581e2d4",
+      "source": "Lib/email/_header_value_parser.py"
+    },
+    {
+      "imports": [
+        "calendar",
+        "time"
+      ],
+      "name": "email._parseaddr",
+      "path": "email/_parseaddr.py",
+      "sha256": "4308932872acbf4a674312a45a49b870e48026e3dfedc878ee2f512ddf2f30ba",
+      "source": "Lib/email/_parseaddr.py"
+    },
+    {
+      "imports": [
+        "abc",
+        "email",
+        "email.charset",
+        "email.header",
+        "email.utils"
+      ],
+      "name": "email._policybase",
+      "path": "email/_policybase.py",
+      "sha256": "284be073d7fe99d1021958e6dbeefe4c98a6c00021ea465d01aac71338d1579f",
+      "source": "Lib/email/_policybase.py"
+    },
+    {
+      "imports": [
+        "base64",
+        "binascii"
+      ],
+      "name": "email.base64mime",
+      "path": "email/base64mime.py",
+      "sha256": "e2b4b87a5f42a8c5780e343f675513bbcc6abdd23fa14f8f1a7d4f7d72304770",
+      "source": "Lib/email/base64mime.py"
+    },
+    {
+      "imports": [
+        "email",
+        "email.base64mime",
+        "email.encoders",
+        "email.errors",
+        "email.quoprimime",
+        "functools"
+      ],
+      "name": "email.charset",
+      "path": "email/charset.py",
+      "sha256": "a90653f13a4dc5eb3205079dda1d62561a8bf9a7b45585f5dbf90aa31a966680",
+      "source": "Lib/email/charset.py"
+    },
+    {
+      "imports": [
+        "binascii",
+        "email",
+        "email.charset",
+        "email.errors",
+        "email.message",
+        "email.quoprimime"
+      ],
+      "name": "email.contentmanager",
+      "path": "email/contentmanager.py",
+      "sha256": "2d81026aef17e4786b15d9ec0629304987e3f275a0fd0a421a81b4ed87234b2c",
+      "source": "Lib/email/contentmanager.py"
+    },
+    {
+      "imports": [
+        "base64",
+        "quopri"
+      ],
+      "name": "email.encoders",
+      "path": "email/encoders.py",
+      "sha256": "690b275529788cc48e8f541a2aef321dc31e92f75764ac7924896db72d8a9555",
+      "source": "Lib/email/encoders.py"
+    },
+    {
+      "imports": [],
+      "name": "email.errors",
+      "path": "email/errors.py",
+      "sha256": "dbfb4bbfc85e9d556d3385dc6356518846d8a122bc643b171ea61b6e8dc42c8b",
+      "source": "Lib/email/errors.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "email",
+        "email._policybase",
+        "email.errors",
+        "email.message",
+        "io",
+        "re"
+      ],
+      "name": "email.feedparser",
+      "path": "email/feedparser.py",
+      "sha256": "6046239fcdd6977d1c25841581cabedaeec8046cc5fedcb8ff2d6450a36442bd",
+      "source": "Lib/email/feedparser.py"
+    },
+    {
+      "imports": [
+        "copy",
+        "email.errors",
+        "email.utils",
+        "io",
+        "random",
+        "re",
+        "sys",
+        "time"
+      ],
+      "name": "email.generator",
+      "path": "email/generator.py",
+      "sha256": "e5b7a15b4ae8208991d3ed8358c0a4482f727d393285dafeb2a0d77df9ee627e",
+      "source": "Lib/email/generator.py"
+    },
+    {
+      "imports": [
+        "binascii",
+        "email",
+        "email.base64mime",
+        "email.charset",
+        "email.errors",
+        "email.quoprimime",
+        "re"
+      ],
+      "name": "email.header",
+      "path": "email/header.py",
+      "sha256": "4d9baa908ad5288dd8fad8cf20b3802ffac77ba1642727804a633b201c56e5ca",
+      "source": "Lib/email/header.py"
+    },
+    {
+      "imports": [
+        "email",
+        "email._header_value_parser",
+        "email.errors",
+        "email.utils",
+        "types"
+      ],
+      "name": "email.headerregistry",
+      "path": "email/headerregistry.py",
+      "sha256": "fada56c25b6a457c6a62af43f9f929bbc29424103ce65f40f114adb4fdf3d39f",
+      "source": "Lib/email/headerregistry.py"
+    },
+    {
+      "imports": [
+        "io",
+        "sys"
+      ],
+      "name": "email.iterators",
+      "path": "email/iterators.py",
+      "sha256": "1080a2d03779176d6d45f6ecd976dbe69f5579f7e4e83b75224c3f92fd258102",
+      "source": "Lib/email/iterators.py"
+    },
+    {
+      "imports": [
+        "binascii",
+        "email",
+        "email._encoded_words",
+        "email._policybase",
+        "email.charset",
+        "email.errors",
+        "email.generator",
+        "email.iterators",
+        "email.policy",
+        "email.utils",
+        "io",
+        "quopri",
+        "re"
+      ],
+      "name": "email.message",
+      "path": "email/message.py",
+      "sha256": "57fc451e7bc431389706dc00c0ff2456aee2c41f4786a5bce8475b9870f70684",
+      "source": "Lib/email/message.py"
+    },
+    {
+      "imports": [],
+      "name": "email.mime",
+      "path": "email/mime/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "Lib/email/mime/__init__.py"
+    },
+    {
+      "imports": [
+        "email",
+        "email.encoders",
+        "email.mime.nonmultipart"
+      ],
+      "name": "email.mime.application",
+      "path": "email/mime/application.py",
+      "sha256": "b82a944ccba03e7e7eec46232e50ffe4ce2c32f4b0e26662e6bde30d533584ae",
+      "source": "Lib/email/mime/application.py"
+    },
+    {
+      "imports": [
+        "email",
+        "email.encoders",
+        "email.mime.nonmultipart",
+        "io"
+      ],
+      "name": "email.mime.audio",
+      "path": "email/mime/audio.py",
+      "sha256": "856263b25a3384a7450a1a0b9869fb897b84f893b2e7147c7e045ae50d132cd3",
+      "source": "Lib/email/mime/audio.py"
+    },
+    {
+      "imports": [
+        "email",
+        "email.message",
+        "email.policy"
+      ],
+      "name": "email.mime.base",
+      "path": "email/mime/base.py",
+      "sha256": "9a7b36653b5657525a0aeeaa72d4a0b09f598e6edc29c139c2dc2612b7d29fb8",
+      "source": "Lib/email/mime/base.py"
+    },
+    {
+      "imports": [
+        "email",
+        "email.encoders",
+        "email.mime.nonmultipart"
+      ],
+      "name": "email.mime.image",
+      "path": "email/mime/image.py",
+      "sha256": "460be5b50cfcaab8e72a73f24f14ab062cedf1a40a775b8b0d80c13aed44bb5e",
+      "source": "Lib/email/mime/image.py"
+    },
+    {
+      "imports": [
+        "email",
+        "email.message",
+        "email.mime.nonmultipart"
+      ],
+      "name": "email.mime.message",
+      "path": "email/mime/message.py",
+      "sha256": "30fccea73b874b5ddaccbd3c64936833749ff039f08d40524c1b0b25b8e8e2b8",
+      "source": "Lib/email/mime/message.py"
+    },
+    {
+      "imports": [
+        "email.mime.base"
+      ],
+      "name": "email.mime.multipart",
+      "path": "email/mime/multipart.py",
+      "sha256": "8bf2beca6de95d66f12968380a428d3bb0a28a8a6ea2078da521511e1ed80a38",
+      "source": "Lib/email/mime/multipart.py"
+    },
+    {
+      "imports": [
+        "email",
+        "email.errors",
+        "email.mime.base"
+      ],
+      "name": "email.mime.nonmultipart",
+      "path": "email/mime/nonmultipart.py",
+      "sha256": "4eb9ad32603d66fc9d55aebcc4d3cf759edd9e95a591d38690659afb2e57b050",
+      "source": "Lib/email/mime/nonmultipart.py"
+    },
+    {
+      "imports": [
+        "email.mime.nonmultipart"
+      ],
+      "name": "email.mime.text",
+      "path": "email/mime/text.py",
+      "sha256": "71c56a41675a36801259c9946f7b7bf838e6c29c453ba8c34d89401f2b972d6c",
+      "source": "Lib/email/mime/text.py"
+    },
+    {
+      "imports": [
+        "email._policybase",
+        "email.feedparser",
+        "io"
+      ],
+      "name": "email.parser",
+      "path": "email/parser.py",
+      "sha256": "88890ea9994c55ff7d6c1fd570fece2785f51ed407ee95df4aff946e250bcd66",
+      "source": "Lib/email/parser.py"
+    },
+    {
+      "imports": [
+        "email._policybase",
+        "email.contentmanager",
+        "email.headerregistry",
+        "email.message",
+        "email.utils",
+        "re",
+        "sys"
+      ],
+      "name": "email.policy",
+      "path": "email/policy.py",
+      "sha256": "35fcbece24fac56fdefe15c93351eefda47c3440204746b8519e71d4633b0f3e",
+      "source": "Lib/email/policy.py"
+    },
+    {
+      "imports": [
+        "re",
+        "string"
+      ],
+      "name": "email.quoprimime",
+      "path": "email/quoprimime.py",
+      "sha256": "77b454bd3ba3b5e3776be28ae3a0fd8de5d1e50d5b8ee10dd539c37c2bd68082",
+      "source": "Lib/email/quoprimime.py"
+    },
+    {
+      "imports": [
+        "datetime",
+        "email._parseaddr",
+        "email.charset",
+        "os",
+        "random",
+        "re",
+        "socket",
+        "time",
+        "urllib.parse",
+        "warnings"
+      ],
+      "name": "email.utils",
+      "path": "email/utils.py",
+      "sha256": "65d259aded3b7d29609d320decdb59cb0a0f7f0e5c453e1d3c380e8a4a5d61c9",
+      "source": "Lib/email/utils.py"
+    },
+    {
+      "imports": [
+        "_winapi",
+        "codecs",
+        "encodings",
+        "encodings.aliases",
+        "encodings.mbcs",
+        "sys"
+      ],
+      "name": "encodings",
+      "path": "encodings/__init__.py",
+      "sha256": "78c4744d407690f321565488710b5aaf6486b5afa8d185637aa1e7633ab59cd8",
+      "source": "Lib/encodings/__init__.py"
+    },
+    {
+      "imports": [],
+      "name": "encodings.aliases",
+      "path": "encodings/aliases.py",
+      "sha256": "6fdcc49ba23a0203ae6cf28e608f8e6297d7c4d77d52e651db3cb49b9564c6d2",
+      "source": "Lib/encodings/aliases.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.ascii",
+      "path": "encodings/ascii.py",
+      "sha256": "578aa1173f7cc60dad2895071287fe6182bd14787b3fbf47a6c7983dfe3675e3",
+      "source": "Lib/encodings/ascii.py"
+    },
+    {
+      "imports": [
+        "base64",
+        "codecs"
+      ],
+      "name": "encodings.base64_codec",
+      "path": "encodings/base64_codec.py",
+      "sha256": "cf9ac7a464f541492486241d1b4bf33e37b45c6499275cc4d69c5a8e564e5976",
+      "source": "Lib/encodings/base64_codec.py"
+    },
+    {
+      "imports": [
+        "_codecs_tw",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.big5",
+      "path": "encodings/big5.py",
+      "sha256": "98fac6f86a20dd05da197e2058176ebfd47edee7074c3248f5f48fe0fb672d7c",
+      "source": "Lib/encodings/big5.py"
+    },
+    {
+      "imports": [
+        "_codecs_hk",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.big5hkscs",
+      "path": "encodings/big5hkscs.py",
+      "sha256": "21d051a00fb5c6a86ba187e0c50e811d659ce00991fd5f5b408f71ebb2ef0f16",
+      "source": "Lib/encodings/big5hkscs.py"
+    },
+    {
+      "imports": [
+        "bz2",
+        "codecs"
+      ],
+      "name": "encodings.bz2_codec",
+      "path": "encodings/bz2_codec.py",
+      "sha256": "1181a2a89102a2b1d2b2f1f4473236d5d1ececdd0be8fdaa498a3dbe21a185ab",
+      "source": "Lib/encodings/bz2_codec.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.charmap",
+      "path": "encodings/charmap.py",
+      "sha256": "1b8b5fdb36ce3becc62a6115ed904a17083949ec8aaef5a80f7078cec232f43b",
+      "source": "Lib/encodings/charmap.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp037",
+      "path": "encodings/cp037.py",
+      "sha256": "fda6ca994d710e4e0c760e0204c29a4273fc0f14ebe3169306d2eb54c9953f58",
+      "source": "Lib/encodings/cp037.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1006",
+      "path": "encodings/cp1006.py",
+      "sha256": "eaded38b427841bdf280e878f1e26da506e743eaa9429075332af60cce429473",
+      "source": "Lib/encodings/cp1006.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1026",
+      "path": "encodings/cp1026.py",
+      "sha256": "f5227237dd7ce5005b16a8e4d8342f0d193193c878e3cf35b9305d22b3b1aaf9",
+      "source": "Lib/encodings/cp1026.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1125",
+      "path": "encodings/cp1125.py",
+      "sha256": "f84c7d30ce222e6a50cff1a4c9737173411da108cbd2c9bb57c854480103c470",
+      "source": "Lib/encodings/cp1125.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1140",
+      "path": "encodings/cp1140.py",
+      "sha256": "3379d78b244aa905ffe1171a968caaf41b9a0154d1ddc76c05a2abaca2b289fd",
+      "source": "Lib/encodings/cp1140.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1250",
+      "path": "encodings/cp1250.py",
+      "sha256": "ebcec1adf9167863fb0bab29708c546300c80a77ef07838c9e0437a59e265970",
+      "source": "Lib/encodings/cp1250.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1251",
+      "path": "encodings/cp1251.py",
+      "sha256": "d57f8cfa34494c5acb6692ddb31f616ae2dd89a075d2af6d36b0b7ec2ffe7af1",
+      "source": "Lib/encodings/cp1251.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1252",
+      "path": "encodings/cp1252.py",
+      "sha256": "19aa5bee667f5fb387924a813aec9fa1dda47769d09e8483a748bdb202be6a84",
+      "source": "Lib/encodings/cp1252.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1253",
+      "path": "encodings/cp1253.py",
+      "sha256": "8c27696dcfb6894b378869bc89f113703fbd1e9b13a83934463d5999b055d1e8",
+      "source": "Lib/encodings/cp1253.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1254",
+      "path": "encodings/cp1254.py",
+      "sha256": "06517ec2f74f1c6562d0a1a500c48ba43f2e6e9d0c3d28356d747f274f1a4c8d",
+      "source": "Lib/encodings/cp1254.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1255",
+      "path": "encodings/cp1255.py",
+      "sha256": "54a1b5087578fa78e5bdd0afa6a9e80e8c5467c1e4226cf6e586cfe7a674a653",
+      "source": "Lib/encodings/cp1255.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1256",
+      "path": "encodings/cp1256.py",
+      "sha256": "ad3768ac2fef2a646b3301c20af705f4d4a1544f22fa8a84241bada27ab84133",
+      "source": "Lib/encodings/cp1256.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1257",
+      "path": "encodings/cp1257.py",
+      "sha256": "d9149d2925b3f719809ef2297e541461079f15c658af207a3e498be314ab2c6b",
+      "source": "Lib/encodings/cp1257.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp1258",
+      "path": "encodings/cp1258.py",
+      "sha256": "672e05b51952a82c8dbd5603769195fcedf565e457bb86c0d5bae04955d04630",
+      "source": "Lib/encodings/cp1258.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp273",
+      "path": "encodings/cp273.py",
+      "sha256": "6c6aec3b213ea3aebc2c526dd4d121c95d4a25a2fc928a87cd80f8448988185f",
+      "source": "Lib/encodings/cp273.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp424",
+      "path": "encodings/cp424.py",
+      "sha256": "30414c2186ea0802bbf3db034122ddec1f8a10061b97c50871e14b74ee36d0ca",
+      "source": "Lib/encodings/cp424.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp437",
+      "path": "encodings/cp437.py",
+      "sha256": "5c2a5015cd36cf7f561269f33dec4c323093d3d88b0673969accdabdcb9ce2cb",
+      "source": "Lib/encodings/cp437.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp500",
+      "path": "encodings/cp500.py",
+      "sha256": "630f503f9110d98ea3e1529f2f965ebc275a2f78d3de47f8e9b69d35589d764b",
+      "source": "Lib/encodings/cp500.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp720",
+      "path": "encodings/cp720.py",
+      "sha256": "395496001271b92efe5df07fc0ae7c3410d1dd2bdfebbd3e4d8e806c8166beb0",
+      "source": "Lib/encodings/cp720.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp737",
+      "path": "encodings/cp737.py",
+      "sha256": "be3ca1785a3970ec62310710eaf7de82932181b04d06fe4528f8adaba9fb8c4b",
+      "source": "Lib/encodings/cp737.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp775",
+      "path": "encodings/cp775.py",
+      "sha256": "e0dba85b99329d7f16907e620adada06be5216abcb964406c827b569b2cf1aeb",
+      "source": "Lib/encodings/cp775.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp850",
+      "path": "encodings/cp850.py",
+      "sha256": "257e29f235e2a8790dd68cee45668776648bab809ce8584f893cdd8fd007993c",
+      "source": "Lib/encodings/cp850.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp852",
+      "path": "encodings/cp852.py",
+      "sha256": "cc6faaa9dc4a933127da0aaacd1dc7a44c09266051af56bfe3215ff228636b6b",
+      "source": "Lib/encodings/cp852.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp855",
+      "path": "encodings/cp855.py",
+      "sha256": "7b25c61c9e8c47b218d3fbb801541a2861926ac712843d2113fff90e2074f5ba",
+      "source": "Lib/encodings/cp855.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp856",
+      "path": "encodings/cp856.py",
+      "sha256": "2e52ec5cb1eafa6739b5569b0b98ee89df5f7358b84ccdc8da64e86f017d359f",
+      "source": "Lib/encodings/cp856.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp857",
+      "path": "encodings/cp857.py",
+      "sha256": "8d1b769058bfccdb3c6c70c49a104f5081a2fcc9fad68f7b5eb3e4f67f0b33da",
+      "source": "Lib/encodings/cp857.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp858",
+      "path": "encodings/cp858.py",
+      "sha256": "a24930c4a6ad0ff66dde9a69f2027e4b92c2c9c61dcda2992e940654c606577b",
+      "source": "Lib/encodings/cp858.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp860",
+      "path": "encodings/cp860.py",
+      "sha256": "2dfae7e31d3d9aa3013cff44a4d7ad842f257ac63765a9998436701b629cd86a",
+      "source": "Lib/encodings/cp860.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp861",
+      "path": "encodings/cp861.py",
+      "sha256": "701930d77a2177497586e99bc3fe60f2d4beffb645608f167c76874a72ff405e",
+      "source": "Lib/encodings/cp861.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp862",
+      "path": "encodings/cp862.py",
+      "sha256": "15a2844b6ed9544c6400cf7299b42d0c2bef93c9bee70a9e89f66b8610ad6d6d",
+      "source": "Lib/encodings/cp862.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp863",
+      "path": "encodings/cp863.py",
+      "sha256": "a3d57f61fce1b98fc81ea8e4ebebaf402fae40bbcdd35d4b8297b9bb49a79aa2",
+      "source": "Lib/encodings/cp863.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp864",
+      "path": "encodings/cp864.py",
+      "sha256": "15ad8f1fdfdd842c7522241372e7eddda7df687e815692a89157c5f256f21a08",
+      "source": "Lib/encodings/cp864.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp865",
+      "path": "encodings/cp865.py",
+      "sha256": "bdbaded987242ed2a8de7133ec2f61ddcc1c2e9de27816ab7cd0a4c678a3a907",
+      "source": "Lib/encodings/cp865.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp866",
+      "path": "encodings/cp866.py",
+      "sha256": "9efcc8e85bbd1687272a0991f6d0429a4c06679db2d114b2ac95db27a70f9d13",
+      "source": "Lib/encodings/cp866.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp869",
+      "path": "encodings/cp869.py",
+      "sha256": "52582d9fb769b24eac7154f18d7dae856588297d6da98f37fb5efd8da883826d",
+      "source": "Lib/encodings/cp869.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp874",
+      "path": "encodings/cp874.py",
+      "sha256": "fe4752fa2e65741e08a563a31ff914fe71068942ce9c6f4070b1dfd7b25e5e7f",
+      "source": "Lib/encodings/cp874.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.cp875",
+      "path": "encodings/cp875.py",
+      "sha256": "2fe72632015db2cba2bb4367055551da6fe22051b96d170c7b96fa271c46b257",
+      "source": "Lib/encodings/cp875.py"
+    },
+    {
+      "imports": [
+        "_codecs_jp",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.cp932",
+      "path": "encodings/cp932.py",
+      "sha256": "99748e28113d2d49f5d666b49b78accd2c6e10a7852f7dd6dece9b5b71aa83c4",
+      "source": "Lib/encodings/cp932.py"
+    },
+    {
+      "imports": [
+        "_codecs_kr",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.cp949",
+      "path": "encodings/cp949.py",
+      "sha256": "950a7d29467ce0590b4a1137830d43d88d8f20e4035dcaaa8b2a5c3c3f1de962",
+      "source": "Lib/encodings/cp949.py"
+    },
+    {
+      "imports": [
+        "_codecs_tw",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.cp950",
+      "path": "encodings/cp950.py",
+      "sha256": "27811178b450731fc955b1247656a605d04e5ee98e0d585e4596b94b703a27f6",
+      "source": "Lib/encodings/cp950.py"
+    },
+    {
+      "imports": [
+        "_codecs_jp",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.euc_jis_2004",
+      "path": "encodings/euc_jis_2004.py",
+      "sha256": "9fa426cd9f17629f6320700ed18baa94839304cf1bcabbee7edb501747dc055d",
+      "source": "Lib/encodings/euc_jis_2004.py"
+    },
+    {
+      "imports": [
+        "_codecs_jp",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.euc_jisx0213",
+      "path": "encodings/euc_jisx0213.py",
+      "sha256": "e28315910da20218dae8b7d5becd81de1e283dfd8b0415a4980d67065de73a0b",
+      "source": "Lib/encodings/euc_jisx0213.py"
+    },
+    {
+      "imports": [
+        "_codecs_jp",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.euc_jp",
+      "path": "encodings/euc_jp.py",
+      "sha256": "b453a439787b0efa031e43416a7d852a6be705c985e1200693eb96d87ea79cdc",
+      "source": "Lib/encodings/euc_jp.py"
+    },
+    {
+      "imports": [
+        "_codecs_kr",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.euc_kr",
+      "path": "encodings/euc_kr.py",
+      "sha256": "633a1a5504bfad04b1ec9c96d44d4ebb3bb99066a218318e7d67d866e20887a6",
+      "source": "Lib/encodings/euc_kr.py"
+    },
+    {
+      "imports": [
+        "_codecs_cn",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.gb18030",
+      "path": "encodings/gb18030.py",
+      "sha256": "6c10b4dc49bc63724e539137ede6936304fcca1c97c28d16d89f381e10849521",
+      "source": "Lib/encodings/gb18030.py"
+    },
+    {
+      "imports": [
+        "_codecs_cn",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.gb2312",
+      "path": "encodings/gb2312.py",
+      "sha256": "3d2d567d8d079b78f3f3b566ed52ad2f38af61bf832b7dc28858b0039a032d6b",
+      "source": "Lib/encodings/gb2312.py"
+    },
+    {
+      "imports": [
+        "_codecs_cn",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.gbk",
+      "path": "encodings/gbk.py",
+      "sha256": "eff9b8cbc9ad2ef2e10e96afa83d3db1f775ea044aed275b7a35574ae0d8645b",
+      "source": "Lib/encodings/gbk.py"
+    },
+    {
+      "imports": [
+        "binascii",
+        "codecs"
+      ],
+      "name": "encodings.hex_codec",
+      "path": "encodings/hex_codec.py",
+      "sha256": "fc5f0a31b59efe990b86efb98936769f33dd91d912ce55b49a5a4cfc516cd047",
+      "source": "Lib/encodings/hex_codec.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.hp_roman8",
+      "path": "encodings/hp_roman8.py",
+      "sha256": "c43cce763d12e8f71a63dbc16641bd87147eaf5f9d9054ea856864b216b2735b",
+      "source": "Lib/encodings/hp_roman8.py"
+    },
+    {
+      "imports": [
+        "_codecs_cn",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.hz",
+      "path": "encodings/hz.py",
+      "sha256": "025a9531e3046e52d3e039c0be04f9a5a74651d7683a13c7c7ebd4c7dfb5996a",
+      "source": "Lib/encodings/hz.py"
+    },
+    {
+      "imports": [
+        "codecs",
+        "re",
+        "stringprep",
+        "unicodedata"
+      ],
+      "name": "encodings.idna",
+      "path": "encodings/idna.py",
+      "sha256": "9ca58e82d12b171f25d57239ad237dae5c44214a70f2f4f39358c2759b8b9013",
+      "source": "Lib/encodings/idna.py"
+    },
+    {
+      "imports": [
+        "_codecs_iso2022",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.iso2022_jp",
+      "path": "encodings/iso2022_jp.py",
+      "sha256": "461a0e7f72eccb8b29f351c4e7926cfbda58e0edd6d0770bd82e0b36c5febe77",
+      "source": "Lib/encodings/iso2022_jp.py"
+    },
+    {
+      "imports": [
+        "_codecs_iso2022",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.iso2022_jp_1",
+      "path": "encodings/iso2022_jp_1.py",
+      "sha256": "63bacad13a979a5519fcaa4f1e1e07b2c7415005167fac3a689408c7d886fabd",
+      "source": "Lib/encodings/iso2022_jp_1.py"
+    },
+    {
+      "imports": [
+        "_codecs_iso2022",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.iso2022_jp_2",
+      "path": "encodings/iso2022_jp_2.py",
+      "sha256": "5d4248181548b0fc89a9f5ee9cf52ebecb235708ba87d47896ad14130884ef9f",
+      "source": "Lib/encodings/iso2022_jp_2.py"
+    },
+    {
+      "imports": [
+        "_codecs_iso2022",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.iso2022_jp_2004",
+      "path": "encodings/iso2022_jp_2004.py",
+      "sha256": "b4d1468bcd608b46f38cb0c6ef115510dcf9aa0f71e590792f407efc6e165164",
+      "source": "Lib/encodings/iso2022_jp_2004.py"
+    },
+    {
+      "imports": [
+        "_codecs_iso2022",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.iso2022_jp_3",
+      "path": "encodings/iso2022_jp_3.py",
+      "sha256": "3aceaa5661909de14e2861d864443b8472460ce39b99cce5c6965346d47aa5ac",
+      "source": "Lib/encodings/iso2022_jp_3.py"
+    },
+    {
+      "imports": [
+        "_codecs_iso2022",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.iso2022_jp_ext",
+      "path": "encodings/iso2022_jp_ext.py",
+      "sha256": "f4c9ed8f3031995faa224bcb10153d2b6144944477d1f27d1a6cc4a879fac34c",
+      "source": "Lib/encodings/iso2022_jp_ext.py"
+    },
+    {
+      "imports": [
+        "_codecs_iso2022",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.iso2022_kr",
+      "path": "encodings/iso2022_kr.py",
+      "sha256": "1c86362e17944f0bcf68db02f4995bdeea605867795fff7ab4079073f96705e4",
+      "source": "Lib/encodings/iso2022_kr.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_1",
+      "path": "encodings/iso8859_1.py",
+      "sha256": "b5cebd515e057d670bf54e10b8a6f162ef3daa7f21b146aee3249160caf3c32d",
+      "source": "Lib/encodings/iso8859_1.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_10",
+      "path": "encodings/iso8859_10.py",
+      "sha256": "54c886b41819ebb7f4fb34b8dbae1c45f4fc0864f019ecd772676ccfac5fae7b",
+      "source": "Lib/encodings/iso8859_10.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_11",
+      "path": "encodings/iso8859_11.py",
+      "sha256": "ed5a964470a241b4da7a6cfb718e4149d09644933af38f0497602baab6e563ef",
+      "source": "Lib/encodings/iso8859_11.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_13",
+      "path": "encodings/iso8859_13.py",
+      "sha256": "7312237e8e5d201d920b4130f057cfdf1b0be9baafaa246826e6d93204fcc206",
+      "source": "Lib/encodings/iso8859_13.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_14",
+      "path": "encodings/iso8859_14.py",
+      "sha256": "82778b995a0ee87c5f1180fcc52900359eee15bd9a6e3a0e25f0d963e0b2a343",
+      "source": "Lib/encodings/iso8859_14.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_15",
+      "path": "encodings/iso8859_15.py",
+      "sha256": "01976a81811873dc9a0c79db9fc00d1c30103487f3c6bc3a6d81b4043cd48e02",
+      "source": "Lib/encodings/iso8859_15.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_16",
+      "path": "encodings/iso8859_16.py",
+      "sha256": "b5ac8f5a5d8f84c0f903b2b7c342184758d590d8bcf810d561f942fe5b372d66",
+      "source": "Lib/encodings/iso8859_16.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_2",
+      "path": "encodings/iso8859_2.py",
+      "sha256": "2b57cab6111cae9021505e3ae1b2adbbfc344ec48165fda322f6b069fbb18adc",
+      "source": "Lib/encodings/iso8859_2.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_3",
+      "path": "encodings/iso8859_3.py",
+      "sha256": "4ffdf89004bf0c5230caa7079f7ca3142fc112f8b923ddb2c7358369d2d3c242",
+      "source": "Lib/encodings/iso8859_3.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_4",
+      "path": "encodings/iso8859_4.py",
+      "sha256": "87bd130daa0eaef3e4cb465e10cffb2bcd194ff74097e0c186b4b8eb7be41ac5",
+      "source": "Lib/encodings/iso8859_4.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_5",
+      "path": "encodings/iso8859_5.py",
+      "sha256": "9961d96cc7b9fdf011ebcaaeaeca7b50b8670fadbd7b75fde66192f8c1f68f30",
+      "source": "Lib/encodings/iso8859_5.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_6",
+      "path": "encodings/iso8859_6.py",
+      "sha256": "4840e68014346517680f593ca22f67133c39ba7e46f34b9be62c980a728448c6",
+      "source": "Lib/encodings/iso8859_6.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_7",
+      "path": "encodings/iso8859_7.py",
+      "sha256": "b352eca3b819488f64fb3338fd93f39c1e30f32bb13f2f9c577925e58f2960e4",
+      "source": "Lib/encodings/iso8859_7.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_8",
+      "path": "encodings/iso8859_8.py",
+      "sha256": "4cf9e8a8bbe04accb1c1a80853efb19ae0772d18f81e270adefc1b2386cb368e",
+      "source": "Lib/encodings/iso8859_8.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.iso8859_9",
+      "path": "encodings/iso8859_9.py",
+      "sha256": "84d9b15263e81685f7513c5ab45caf80b2f73c301c68e659f7162c1b1882d359",
+      "source": "Lib/encodings/iso8859_9.py"
+    },
+    {
+      "imports": [
+        "_codecs_kr",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.johab",
+      "path": "encodings/johab.py",
+      "sha256": "9586615917afd3d848c1c4328656603b2834af6115f2aec932fccc935e1a60fb",
+      "source": "Lib/encodings/johab.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.koi8_r",
+      "path": "encodings/koi8_r.py",
+      "sha256": "4d4e353aee8039bb71e2145a6e68fe1e6833a1b4250b70ee0ac5ec70bbb8c51d",
+      "source": "Lib/encodings/koi8_r.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.koi8_t",
+      "path": "encodings/koi8_t.py",
+      "sha256": "9c9043814abdbe7dc39ff98f3857d5d110a84c978ad2304158d810a4e9eacef1",
+      "source": "Lib/encodings/koi8_t.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.koi8_u",
+      "path": "encodings/koi8_u.py",
+      "sha256": "d449f9858e357fa8c2edbd4b9fe739337e9f201cac3ded20f99bfcecd4970ff7",
+      "source": "Lib/encodings/koi8_u.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.kz1048",
+      "path": "encodings/kz1048.py",
+      "sha256": "76beb30e98a911f72f97609a2373782573c17c88a5fb3537db338aa382979ffc",
+      "source": "Lib/encodings/kz1048.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.latin_1",
+      "path": "encodings/latin_1.py",
+      "sha256": "b75503e532a27c636477396c855209ff5f3036536d2a4bede0a576c89382b60c",
+      "source": "Lib/encodings/latin_1.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mac_arabic",
+      "path": "encodings/mac_arabic.py",
+      "sha256": "5eafd9a3136abfbd8ed52df9c90203c7a283e7429ed60502a87a02511e0fb777",
+      "source": "Lib/encodings/mac_arabic.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mac_croatian",
+      "path": "encodings/mac_croatian.py",
+      "sha256": "a880cd05c82a8d11a29c65ee86a396def3344465dd71441b0bb4a73826024953",
+      "source": "Lib/encodings/mac_croatian.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mac_cyrillic",
+      "path": "encodings/mac_cyrillic.py",
+      "sha256": "83616786a1c6308b03a0dc82536908d24d0974b2248d67393d613fe558cea4bd",
+      "source": "Lib/encodings/mac_cyrillic.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mac_farsi",
+      "path": "encodings/mac_farsi.py",
+      "sha256": "f5763c38fb4ab0423fafe2fdca34d6f9932ac7f1a74c0cd8109d60234c7dc624",
+      "source": "Lib/encodings/mac_farsi.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mac_greek",
+      "path": "encodings/mac_greek.py",
+      "sha256": "63016a323ddf98cb3aa9cfa78f3bab4768bedbfe9a5262a36a5aecb13d291f6e",
+      "source": "Lib/encodings/mac_greek.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mac_iceland",
+      "path": "encodings/mac_iceland.py",
+      "sha256": "753cc1ac635caa7e1b4630fbcebef8db8db332c098154a5b11f652912bf64f37",
+      "source": "Lib/encodings/mac_iceland.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mac_latin2",
+      "path": "encodings/mac_latin2.py",
+      "sha256": "31670da18ce8b5394cd53fe6bf216268e7e8eae4c0247532e420e2e103727d50",
+      "source": "Lib/encodings/mac_latin2.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mac_roman",
+      "path": "encodings/mac_roman.py",
+      "sha256": "230367d96aef8e8d7f185b4acfb84923714f39ddbcbf9cf38a06bf6f5d621c22",
+      "source": "Lib/encodings/mac_roman.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mac_romanian",
+      "path": "encodings/mac_romanian.py",
+      "sha256": "49630cf035c19e896a123ed6e5fee18b5e485123daf2f15da38bf727ff387bee",
+      "source": "Lib/encodings/mac_romanian.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mac_turkish",
+      "path": "encodings/mac_turkish.py",
+      "sha256": "99758a5cad2825cb3be3fa5d031e0821e4eba910a46f417fd890207b9b6be77b",
+      "source": "Lib/encodings/mac_turkish.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.mbcs",
+      "path": "encodings/mbcs.py",
+      "sha256": "f6ed445ed537c9f856d8defe8b56505727737d0dc9348d0a877abedab4bdd864",
+      "source": "Lib/encodings/mbcs.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.oem",
+      "path": "encodings/oem.py",
+      "sha256": "481656d3a35f792d0e5109e3f821e6dbfcf097163a19b0cdfcbff3b3db99292f",
+      "source": "Lib/encodings/oem.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.palmos",
+      "path": "encodings/palmos.py",
+      "sha256": "eccf7418adefcc2a59e9a07fc4e34363bd62f7e878d48c8a02730a8ed1c584c8",
+      "source": "Lib/encodings/palmos.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.ptcp154",
+      "path": "encodings/ptcp154.py",
+      "sha256": "0eabcb2c287d335e86b71b0abe5718bd6ddc9aaee234f0f0f2363845d2926d8d",
+      "source": "Lib/encodings/ptcp154.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.punycode",
+      "path": "encodings/punycode.py",
+      "sha256": "34edc8fb1c50e4d1cbaa1e008bb491cd7c12116c316e51974f333fe7b628eb7c",
+      "source": "Lib/encodings/punycode.py"
+    },
+    {
+      "imports": [
+        "codecs",
+        "io",
+        "quopri"
+      ],
+      "name": "encodings.quopri_codec",
+      "path": "encodings/quopri_codec.py",
+      "sha256": "502a213c34c05a94ed063ee03f47680bd6efbb35036e06fb4dc809bf398cfa64",
+      "source": "Lib/encodings/quopri_codec.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.raw_unicode_escape",
+      "path": "encodings/raw_unicode_escape.py",
+      "sha256": "fa6328486b8f5a5cbd10e377e80adb8cf94acbbe19c38b4e1bf708d831a80a3a",
+      "source": "Lib/encodings/raw_unicode_escape.py"
+    },
+    {
+      "imports": [
+        "codecs",
+        "sys"
+      ],
+      "name": "encodings.rot_13",
+      "path": "encodings/rot_13.py",
+      "sha256": "14767f475acdc0bf48e6272280dd15b80efaecafb93c06be21136f83dd1ee7e4",
+      "source": "Lib/encodings/rot_13.py"
+    },
+    {
+      "imports": [
+        "_codecs_jp",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.shift_jis",
+      "path": "encodings/shift_jis.py",
+      "sha256": "ad4ac50ebf58294304e412cc0f1b12980988dd6edc414e4110029c0a1abbe966",
+      "source": "Lib/encodings/shift_jis.py"
+    },
+    {
+      "imports": [
+        "_codecs_jp",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.shift_jis_2004",
+      "path": "encodings/shift_jis_2004.py",
+      "sha256": "d21c5930f21063ea78fea3b0f76dfb8fd92858d2a4a200064a52126a43dd1a99",
+      "source": "Lib/encodings/shift_jis_2004.py"
+    },
+    {
+      "imports": [
+        "_codecs_jp",
+        "_multibytecodec",
+        "codecs"
+      ],
+      "name": "encodings.shift_jisx0213",
+      "path": "encodings/shift_jisx0213.py",
+      "sha256": "2c8d0b93bb36edf31c1236b1b4d1c0008553868bd2fc9137570115b96b834f2e",
+      "source": "Lib/encodings/shift_jisx0213.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.tis_620",
+      "path": "encodings/tis_620.py",
+      "sha256": "647c4719e2c1a7375105e15a89b377c66f6b699977dcabbb71d923a4607b7902",
+      "source": "Lib/encodings/tis_620.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.undefined",
+      "path": "encodings/undefined.py",
+      "sha256": "85bba5c5e1007cd8c1ade5c0214bcc825396d2bbd02054e62a9f162104748b64",
+      "source": "Lib/encodings/undefined.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.unicode_escape",
+      "path": "encodings/unicode_escape.py",
+      "sha256": "507e7ca8f18df639fd823d7cc23ce4028a3550ceefdfa40b3c76f81d1a94531d",
+      "source": "Lib/encodings/unicode_escape.py"
+    },
+    {
+      "imports": [
+        "codecs",
+        "sys"
+      ],
+      "name": "encodings.utf_16",
+      "path": "encodings/utf_16.py",
+      "sha256": "6c36257f7b8d214473560d195e71bccef0c69a53e1e52d2800b7a7890aad7e58",
+      "source": "Lib/encodings/utf_16.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.utf_16_be",
+      "path": "encodings/utf_16_be.py",
+      "sha256": "3357196f3fa52433326a6626880e34964e00c5570aee50e9a0a0a7c6d86f6e4f",
+      "source": "Lib/encodings/utf_16_be.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.utf_16_le",
+      "path": "encodings/utf_16_le.py",
+      "sha256": "3aedaf3eb49769282daef1eaedfd4fa1c31fe5eebeff67fe2307c89dc2e2fd80",
+      "source": "Lib/encodings/utf_16_le.py"
+    },
+    {
+      "imports": [
+        "codecs",
+        "sys"
+      ],
+      "name": "encodings.utf_32",
+      "path": "encodings/utf_32.py",
+      "sha256": "2072eece5f6026ad2d3549ab193a9e38894ea15ca9d5b3cd408fd6b116acc0c2",
+      "source": "Lib/encodings/utf_32.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.utf_32_be",
+      "path": "encodings/utf_32_be.py",
+      "sha256": "cbba20e1f6d0879c7c4293446c371a9f79e7c90bf3c78a77a9b8fc72b18915dd",
+      "source": "Lib/encodings/utf_32_be.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.utf_32_le",
+      "path": "encodings/utf_32_le.py",
+      "sha256": "9134b91047d85b442898d59effe23e7e0cf4167ca341ae31119a731dbf880a7b",
+      "source": "Lib/encodings/utf_32_le.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.utf_7",
+      "path": "encodings/utf_7.py",
+      "sha256": "9ff32314f4f1fa074f206bbf7fdb851504e5313128636d73b4bf75b886e4a87d",
+      "source": "Lib/encodings/utf_7.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.utf_8",
+      "path": "encodings/utf_8.py",
+      "sha256": "ba0cac060269583523ca9506473a755203037c57d466a11aa89a30a5f6756f3d",
+      "source": "Lib/encodings/utf_8.py"
+    },
+    {
+      "imports": [
+        "codecs"
+      ],
+      "name": "encodings.utf_8_sig",
+      "path": "encodings/utf_8_sig.py",
+      "sha256": "1ef3da8d8aa08149e7f274dc64dbfce2155da812e5258ca8e8f832428d3b5c2d",
+      "source": "Lib/encodings/utf_8_sig.py"
+    },
+    {
+      "imports": [
+        "binascii",
+        "codecs",
+        "io"
+      ],
+      "name": "encodings.uu_codec",
+      "path": "encodings/uu_codec.py",
+      "sha256": "45ba92000718abf85f158563c755205e100356ce1b4ab9444b4d0a3d21f061a3",
+      "source": "Lib/encodings/uu_codec.py"
+    },
+    {
+      "imports": [
+        "codecs",
+        "zlib"
+      ],
+      "name": "encodings.zlib_codec",
+      "path": "encodings/zlib_codec.py",
+      "sha256": "6ef01e8d3a5fe1cc52f7b5ae008df12f1dbce7304111bf8d4758f1bfc0115759",
+      "source": "Lib/encodings/zlib_codec.py"
+    },
+    {
+      "imports": [
+        "builtins",
+        "functools",
+        "operator",
+        "sys",
+        "types",
+        "warnings"
+      ],
+      "name": "enum",
+      "path": "enum.py",
+      "sha256": "f35e542d8c4c1d2b5e910138d726fa48774925f3c4dc5462793ebcb66aa55501",
+      "source": "Lib/enum.py"
+    },
+    {
+      "imports": [
+        "functools",
+        "os",
+        "posixpath",
+        "re"
+      ],
+      "name": "fnmatch",
+      "path": "fnmatch.py",
+      "sha256": "6683da36e47af523f3f41e18ad244d837783e19e98911cc0b7415dea81494ebc",
+      "source": "Lib/fnmatch.py"
+    },
+    {
+      "imports": [
+        "decimal",
+        "functools",
+        "math",
+        "numbers",
+        "operator",
+        "re",
+        "sys"
+      ],
+      "name": "fractions",
+      "path": "fractions.py",
+      "sha256": "d52d1ab9d5be26924e4914a5e40069c992bbfa68f773694c2e5ee8452d0766a0",
+      "source": "Lib/fractions.py"
+    },
+    {
+      "imports": [
+        "netrc",
+        "re",
+        "socket",
+        "ssl",
+        "sys"
+      ],
+      "name": "ftplib",
+      "path": "ftplib.py",
+      "sha256": "d46af0c591299d304747c661da2fd4fe417cb7e057eee56a1789c54e2ce083bd",
+      "source": "Lib/ftplib.py"
+    },
+    {
+      "imports": [
+        "_functools",
+        "_thread",
+        "abc",
+        "collections",
+        "reprlib",
+        "types",
+        "typing",
+        "weakref"
+      ],
+      "name": "functools",
+      "path": "functools.py",
+      "sha256": "de4a1d37c795e2a065124b5c49357893433bc6bb111b41277ccc9930ef08d4c9",
+      "source": "Lib/functools.py"
+    },
+    {
+      "imports": [
+        "os",
+        "stat"
+      ],
+      "name": "genericpath",
+      "path": "genericpath.py",
+      "sha256": "2b0b35d2206778af4081cf81dd9b513876e72c35a55bec941402e1fa62b1f1aa",
+      "source": "Lib/genericpath.py"
+    },
+    {
+      "imports": [
+        "gettext",
+        "os",
+        "sys"
+      ],
+      "name": "getopt",
+      "path": "getopt.py",
+      "sha256": "0ce875700c8798193b8e2748f7a27fc542cc4d525a1e6fc403767450ec92be99",
+      "source": "Lib/getopt.py"
+    },
+    {
+      "imports": [
+        "contextlib",
+        "io",
+        "msvcrt",
+        "os",
+        "pwd",
+        "sys",
+        "termios",
+        "warnings"
+      ],
+      "name": "getpass",
+      "path": "getpass.py",
+      "sha256": "e74fd445337ff503223dd8aa4bdd7d04917067d00c796a10bedb7a1381a4960a",
+      "source": "Lib/getpass.py"
+    },
+    {
+      "imports": [
+        "builtins",
+        "copy",
+        "errno",
+        "locale",
+        "operator",
+        "os",
+        "re",
+        "struct",
+        "sys",
+        "warnings"
+      ],
+      "name": "gettext",
+      "path": "gettext.py",
+      "sha256": "a5c249a522b6b8e3aa6f1b12a8bcc09508b99ad612b58d2fc973db27ea3b7cc3",
+      "source": "Lib/gettext.py"
+    },
+    {
+      "imports": [
+        "contextlib",
+        "fnmatch",
+        "itertools",
+        "os",
+        "re",
+        "stat",
+        "sys"
+      ],
+      "name": "glob",
+      "path": "glob.py",
+      "sha256": "c9e5f9ae0752660ede63328a456f58f87c29500b31f58c1b813458b00fceb6d5",
+      "source": "Lib/glob.py"
+    },
+    {
+      "imports": [
+        "_compression",
+        "argparse",
+        "builtins",
+        "errno",
+        "io",
+        "os",
+        "struct",
+        "sys",
+        "time",
+        "warnings",
+        "weakref",
+        "zlib"
+      ],
+      "name": "gzip",
+      "path": "gzip.py",
+      "sha256": "ea6e194b9df26398bf0d5215e63320c7b9d801b2d8b723fb9c80619df48076e9",
+      "source": "Lib/gzip.py"
+    },
+    {
+      "imports": [
+        "_blake2",
+        "_hashlib",
+        "_md5",
+        "_sha1",
+        "_sha2",
+        "_sha3",
+        "logging"
+      ],
+      "name": "hashlib",
+      "path": "hashlib.py",
+      "sha256": "6dbdebf270868b391080e21dc9687eddfaf321c965ad979f68d3f5c423c613ab",
+      "source": "Lib/hashlib.py"
+    },
+    {
+      "imports": [
+        "_heapq",
+        "doctest"
+      ],
+      "name": "heapq",
+      "path": "heapq.py",
+      "sha256": "6d43277e5c76fc0f073cd388fcff852d14d068f6bb6d4886c340f8b75a1229a9",
+      "source": "Lib/heapq.py"
+    },
+    {
+      "imports": [
+        "_hashlib",
+        "_operator",
+        "hashlib",
+        "warnings"
+      ],
+      "name": "hmac",
+      "path": "hmac.py",
+      "sha256": "7facd1330e5487ed995eda5c8619df0d3e32f69cb619f97662372fb76325746e",
+      "source": "Lib/hmac.py"
+    },
+    {
+      "imports": [
+        "html.entities",
+        "re"
+      ],
+      "name": "html",
+      "path": "html/__init__.py",
+      "sha256": "923d82d821e75e8d235392c10c145ab8587927b3faf9c952bbd48081eebd8522",
+      "source": "Lib/html/__init__.py"
+    },
+    {
+      "imports": [],
+      "name": "html.entities",
+      "path": "html/entities.py",
+      "sha256": "d9c65fb2828dbc1f3e399058a341d51e9375ec5bca95a8e92599c41bd5b78bde",
+      "source": "Lib/html/entities.py"
+    },
+    {
+      "imports": [
+        "_markupbase",
+        "html",
+        "re"
+      ],
+      "name": "html.parser",
+      "path": "html/parser.py",
+      "sha256": "4361da9b19d8bb8f3b9320335cc79d089f7615cd18d704f6a7074b308c7aa287",
+      "source": "Lib/html/parser.py"
+    },
+    {
+      "imports": [
+        "enum"
+      ],
+      "name": "http",
+      "path": "http/__init__.py",
+      "sha256": "17f4f6832cfc84b5b9600414bab80b77e67ccb611bdfed10a3f2beca9d0d568b",
+      "source": "Lib/http/__init__.py"
+    },
+    {
+      "imports": [
+        "collections.abc",
+        "email.message",
+        "email.parser",
+        "errno",
+        "http",
+        "io",
+        "re",
+        "socket",
+        "ssl",
+        "sys",
+        "urllib.parse"
+      ],
+      "name": "http.client",
+      "path": "http/client.py",
+      "sha256": "a34fb28ab2cf55ed3a6a4ee4d78fc235d69f004afba7a6d3308d5bcb30f17dcc",
+      "source": "Lib/http/client.py"
+    },
+    {
+      "imports": [
+        "calendar",
+        "copy",
+        "datetime",
+        "http.client",
+        "io",
+        "logging",
+        "os",
+        "re",
+        "threading",
+        "time",
+        "traceback",
+        "urllib.parse",
+        "urllib.request",
+        "warnings"
+      ],
+      "name": "http.cookiejar",
+      "path": "http/cookiejar.py",
+      "sha256": "2a64dbc46edd0173600f32d195531741de562522da28bc76c2f97dccceb37ddb",
+      "source": "Lib/http/cookiejar.py"
+    },
+    {
+      "imports": [
+        "re",
+        "string",
+        "time",
+        "types"
+      ],
+      "name": "http.cookies",
+      "path": "http/cookies.py",
+      "sha256": "e39ad65347ed123057fe200d06cbed270d026c88ce2ee249b67b8c3847270547",
+      "source": "Lib/http/cookies.py"
+    },
+    {
+      "imports": [
+        "argparse",
+        "base64",
+        "binascii",
+        "contextlib",
+        "copy",
+        "datetime",
+        "email.utils",
+        "html",
+        "http",
+        "http.client",
+        "io",
+        "itertools",
+        "mimetypes",
+        "os",
+        "posixpath",
+        "pwd",
+        "select",
+        "shutil",
+        "socket",
+        "socketserver",
+        "subprocess",
+        "sys",
+        "time",
+        "urllib.parse"
+      ],
+      "name": "http.server",
+      "path": "http/server.py",
+      "sha256": "dd84edf960a32b501e768da99d4a1f5ae2bcada3d741cd21c525f4791374d081",
+      "source": "Lib/http/server.py"
+    },
+    {
+      "imports": [
+        "_frozen_importlib",
+        "_frozen_importlib_external",
+        "_imp",
+        "importlib",
+        "importlib._bootstrap",
+        "importlib._bootstrap_external",
+        "sys",
+        "warnings"
+      ],
+      "name": "importlib",
+      "path": "importlib/__init__.py",
+      "sha256": "d540b5ac137fcb3e26a8d5f2939649e34373c6685f98a30a9f682cf231be5854",
+      "source": "Lib/importlib/__init__.py"
+    },
+    {
+      "imports": [
+        "abc",
+        "importlib",
+        "importlib._bootstrap"
+      ],
+      "name": "importlib._abc",
+      "path": "importlib/_abc.py",
+      "sha256": "80aab7931dc999dee581c8b8b56fcd973fe156335a96ceeaf6acfc03cebf10e8",
+      "source": "Lib/importlib/_abc.py"
+    },
+    {
+      "imports": [
+        "_frozen_importlib_external"
+      ],
+      "name": "importlib._bootstrap",
+      "path": "importlib/_bootstrap.py",
+      "sha256": "d112d54b7831cf4a818d4841d5ff8003b54df220a6dabafa61f67d7c7a5603f7",
+      "source": "Lib/importlib/_bootstrap.py"
+    },
+    {
+      "imports": [
+        "_imp",
+        "_io",
+        "_warnings",
+        "importlib.metadata",
+        "importlib.readers",
+        "marshal",
+        "nt",
+        "posix",
+        "sys",
+        "tokenize",
+        "winreg"
+      ],
+      "name": "importlib._bootstrap_external",
+      "path": "importlib/_bootstrap_external.py",
+      "sha256": "9bde390a6f254cf6641bfdba053084c1d506c7324c142131c695d030662ab63d",
+      "source": "Lib/importlib/_bootstrap_external.py"
+    },
+    {
+      "imports": [
+        "_frozen_importlib",
+        "_frozen_importlib_external",
+        "abc",
+        "importlib",
+        "importlib._abc",
+        "importlib._bootstrap_external",
+        "importlib.machinery",
+        "importlib.resources",
+        "importlib.resources.abc",
+        "warnings"
+      ],
+      "name": "importlib.abc",
+      "path": "importlib/abc.py",
+      "sha256": "5f9cb36ca1bce9d5df00bc8d4d7f46b7ea2353dfa99292ad7f099affddfb5d03",
+      "source": "Lib/importlib/abc.py"
+    },
+    {
+      "imports": [
+        "importlib._bootstrap",
+        "importlib._bootstrap_external"
+      ],
+      "name": "importlib.machinery",
+      "path": "importlib/machinery.py",
+      "sha256": "d045cd7ecf2a12b6ecbfbef79eb114e87ef2ebd756f5b705f73e6f3266e3dede",
+      "source": "Lib/importlib/machinery.py"
+    },
+    {
+      "imports": [
+        "abc",
+        "collections",
+        "contextlib",
+        "csv",
+        "email",
+        "functools",
+        "importlib",
+        "importlib.abc",
+        "importlib.metadata",
+        "importlib.metadata._adapters",
+        "importlib.metadata._collections",
+        "importlib.metadata._functools",
+        "importlib.metadata._itertools",
+        "importlib.metadata._meta",
+        "inspect",
+        "itertools",
+        "operator",
+        "os",
+        "pathlib",
+        "posixpath",
+        "re",
+        "sys",
+        "textwrap",
+        "typing",
+        "warnings",
+        "zipfile"
+      ],
+      "name": "importlib.metadata",
+      "path": "importlib/metadata/__init__.py",
+      "sha256": "1a26dfee8cb302b729501e944626f77e2cbcc4675038f3d18c2d8534751b3e8b",
+      "source": "Lib/importlib/metadata/__init__.py"
+    },
+    {
+      "imports": [
+        "email.message",
+        "functools",
+        "importlib.metadata._text",
+        "re",
+        "textwrap",
+        "warnings"
+      ],
+      "name": "importlib.metadata._adapters",
+      "path": "importlib/metadata/_adapters.py",
+      "sha256": "de9a880abc4513af1b69ce150cd5a5093201c39131717cdc2ba6b19f4364c163",
+      "source": "Lib/importlib/metadata/_adapters.py"
+    },
+    {
+      "imports": [
+        "collections"
+      ],
+      "name": "importlib.metadata._collections",
+      "path": "importlib/metadata/_collections.py",
+      "sha256": "089d0e4c21c88d6034648552e2fa0e440b27d91e11d9c40112d3ec6442690126",
+      "source": "Lib/importlib/metadata/_collections.py"
+    },
+    {
+      "imports": [
+        "functools",
+        "types"
+      ],
+      "name": "importlib.metadata._functools",
+      "path": "importlib/metadata/_functools.py",
+      "sha256": "3ec636fb8aeb297e1155e442d681a9d65075a660bd78a37cf3f7fe6c3f6e3a80",
+      "source": "Lib/importlib/metadata/_functools.py"
+    },
+    {
+      "imports": [
+        "itertools"
+      ],
+      "name": "importlib.metadata._itertools",
+      "path": "importlib/metadata/_itertools.py",
+      "sha256": "72faffdaff0145bc5c225e71e6575fa9d1e3848f188bcb3cca4e741bf9e6ea34",
+      "source": "Lib/importlib/metadata/_itertools.py"
+    },
+    {
+      "imports": [
+        "typing"
+      ],
+      "name": "importlib.metadata._meta",
+      "path": "importlib/metadata/_meta.py",
+      "sha256": "bd3504040497cd049e6b529bde0b461f63cd2be3070f2d0815d4dd7609b266c8",
+      "source": "Lib/importlib/metadata/_meta.py"
+    },
+    {
+      "imports": [
+        "importlib.metadata._functools",
+        "re"
+      ],
+      "name": "importlib.metadata._text",
+      "path": "importlib/metadata/_text.py",
+      "sha256": "1c2b0592c66924b7933f734493f9e0ac079755146d4ebb7287d78e001a113f80",
+      "source": "Lib/importlib/metadata/_text.py"
+    },
+    {
+      "imports": [
+        "importlib.resources.readers"
+      ],
+      "name": "importlib.readers",
+      "path": "importlib/readers.py",
+      "sha256": "d0d57d118d64916f7e6edb04f8bd1a760a1abb879125899ef50a36d09ef54df4",
+      "source": "Lib/importlib/readers.py"
+    },
+    {
+      "imports": [
+        "importlib.resources._common",
+        "importlib.resources._legacy",
+        "importlib.resources.abc"
+      ],
+      "name": "importlib.resources",
+      "path": "importlib/resources/__init__.py",
+      "sha256": "4146e1d00d56a783d4087f15257f0c284fae52e71fa3f20613fa268d911bf6d5",
+      "source": "Lib/importlib/resources/__init__.py"
+    },
+    {
+      "imports": [
+        "contextlib",
+        "importlib.resources",
+        "importlib.resources.abc",
+        "io"
+      ],
+      "name": "importlib.resources._adapters",
+      "path": "importlib/resources/_adapters.py",
+      "sha256": "be9ac919b51e1db6a35fa5c2b8c3fa27794caea0a2f8ffcc4e5ce225447b8df9",
+      "source": "Lib/importlib/resources/_adapters.py"
+    },
+    {
+      "imports": [
+        "contextlib",
+        "functools",
+        "importlib",
+        "importlib.resources._adapters",
+        "importlib.resources.abc",
+        "inspect",
+        "itertools",
+        "os",
+        "pathlib",
+        "tempfile",
+        "types",
+        "typing",
+        "warnings"
+      ],
+      "name": "importlib.resources._common",
+      "path": "importlib/resources/_common.py",
+      "sha256": "a0de4a899a2aa787b052f92f516b39f80b183c3f0d409d1305cc6dc374f18870",
+      "source": "Lib/importlib/resources/_common.py"
+    },
+    {
+      "imports": [],
+      "name": "importlib.resources._itertools",
+      "path": "importlib/resources/_itertools.py",
+      "sha256": "7838ac57a46a88d64ea202d25dfe8b3861ce61cefd14680faca34bcc52e60ab5",
+      "source": "Lib/importlib/resources/_itertools.py"
+    },
+    {
+      "imports": [
+        "functools",
+        "importlib.resources",
+        "importlib.resources._common",
+        "os",
+        "pathlib",
+        "types",
+        "typing",
+        "warnings"
+      ],
+      "name": "importlib.resources._legacy",
+      "path": "importlib/resources/_legacy.py",
+      "sha256": "79c566fdf1a61129683e38e8c11a660d6233dd84422456ae5dd230e658a7857f",
+      "source": "Lib/importlib/resources/_legacy.py"
+    },
+    {
+      "imports": [
+        "abc",
+        "io",
+        "itertools",
+        "os",
+        "pathlib",
+        "typing"
+      ],
+      "name": "importlib.resources.abc",
+      "path": "importlib/resources/abc.py",
+      "sha256": "a726c48590b21ba5532f0c654735991571bc0ecafe88145cb8891d82cd364e5e",
+      "source": "Lib/importlib/resources/abc.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "importlib.resources",
+        "importlib.resources._itertools",
+        "importlib.resources.abc",
+        "itertools",
+        "operator",
+        "pathlib",
+        "zipfile"
+      ],
+      "name": "importlib.resources.readers",
+      "path": "importlib/resources/readers.py",
+      "sha256": "10884a02b4a97636887fcedc7bae248a4ff42f3e52abb80d613cc0b2190b6ce9",
+      "source": "Lib/importlib/resources/readers.py"
+    },
+    {
+      "imports": [
+        "abc",
+        "importlib.resources.abc",
+        "io",
+        "itertools",
+        "typing"
+      ],
+      "name": "importlib.resources.simple",
+      "path": "importlib/resources/simple.py",
+      "sha256": "090dd3888305889b3ff34a3eef124bd44a5b5145676b8f8d183ad24d0dc75b66",
+      "source": "Lib/importlib/resources/simple.py"
+    },
+    {
+      "imports": [
+        "importlib.resources.simple"
+      ],
+      "name": "importlib.simple",
+      "path": "importlib/simple.py",
+      "sha256": "8e687aeeb1db537d2717cb0352c5f126ff7d4095c6de6dc7f00d5103f3009c40",
+      "source": "Lib/importlib/simple.py"
+    },
+    {
+      "imports": [
+        "_imp",
+        "importlib._abc",
+        "importlib._bootstrap",
+        "importlib._bootstrap_external",
+        "sys",
+        "threading",
+        "types"
+      ],
+      "name": "importlib.util",
+      "path": "importlib/util.py",
+      "sha256": "671f2995653f673f6d5056a1089debef473bc28ae7114f7a8db71475733d6876",
+      "source": "Lib/importlib/util.py"
+    },
+    {
+      "imports": [
+        "abc",
+        "argparse",
+        "ast",
+        "builtins",
+        "collections",
+        "collections.abc",
+        "dis",
+        "enum",
+        "functools",
+        "importlib",
+        "importlib.machinery",
+        "itertools",
+        "keyword",
+        "linecache",
+        "operator",
+        "os",
+        "re",
+        "sys",
+        "token",
+        "tokenize",
+        "types",
+        "weakref"
+      ],
+      "name": "inspect",
+      "path": "inspect.py",
+      "sha256": "5c54ebf0bfdc25397750e5d0f63800751650ee50e65325ff3ea4069c9bfa5f75",
+      "source": "Lib/inspect.py"
+    },
+    {
+      "imports": [
+        "_io",
+        "abc"
+      ],
+      "name": "io",
+      "path": "io.py",
+      "sha256": "7cec3cb8ac004058dd0a5af246e6d950fb59c7ddd0058fda48bcb3fcb98d8822",
+      "source": "Lib/io.py"
+    },
+    {
+      "imports": [
+        "functools",
+        "re"
+      ],
+      "name": "ipaddress",
+      "path": "ipaddress.py",
+      "sha256": "ba8d3389ff084fcb232b48204ec04f2b3ea4bd0eadf7b18c814947d185de2c64",
+      "source": "Lib/ipaddress.py"
+    },
+    {
+      "imports": [
+        "codecs",
+        "json.decoder",
+        "json.encoder"
+      ],
+      "name": "json",
+      "path": "json/__init__.py",
+      "sha256": "d5d41e2c29049515d295d81a6d40b4890fbec8d8482cfb401630f8ef2f77e4d5",
+      "source": "Lib/json/__init__.py"
+    },
+    {
+      "imports": [
+        "_json",
+        "json",
+        "json.scanner",
+        "re"
+      ],
+      "name": "json.decoder",
+      "path": "json/decoder.py",
+      "sha256": "382cd02af6f7efede5a6d4abbcda1015e5c7a75794b0016022878f9cf32a24f6",
+      "source": "Lib/json/decoder.py"
+    },
+    {
+      "imports": [
+        "_json",
+        "re"
+      ],
+      "name": "json.encoder",
+      "path": "json/encoder.py",
+      "sha256": "52bfb1b66029cc70fa3bd7fe11df9f2e03922d413407a341b387a22c987f24f8",
+      "source": "Lib/json/encoder.py"
+    },
+    {
+      "imports": [
+        "_json",
+        "re"
+      ],
+      "name": "json.scanner",
+      "path": "json/scanner.py",
+      "sha256": "572958017eae8842eeddd0e3d18d3c56cc0a197348224915e1d87ce937841764",
+      "source": "Lib/json/scanner.py"
+    },
+    {
+      "imports": [
+        "argparse",
+        "json",
+        "pathlib",
+        "sys"
+      ],
+      "name": "json.tool",
+      "path": "json/tool.py",
+      "sha256": "d5174b728b376a12cff3f17472d6b9b609c1d3926f7ee02d74d60c80afd60c77",
+      "source": "Lib/json/tool.py"
+    },
+    {
+      "imports": [],
+      "name": "keyword",
+      "path": "keyword.py",
+      "sha256": "18c2be738c04ad20ad375f6a71db34b3823c7f40b0340f5294d0e89f3c9b093b",
+      "source": "Lib/keyword.py"
+    },
+    {
+      "imports": [
+        "functools",
+        "os",
+        "sys",
+        "tokenize"
+      ],
+      "name": "linecache",
+      "path": "linecache.py",
+      "sha256": "9eb9194707991b49f9fea67a5222b0e6a0e49c865cdffc69fbc80a1f829e77fb",
+      "source": "Lib/linecache.py"
+    },
+    {
+      "imports": [
+        "_collections_abc",
+        "_locale",
+        "builtins",
+        "encodings",
+        "encodings.aliases",
+        "functools",
+        "os",
+        "re",
+        "sys",
+        "warnings"
+      ],
+      "name": "locale",
+      "path": "locale.py",
+      "sha256": "3988c5419552d5b9f0bef3695102376f79357f0f440e9cd1f32c501f966e6ef3",
+      "source": "Lib/locale.py"
+    },
+    {
+      "imports": [
+        "atexit",
+        "collections.abc",
+        "io",
+        "os",
+        "pickle",
+        "re",
+        "string",
+        "sys",
+        "threading",
+        "time",
+        "traceback",
+        "types",
+        "warnings",
+        "weakref"
+      ],
+      "name": "logging",
+      "path": "logging/__init__.py",
+      "sha256": "43f86bbc08fdd5c7b6e697abffe1381f534a92bb32e1f1aee8360d6a142592a1",
+      "source": "Lib/logging/__init__.py"
+    },
+    {
+      "imports": [
+        "configparser",
+        "errno",
+        "functools",
+        "io",
+        "json",
+        "logging",
+        "logging.handlers",
+        "multiprocessing.queues",
+        "os",
+        "queue",
+        "re",
+        "select",
+        "socketserver",
+        "struct",
+        "threading",
+        "traceback"
+      ],
+      "name": "logging.config",
+      "path": "logging/config.py",
+      "sha256": "6b4bdac4318ee794f667a5d5df30040abf70b9786ec5ed8bf597bd8ad0b71d27",
+      "source": "Lib/logging/config.py"
+    },
+    {
+      "imports": [
+        "base64",
+        "copy",
+        "email.message",
+        "email.utils",
+        "http.client",
+        "io",
+        "logging",
+        "os",
+        "pickle",
+        "queue",
+        "re",
+        "smtplib",
+        "socket",
+        "ssl",
+        "stat",
+        "struct",
+        "threading",
+        "time",
+        "urllib.parse",
+        "win32evtlog",
+        "win32evtlogutil"
+      ],
+      "name": "logging.handlers",
+      "path": "logging/handlers.py",
+      "sha256": "e0d31066e1d11142dc795af60351ea3610c2a08ff1cedf705743ce4522517495",
+      "source": "Lib/logging/handlers.py"
+    },
+    {
+      "imports": [
+        "_compression",
+        "_lzma",
+        "builtins",
+        "io",
+        "os"
+      ],
+      "name": "lzma",
+      "path": "lzma.py",
+      "sha256": "58fb9d2fdc8a8af7b25e218f17ea3b51bdfa53bdf40f440ab33c605974ca5c2e",
+      "source": "Lib/lzma.py"
+    },
+    {
+      "imports": [
+        "_winapi",
+        "getopt",
+        "os",
+        "posixpath",
+        "sys",
+        "urllib.parse",
+        "winreg"
+      ],
+      "name": "mimetypes",
+      "path": "mimetypes.py",
+      "sha256": "ed21537405f4b076318f966b810ae1d9415e16315603ad8003b1ecb24baf5950",
+      "source": "Lib/mimetypes.py"
+    },
+    {
+      "imports": [
+        "multiprocessing",
+        "multiprocessing.context",
+        "sys"
+      ],
+      "name": "multiprocessing",
+      "path": "multiprocessing/__init__.py",
+      "sha256": "a5a42976033c7d63ee2740acceef949a3582dcb0e0442845f9717e1be771c68b",
+      "source": "Lib/multiprocessing/__init__.py"
+    },
+    {
+      "imports": [
+        "_multiprocessing",
+        "_winapi",
+        "errno",
+        "hmac",
+        "io",
+        "itertools",
+        "multiprocessing",
+        "multiprocessing.context",
+        "multiprocessing.resource_sharer",
+        "multiprocessing.util",
+        "os",
+        "selectors",
+        "socket",
+        "struct",
+        "sys",
+        "tempfile",
+        "time",
+        "xmlrpc.client"
+      ],
+      "name": "multiprocessing.connection",
+      "path": "multiprocessing/connection.py",
+      "sha256": "c2f2d6f3d32d48d4d8c51a7d7c98766a04e958cae72a67c7f905438a7c332bdd",
+      "source": "Lib/multiprocessing/connection.py"
+    },
+    {
+      "imports": [
+        "multiprocessing",
+        "multiprocessing.connection",
+        "multiprocessing.forkserver",
+        "multiprocessing.managers",
+        "multiprocessing.pool",
+        "multiprocessing.popen_fork",
+        "multiprocessing.popen_forkserver",
+        "multiprocessing.popen_spawn_posix",
+        "multiprocessing.popen_spawn_win32",
+        "multiprocessing.process",
+        "multiprocessing.queues",
+        "multiprocessing.reduction",
+        "multiprocessing.sharedctypes",
+        "multiprocessing.spawn",
+        "multiprocessing.synchronize",
+        "multiprocessing.util",
+        "os",
+        "sys",
+        "threading"
+      ],
+      "name": "multiprocessing.context",
+      "path": "multiprocessing/context.py",
+      "sha256": "63f15d3169f4453eb80af4ce673a193a0670941206673ab5192ea16a17e8419f",
+      "source": "Lib/multiprocessing/context.py"
+    },
+    {
+      "imports": [
+        "array",
+        "multiprocessing.dummy.connection",
+        "multiprocessing.pool",
+        "queue",
+        "sys",
+        "threading",
+        "weakref"
+      ],
+      "name": "multiprocessing.dummy",
+      "path": "multiprocessing/dummy/__init__.py",
+      "sha256": "9127a40ea0ff342cb414383b5e7c594a05be2dd835fe246bd3bb0dc036a32a90",
+      "source": "Lib/multiprocessing/dummy/__init__.py"
+    },
+    {
+      "imports": [
+        "queue"
+      ],
+      "name": "multiprocessing.dummy.connection",
+      "path": "multiprocessing/dummy/connection.py",
+      "sha256": "d63dd1979fde9c133efe430ee870e6ba6de43c0a0513866ce3ce475791fe57ab",
+      "source": "Lib/multiprocessing/dummy/connection.py"
+    },
+    {
+      "imports": [
+        "errno",
+        "multiprocessing",
+        "multiprocessing.connection",
+        "multiprocessing.context",
+        "multiprocessing.process",
+        "multiprocessing.resource_tracker",
+        "multiprocessing.spawn",
+        "multiprocessing.util",
+        "os",
+        "selectors",
+        "signal",
+        "socket",
+        "struct",
+        "sys",
+        "threading",
+        "warnings"
+      ],
+      "name": "multiprocessing.forkserver",
+      "path": "multiprocessing/forkserver.py",
+      "sha256": "11c9f2e90ae7b0d5882a608ecc074047c10c7360834b026865696a0439bf873f",
+      "source": "Lib/multiprocessing/forkserver.py"
+    },
+    {
+      "imports": [
+        "_winapi",
+        "bisect",
+        "collections",
+        "mmap",
+        "multiprocessing",
+        "multiprocessing.context",
+        "multiprocessing.util",
+        "os",
+        "sys",
+        "tempfile",
+        "threading"
+      ],
+      "name": "multiprocessing.heap",
+      "path": "multiprocessing/heap.py",
+      "sha256": "f6bb79bb99b9ae484935f0d68822e9603a1622dd0b6c4966c79db232a93ba614",
+      "source": "Lib/multiprocessing/heap.py"
+    },
+    {
+      "imports": [
+        "array",
+        "multiprocessing",
+        "multiprocessing.connection",
+        "multiprocessing.context",
+        "multiprocessing.pool",
+        "multiprocessing.process",
+        "multiprocessing.resource_tracker",
+        "multiprocessing.shared_memory",
+        "multiprocessing.util",
+        "os",
+        "queue",
+        "signal",
+        "sys",
+        "threading",
+        "time",
+        "traceback",
+        "types"
+      ],
+      "name": "multiprocessing.managers",
+      "path": "multiprocessing/managers.py",
+      "sha256": "2cb074d33a3085904e1702b0b521b22fd3428d499fc656cd740e338f6e129333",
+      "source": "Lib/multiprocessing/managers.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "itertools",
+        "multiprocessing",
+        "multiprocessing.connection",
+        "multiprocessing.dummy",
+        "multiprocessing.util",
+        "os",
+        "queue",
+        "threading",
+        "time",
+        "traceback",
+        "types",
+        "warnings"
+      ],
+      "name": "multiprocessing.pool",
+      "path": "multiprocessing/pool.py",
+      "sha256": "418cd41ea5c341e66c6979a38070f6f552cbbdf0539073022b6d15c67e53f480",
+      "source": "Lib/multiprocessing/pool.py"
+    },
+    {
+      "imports": [
+        "multiprocessing",
+        "multiprocessing.connection",
+        "multiprocessing.util",
+        "os",
+        "signal"
+      ],
+      "name": "multiprocessing.popen_fork",
+      "path": "multiprocessing/popen_fork.py",
+      "sha256": "0a09db57e7fab7061c01a61778feea6e2b6bb02ccbc150332f2960b05258ef95",
+      "source": "Lib/multiprocessing/popen_fork.py"
+    },
+    {
+      "imports": [
+        "io",
+        "multiprocessing",
+        "multiprocessing.connection",
+        "multiprocessing.context",
+        "multiprocessing.forkserver",
+        "multiprocessing.popen_fork",
+        "multiprocessing.spawn",
+        "multiprocessing.util",
+        "os"
+      ],
+      "name": "multiprocessing.popen_forkserver",
+      "path": "multiprocessing/popen_forkserver.py",
+      "sha256": "0588ad0e5a36718b4377dc2a2a97864a10986c25a33dc3bfed12595711b0cdab",
+      "source": "Lib/multiprocessing/popen_forkserver.py"
+    },
+    {
+      "imports": [
+        "io",
+        "multiprocessing",
+        "multiprocessing.context",
+        "multiprocessing.popen_fork",
+        "multiprocessing.resource_tracker",
+        "multiprocessing.spawn",
+        "multiprocessing.util",
+        "os"
+      ],
+      "name": "multiprocessing.popen_spawn_posix",
+      "path": "multiprocessing/popen_spawn_posix.py",
+      "sha256": "97b5d25aa479516894489877e6a7921252ee35f51e118c2f1f91f32919e7caa8",
+      "source": "Lib/multiprocessing/popen_spawn_posix.py"
+    },
+    {
+      "imports": [
+        "_winapi",
+        "msvcrt",
+        "multiprocessing",
+        "multiprocessing.context",
+        "multiprocessing.spawn",
+        "multiprocessing.util",
+        "os",
+        "signal",
+        "sys"
+      ],
+      "name": "multiprocessing.popen_spawn_win32",
+      "path": "multiprocessing/popen_spawn_win32.py",
+      "sha256": "6ef8efd9cd4e99c64a6778f7ad0957e924de9eb4aa167337ed121a2621b1ffaa",
+      "source": "Lib/multiprocessing/popen_spawn_win32.py"
+    },
+    {
+      "imports": [
+        "_weakrefset",
+        "itertools",
+        "multiprocessing",
+        "multiprocessing.connection",
+        "multiprocessing.context",
+        "multiprocessing.util",
+        "os",
+        "signal",
+        "sys",
+        "threading",
+        "traceback"
+      ],
+      "name": "multiprocessing.process",
+      "path": "multiprocessing/process.py",
+      "sha256": "67f0c2a7a3a83c92dd024705bac18619a2e123c9df77c414beb81035ea4a0e18",
+      "source": "Lib/multiprocessing/process.py"
+    },
+    {
+      "imports": [
+        "_multiprocessing",
+        "collections",
+        "errno",
+        "multiprocessing",
+        "multiprocessing.connection",
+        "multiprocessing.context",
+        "multiprocessing.synchronize",
+        "multiprocessing.util",
+        "os",
+        "queue",
+        "sys",
+        "threading",
+        "time",
+        "traceback",
+        "types",
+        "weakref"
+      ],
+      "name": "multiprocessing.queues",
+      "path": "multiprocessing/queues.py",
+      "sha256": "f4721a323ab2981a172dd2b853d2cfeded696e9716fba340cf6e168f5ed95f83",
+      "source": "Lib/multiprocessing/queues.py"
+    },
+    {
+      "imports": [
+        "_winapi",
+        "abc",
+        "array",
+        "copyreg",
+        "functools",
+        "io",
+        "multiprocessing",
+        "multiprocessing.context",
+        "multiprocessing.resource_sharer",
+        "os",
+        "pickle",
+        "socket",
+        "sys"
+      ],
+      "name": "multiprocessing.reduction",
+      "path": "multiprocessing/reduction.py",
+      "sha256": "4999f8b9ae7b3e8a7f5de302612b4131498dc2e238a2c47f894905c1c63294fe",
+      "source": "Lib/multiprocessing/reduction.py"
+    },
+    {
+      "imports": [
+        "multiprocessing",
+        "multiprocessing.connection",
+        "multiprocessing.context",
+        "multiprocessing.process",
+        "multiprocessing.util",
+        "os",
+        "signal",
+        "socket",
+        "sys",
+        "threading"
+      ],
+      "name": "multiprocessing.resource_sharer",
+      "path": "multiprocessing/resource_sharer.py",
+      "sha256": "bba3c7f2b76a9cf4e8ceb642801c405411da95adf91947d81b0043586038290e",
+      "source": "Lib/multiprocessing/resource_sharer.py"
+    },
+    {
+      "imports": [
+        "_multiprocessing",
+        "_posixshmem",
+        "multiprocessing",
+        "multiprocessing.spawn",
+        "multiprocessing.util",
+        "os",
+        "signal",
+        "sys",
+        "threading",
+        "warnings"
+      ],
+      "name": "multiprocessing.resource_tracker",
+      "path": "multiprocessing/resource_tracker.py",
+      "sha256": "f9d73a8145f8026ec48ebe4127e7e84960e297cb2e247159f8df4f858cfccbf6",
+      "source": "Lib/multiprocessing/resource_tracker.py"
+    },
+    {
+      "imports": [
+        "_posixshmem",
+        "_winapi",
+        "errno",
+        "functools",
+        "mmap",
+        "multiprocessing",
+        "multiprocessing.resource_tracker",
+        "os",
+        "secrets",
+        "struct",
+        "types"
+      ],
+      "name": "multiprocessing.shared_memory",
+      "path": "multiprocessing/shared_memory.py",
+      "sha256": "51301e70710220e1c494ff5383ac94442a38a4a6622f2eb94e40128c45de1aeb",
+      "source": "Lib/multiprocessing/shared_memory.py"
+    },
+    {
+      "imports": [
+        "ctypes",
+        "multiprocessing",
+        "multiprocessing.context",
+        "multiprocessing.heap",
+        "weakref"
+      ],
+      "name": "multiprocessing.sharedctypes",
+      "path": "multiprocessing/sharedctypes.py",
+      "sha256": "77ef522912474652490b7df523112858e51721e63dcf109b8567a35ce9b31b0d",
+      "source": "Lib/multiprocessing/sharedctypes.py"
+    },
+    {
+      "imports": [
+        "_winapi",
+        "msvcrt",
+        "multiprocessing",
+        "multiprocessing.context",
+        "multiprocessing.process",
+        "multiprocessing.resource_tracker",
+        "multiprocessing.util",
+        "os",
+        "runpy",
+        "sys",
+        "types"
+      ],
+      "name": "multiprocessing.spawn",
+      "path": "multiprocessing/spawn.py",
+      "sha256": "ebf9fa40eb622384c37690d8c78e7208744df031155ab4ceedab0fc791a1669b",
+      "source": "Lib/multiprocessing/spawn.py"
+    },
+    {
+      "imports": [
+        "_multiprocessing",
+        "multiprocessing",
+        "multiprocessing.context",
+        "multiprocessing.heap",
+        "multiprocessing.process",
+        "multiprocessing.resource_tracker",
+        "multiprocessing.util",
+        "struct",
+        "sys",
+        "tempfile",
+        "threading",
+        "time"
+      ],
+      "name": "multiprocessing.synchronize",
+      "path": "multiprocessing/synchronize.py",
+      "sha256": "78ff49cff58c0c590324e5097241371f25d61d592c598a8b2c2788f2de32a53e",
+      "source": "Lib/multiprocessing/synchronize.py"
+    },
+    {
+      "imports": [
+        "_posixsubprocess",
+        "atexit",
+        "itertools",
+        "logging",
+        "multiprocessing",
+        "multiprocessing.forkserver",
+        "multiprocessing.process",
+        "multiprocessing.resource_tracker",
+        "os",
+        "shutil",
+        "subprocess",
+        "sys",
+        "tempfile",
+        "test",
+        "threading",
+        "traceback",
+        "weakref"
+      ],
+      "name": "multiprocessing.util",
+      "path": "multiprocessing/util.py",
+      "sha256": "6752c4515ec69f82e9df64e017da490c3754e51d818c270ea1ad2d64e09268be",
+      "source": "Lib/multiprocessing/util.py"
+    },
+    {
+      "imports": [
+        "os",
+        "pwd",
+        "stat"
+      ],
+      "name": "netrc",
+      "path": "netrc.py",
+      "sha256": "229da6d0cbe6a10295be6c64ac3806420ea018124c09e4887410548fc2fc8b5d",
+      "source": "Lib/netrc.py"
+    },
+    {
+      "imports": [
+        "_winapi",
+        "genericpath",
+        "nt",
+        "os",
+        "stat",
+        "string",
+        "sys"
+      ],
+      "name": "ntpath",
+      "path": "ntpath.py",
+      "sha256": "cc5bbd52912519e5640018e947a35e8bfb4c46d12dc539e129120dc2b688faf4",
+      "source": "Lib/ntpath.py"
+    },
+    {
+      "imports": [
+        "string",
+        "urllib.parse"
+      ],
+      "name": "nturl2path",
+      "path": "nturl2path.py",
+      "sha256": "560e42264a337d0d41b42713fbda072890997161aca8b7397cca8967a23f8b63",
+      "source": "Lib/nturl2path.py"
+    },
+    {
+      "imports": [
+        "abc"
+      ],
+      "name": "numbers",
+      "path": "numbers.py",
+      "sha256": "ac381960a3dc1db0498b0bd43d8ef278d6599713121a186b153ff09d9552e0db",
+      "source": "Lib/numbers.py"
+    },
+    {
+      "imports": [
+        "_opcode"
+      ],
+      "name": "opcode",
+      "path": "opcode.py",
+      "sha256": "192f6008508f28d3273bff42eaea9b01c8394dab1607cd36aea778bdd166c3a6",
+      "source": "Lib/opcode.py"
+    },
+    {
+      "imports": [
+        "_operator",
+        "builtins",
+        "functools"
+      ],
+      "name": "operator",
+      "path": "operator.py",
+      "sha256": "b2af20f67667203c1730e686cc5d0427becc94db4c97f1d3efe3ed2158473f6a",
+      "source": "Lib/operator.py"
+    },
+    {
+      "imports": [
+        "_collections_abc",
+        "abc",
+        "io",
+        "nt",
+        "ntpath",
+        "os.path",
+        "posix",
+        "posixpath",
+        "stat",
+        "subprocess",
+        "sys",
+        "warnings"
+      ],
+      "name": "os",
+      "path": "os.py",
+      "sha256": "54c43a1fc69c979c70d8f7d097174cee163bfe59937723ee353043dd4a0211e1",
+      "source": "Lib/os.py"
+    },
+    {
+      "imports": [
+        "_collections_abc",
+        "errno",
+        "fnmatch",
+        "functools",
+        "grp",
+        "io",
+        "ntpath",
+        "os",
+        "posixpath",
+        "pwd",
+        "re",
+        "stat",
+        "sys",
+        "urllib.parse",
+        "warnings"
+      ],
+      "name": "pathlib",
+      "path": "pathlib.py",
+      "sha256": "10ba48ae8063cfe7589436041d0d4628c05f427c7709cf8e75e486f8930cc32c",
+      "source": "Lib/pathlib.py"
+    },
+    {
+      "imports": [
+        "__main__",
+        "bdb",
+        "cmd",
+        "code",
+        "dis",
+        "functools",
+        "getopt",
+        "glob",
+        "inspect",
+        "io",
+        "linecache",
+        "os",
+        "pdb",
+        "pprint",
+        "pydoc",
+        "re",
+        "readline",
+        "runpy",
+        "shlex",
+        "signal",
+        "sys",
+        "token",
+        "tokenize",
+        "traceback",
+        "typing"
+      ],
+      "name": "pdb",
+      "path": "pdb.py",
+      "sha256": "c87944ee79327e534816bf8fb72b79b89ad9ef9d3664d2a7b90f8fb961450f25",
+      "source": "Lib/pdb.py"
+    },
+    {
+      "imports": [
+        "_compat_pickle",
+        "_pickle",
+        "argparse",
+        "codecs",
+        "copyreg",
+        "doctest",
+        "functools",
+        "io",
+        "itertools",
+        "pprint",
+        "re",
+        "struct",
+        "sys",
+        "types"
+      ],
+      "name": "pickle",
+      "path": "pickle.py",
+      "sha256": "7e3447b6d993a6306a7893fd2fba916010ed79f8e09ceb56158a550fa8099a14",
+      "source": "Lib/pickle.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "functools",
+        "importlib",
+        "importlib.machinery",
+        "importlib.util",
+        "inspect",
+        "marshal",
+        "os",
+        "os.path",
+        "re",
+        "sys",
+        "types",
+        "warnings",
+        "zipimport"
+      ],
+      "name": "pkgutil",
+      "path": "pkgutil.py",
+      "sha256": "44300bc77f6f52ef2ad74d26e5053309c04f49eaa91c099356eb61426cde504f",
+      "source": "Lib/pkgutil.py"
+    },
+    {
+      "imports": [
+        "_winreg",
+        "_wmi",
+        "collections",
+        "functools",
+        "itertools",
+        "java.lang",
+        "os",
+        "plistlib",
+        "re",
+        "socket",
+        "struct",
+        "subprocess",
+        "sys",
+        "vms_lib",
+        "winreg"
+      ],
+      "name": "platform",
+      "path": "platform.py",
+      "sha256": "f5ff83f15c841792be42709a6710dc8d7a9f72791c1ae4cad719b1fb0abe0a05",
+      "source": "Lib/platform.py"
+    },
+    {
+      "imports": [
+        "binascii",
+        "codecs",
+        "datetime",
+        "enum",
+        "io",
+        "itertools",
+        "os",
+        "re",
+        "struct",
+        "xml.parsers.expat"
+      ],
+      "name": "plistlib",
+      "path": "plistlib.py",
+      "sha256": "502ea7953e190f0bb03c6acec41c6ab54eb51bbdbd9d8e1c41e53a2d2191aebf",
+      "source": "Lib/plistlib.py"
+    },
+    {
+      "imports": [
+        "genericpath",
+        "os",
+        "posix",
+        "pwd",
+        "re",
+        "stat",
+        "sys"
+      ],
+      "name": "posixpath",
+      "path": "posixpath.py",
+      "sha256": "4e55373f6c9182e506b826f91b785b951078adaf3189e5cd032ee774a08fea38",
+      "source": "Lib/posixpath.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "dataclasses",
+        "io",
+        "re",
+        "sys",
+        "types"
+      ],
+      "name": "pprint",
+      "path": "pprint.py",
+      "sha256": "1585c8d74d7f485590db2af46680ae0a73737ca9fb66022b2bcbbc4c4925e203",
+      "source": "Lib/pprint.py"
+    },
+    {
+      "imports": [
+        "argparse",
+        "enum",
+        "importlib._bootstrap_external",
+        "importlib.machinery",
+        "importlib.util",
+        "os",
+        "os.path",
+        "sys",
+        "traceback"
+      ],
+      "name": "py_compile",
+      "path": "py_compile.py",
+      "sha256": "3464f04938b57a7aafbc5c394ccd4c46823ee607f7fe36b48b91ecbc30ff4e48",
+      "source": "Lib/py_compile.py"
+    },
+    {
+      "imports": [
+        "__future__",
+        "ast",
+        "builtins",
+        "collections",
+        "email.message",
+        "getopt",
+        "http.server",
+        "importlib._bootstrap",
+        "importlib._bootstrap_external",
+        "importlib.machinery",
+        "importlib.util",
+        "inspect",
+        "io",
+        "os",
+        "pkgutil",
+        "platform",
+        "pydoc_data.topics",
+        "re",
+        "reprlib",
+        "select",
+        "subprocess",
+        "sys",
+        "sysconfig",
+        "tempfile",
+        "textwrap",
+        "threading",
+        "time",
+        "tokenize",
+        "traceback",
+        "tty",
+        "urllib.parse",
+        "warnings",
+        "webbrowser"
+      ],
+      "name": "pydoc",
+      "path": "pydoc.py",
+      "sha256": "d181676eadd154121c64ffdc908b0fe520da2be4095fd13f8b4c6d1bb1897797",
+      "source": "Lib/pydoc.py"
+    },
+    {
+      "imports": [],
+      "name": "pydoc_data",
+      "path": "pydoc_data/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "Lib/pydoc_data/__init__.py"
+    },
+    {
+      "imports": [],
+      "name": "pydoc_data.topics",
+      "path": "pydoc_data/topics.py",
+      "sha256": "a69b863656ccf533e7d25c0a5f562eaf09c7bcb74be28cf1e0bb143e66b5125b",
+      "source": "Lib/pydoc_data/topics.py"
+    },
+    {
+      "imports": [
+        "_queue",
+        "collections",
+        "heapq",
+        "threading",
+        "time",
+        "types"
+      ],
+      "name": "queue",
+      "path": "queue.py",
+      "sha256": "f6c37fc37cd7440979f7d22d40ee818fa3b714c573610c08fa52911d541193f0",
+      "source": "Lib/queue.py"
+    },
+    {
+      "imports": [
+        "binascii",
+        "getopt",
+        "io",
+        "sys"
+      ],
+      "name": "quopri",
+      "path": "quopri.py",
+      "sha256": "a1cd7f3b22033d32151209886cc855d4b71cc4c83530769f920097582339013a",
+      "source": "Lib/quopri.py"
+    },
+    {
+      "imports": [
+        "_collections_abc",
+        "_random",
+        "_sha2",
+        "bisect",
+        "hashlib",
+        "itertools",
+        "math",
+        "operator",
+        "os",
+        "statistics",
+        "time",
+        "warnings"
+      ],
+      "name": "random",
+      "path": "random.py",
+      "sha256": "de48263a837339c7e01cf9f3c4d756696e0e0775f7778eb9cf81ad5b00134569",
+      "source": "Lib/random.py"
+    },
+    {
+      "imports": [
+        "_thread",
+        "builtins",
+        "itertools"
+      ],
+      "name": "reprlib",
+      "path": "reprlib.py",
+      "sha256": "e177bc70da83a7fbcde6fd261dc15da34e8a20873b1cccd4f9a1f8f27cca3779",
+      "source": "Lib/reprlib.py"
+    },
+    {
+      "imports": [
+        "importlib.machinery",
+        "importlib.util",
+        "io",
+        "os",
+        "pkgutil",
+        "sys",
+        "warnings"
+      ],
+      "name": "runpy",
+      "path": "runpy.py",
+      "sha256": "81e07da29bb2235111079bb64efea7d291639c5d2cf163e7af187d6a38cef389",
+      "source": "Lib/runpy.py"
+    },
+    {
+      "imports": [
+        "base64",
+        "hmac",
+        "random"
+      ],
+      "name": "secrets",
+      "path": "secrets.py",
+      "sha256": "277000574358a6ecda4bb40e73332ae81a3bc1c8e1fa36f50e5c6a7d4d3f0f17",
+      "source": "Lib/secrets.py"
+    },
+    {
+      "imports": [
+        "abc",
+        "collections",
+        "collections.abc",
+        "math",
+        "select",
+        "sys"
+      ],
+      "name": "selectors",
+      "path": "selectors.py",
+      "sha256": "1eeb102373e18c96311203f30c516e785bd8642275aa0bd66e43a284c9692385",
+      "source": "Lib/selectors.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "io",
+        "os",
+        "re",
+        "sys"
+      ],
+      "name": "shlex",
+      "path": "shlex.py",
+      "sha256": "f927227de5ba5b1b2bdd75e3d9c8cb72b602b3bba3cc8edbf8fb554de0dc1fd7",
+      "source": "Lib/shlex.py"
+    },
+    {
+      "imports": [
+        "_winapi",
+        "bz2",
+        "collections",
+        "errno",
+        "fnmatch",
+        "grp",
+        "lzma",
+        "nt",
+        "os",
+        "posix",
+        "pwd",
+        "stat",
+        "sys",
+        "tarfile",
+        "warnings",
+        "zipfile",
+        "zlib"
+      ],
+      "name": "shutil",
+      "path": "shutil.py",
+      "sha256": "f9f0102a9ed087271f914d74b07866464d3e716afe9ee10760a5eb90f7db0f33",
+      "source": "Lib/shutil.py"
+    },
+    {
+      "imports": [
+        "_signal",
+        "enum"
+      ],
+      "name": "signal",
+      "path": "signal.py",
+      "sha256": "0363c964c90ac0b3e515de5749205e6e6454051a1211058375d84d91eab6071a",
+      "source": "Lib/signal.py"
+    },
+    {
+      "imports": [
+        "base64",
+        "copy",
+        "datetime",
+        "email.base64mime",
+        "email.generator",
+        "email.message",
+        "email.utils",
+        "hmac",
+        "io",
+        "re",
+        "socket",
+        "ssl",
+        "sys"
+      ],
+      "name": "smtplib",
+      "path": "smtplib.py",
+      "sha256": "f19369e751e199f5dfc05882e2f77b6a692719cebd8a18c84552544a0b93e963",
+      "source": "Lib/smtplib.py"
+    },
+    {
+      "imports": [
+        "_socket",
+        "array",
+        "enum",
+        "errno",
+        "io",
+        "os",
+        "selectors",
+        "sys"
+      ],
+      "name": "socket",
+      "path": "socket.py",
+      "sha256": "7d4d4c66e6f4bcc961ab462c4f08002ca97def8713a4be1c7373bdbd970a5274",
+      "source": "Lib/socket.py"
+    },
+    {
+      "imports": [
+        "io",
+        "os",
+        "selectors",
+        "socket",
+        "sys",
+        "threading",
+        "time",
+        "traceback"
+      ],
+      "name": "socketserver",
+      "path": "socketserver.py",
+      "sha256": "ecbbe1a633801460399a8f10b39007aa0e13cdbdad507e39414000f097b769b5",
+      "source": "Lib/socketserver.py"
+    },
+    {
+      "imports": [
+        "_ssl",
+        "base64",
+        "calendar",
+        "collections",
+        "enum",
+        "errno",
+        "os",
+        "socket",
+        "sys",
+        "time",
+        "warnings"
+      ],
+      "name": "ssl",
+      "path": "ssl.py",
+      "sha256": "039a0e3f1782e14824b1624c7ffefc2de31714b4a9994424be45a4271966097c",
+      "source": "Lib/ssl.py"
+    },
+    {
+      "imports": [
+        "_stat"
+      ],
+      "name": "stat",
+      "path": "stat.py",
+      "sha256": "052af0327eae6941b69b05c088b3e748f79995635f80ac4cc7125eb333eb4c77",
+      "source": "Lib/stat.py"
+    },
+    {
+      "imports": [
+        "_statistics",
+        "bisect",
+        "collections",
+        "decimal",
+        "fractions",
+        "functools",
+        "itertools",
+        "math",
+        "numbers",
+        "operator",
+        "random",
+        "sys"
+      ],
+      "name": "statistics",
+      "path": "statistics.py",
+      "sha256": "5845851a5833a1436bfdfd19001f7cd6b4d95a438b76c47162897106d29449c6",
+      "source": "Lib/statistics.py"
+    },
+    {
+      "imports": [
+        "_string",
+        "collections",
+        "re"
+      ],
+      "name": "string",
+      "path": "string.py",
+      "sha256": "24aeae1f0526250f442022022bf98df9a823b1cb330543ee79e70e44907462e9",
+      "source": "Lib/string.py"
+    },
+    {
+      "imports": [
+        "unicodedata"
+      ],
+      "name": "stringprep",
+      "path": "stringprep.py",
+      "sha256": "60b6c83581093029312efb6670b11c540090b3f78bcf72264467b494f02f21a5",
+      "source": "Lib/stringprep.py"
+    },
+    {
+      "imports": [
+        "_struct"
+      ],
+      "name": "struct",
+      "path": "struct.py",
+      "sha256": "9c231f9497caf513a22dee8f790b07f969b0e45854a0bdd6dd84b492e08c2856",
+      "source": "Lib/struct.py"
+    },
+    {
+      "imports": [
+        "_posixsubprocess",
+        "_winapi",
+        "builtins",
+        "contextlib",
+        "errno",
+        "fcntl",
+        "grp",
+        "io",
+        "locale",
+        "msvcrt",
+        "os",
+        "pwd",
+        "select",
+        "selectors",
+        "signal",
+        "sys",
+        "threading",
+        "time",
+        "types",
+        "warnings"
+      ],
+      "name": "subprocess",
+      "path": "subprocess.py",
+      "sha256": "85d29b2bf0249f5436838298c9a60ee93508b1102e9ac43b001f8a7e7ae8f375",
+      "source": "Lib/subprocess.py"
+    },
+    {
+      "imports": [
+        "_aix_support",
+        "_imp",
+        "_osx_support",
+        "os",
+        "os.path",
+        "pprint",
+        "re",
+        "sys",
+        "threading",
+        "types",
+        "warnings"
+      ],
+      "name": "sysconfig",
+      "path": "sysconfig.py",
+      "sha256": "ce56212ba89be181fb90fe62496e6d2e436befaf2dffd10e87ce37d1685271a8",
+      "source": "Lib/sysconfig.py"
+    },
+    {
+      "imports": [
+        "argparse",
+        "builtins",
+        "bz2",
+        "copy",
+        "grp",
+        "gzip",
+        "io",
+        "lzma",
+        "os",
+        "pwd",
+        "re",
+        "shutil",
+        "stat",
+        "struct",
+        "sys",
+        "time",
+        "warnings",
+        "zlib"
+      ],
+      "name": "tarfile",
+      "path": "tarfile.py",
+      "sha256": "7f199ab7e8b914a7d8ae28c7c0bc8ee7a6534eb767d7d56c89f56dc828b01418",
+      "source": "Lib/tarfile.py"
+    },
+    {
+      "imports": [
+        "_thread",
+        "errno",
+        "functools",
+        "io",
+        "os",
+        "random",
+        "shutil",
+        "sys",
+        "types",
+        "warnings",
+        "weakref"
+      ],
+      "name": "tempfile",
+      "path": "tempfile.py",
+      "sha256": "2eea4401f4f29d0d3647ed6fc8bcf6aa1daf879c8aa407a8ea310edac9dfc317",
+      "source": "Lib/tempfile.py"
+    },
+    {
+      "imports": [
+        "re"
+      ],
+      "name": "textwrap",
+      "path": "textwrap.py",
+      "sha256": "62867e40cdea6669b361f72af4d7daf0359f207c92cbeddfc7c7506397c1f31c",
+      "source": "Lib/textwrap.py"
+    },
+    {
+      "imports": [
+        "_collections",
+        "_thread",
+        "_threading_local",
+        "_weakrefset",
+        "collections",
+        "functools",
+        "itertools",
+        "os",
+        "sys",
+        "time",
+        "traceback",
+        "warnings"
+      ],
+      "name": "threading",
+      "path": "threading.py",
+      "sha256": "846f450ae794e4aab823a163f8c71d27751148af33e91dd3de886686a4e8ebfb",
+      "source": "Lib/threading.py"
+    },
+    {
+      "imports": [],
+      "name": "token",
+      "path": "token.py",
+      "sha256": "1a4d994ce9744f4bfe2d964fc24d112a1e76796a08c2e45a2d73c82a8587f922",
+      "source": "Lib/token.py"
+    },
+    {
+      "imports": [
+        "_tokenize",
+        "argparse",
+        "builtins",
+        "codecs",
+        "collections",
+        "functools",
+        "io",
+        "itertools",
+        "re",
+        "sys",
+        "token"
+      ],
+      "name": "tokenize",
+      "path": "tokenize.py",
+      "sha256": "026f566ac63e60d69c8185a3880831b657accc5eac984fadf271fc99a5e5825d",
+      "source": "Lib/tokenize.py"
+    },
+    {
+      "imports": [
+        "ast",
+        "collections.abc",
+        "contextlib",
+        "itertools",
+        "linecache",
+        "sys",
+        "textwrap",
+        "unicodedata"
+      ],
+      "name": "traceback",
+      "path": "traceback.py",
+      "sha256": "2c44af2848836d9af0c7b3547469695cd22586c64274d362eafcf466af284bd6",
+      "source": "Lib/traceback.py"
+    },
+    {
+      "imports": [
+        "_tracemalloc",
+        "collections.abc",
+        "fnmatch",
+        "functools",
+        "linecache",
+        "os.path",
+        "pickle"
+      ],
+      "name": "tracemalloc",
+      "path": "tracemalloc.py",
+      "sha256": "c2cc84a05b824df79840c98729a0e94ef8909b11c528a1b2c5a00aa436b97b25",
+      "source": "Lib/tracemalloc.py"
+    },
+    {
+      "imports": [
+        "termios"
+      ],
+      "name": "tty",
+      "path": "tty.py",
+      "sha256": "1ab5e5e047130b310355e907a3306178299b9f2044fb526ac63bd116e9a16d2b",
+      "source": "Lib/tty.py"
+    },
+    {
+      "imports": [
+        "_collections_abc",
+        "functools",
+        "sys"
+      ],
+      "name": "types",
+      "path": "types.py",
+      "sha256": "345474ef027a1273f353da9bdc1f7c18f65335e72e681bcc0376774cc51f2405",
+      "source": "Lib/types.py"
+    },
+    {
+      "imports": [
+        "_typing",
+        "abc",
+        "collections",
+        "collections.abc",
+        "contextlib",
+        "copyreg",
+        "functools",
+        "inspect",
+        "operator",
+        "re",
+        "sys",
+        "types",
+        "warnings"
+      ],
+      "name": "typing",
+      "path": "typing.py",
+      "sha256": "be92d60fb8382bb29ead21c128825d7c96d0e8c915b44f840791e49f5a8d554c",
+      "source": "Lib/typing.py"
+    },
+    {
+      "imports": [
+        "unittest.async_case",
+        "unittest.case",
+        "unittest.loader",
+        "unittest.main",
+        "unittest.result",
+        "unittest.runner",
+        "unittest.signals",
+        "unittest.suite"
+      ],
+      "name": "unittest",
+      "path": "unittest/__init__.py",
+      "sha256": "32ed48385c0377bc2900a76e9a6acc3705aeef402c72de8554b3c637420506f0",
+      "source": "Lib/unittest/__init__.py"
+    },
+    {
+      "imports": [
+        "os.path",
+        "sys",
+        "unittest.main"
+      ],
+      "name": "unittest.__main__",
+      "path": "unittest/__main__.py",
+      "sha256": "ff6b9a100d32001715b40d61bc4d613623b139edb1fdc3566427b83c331caae3",
+      "source": "Lib/unittest/__main__.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "logging",
+        "unittest.case"
+      ],
+      "name": "unittest._log",
+      "path": "unittest/_log.py",
+      "sha256": "905672317ab26c656c600defce25d477728068f597f00a7f94e22e8128c323b9",
+      "source": "Lib/unittest/_log.py"
+    },
+    {
+      "imports": [
+        "asyncio",
+        "contextvars",
+        "inspect",
+        "unittest.case",
+        "warnings"
+      ],
+      "name": "unittest.async_case",
+      "path": "unittest/async_case.py",
+      "sha256": "c600343ffa27eac746001b2f35df2e4e2e52b90f14026dcfb4c43b25dfd7b261",
+      "source": "Lib/unittest/async_case.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "contextlib",
+        "difflib",
+        "functools",
+        "pprint",
+        "re",
+        "sys",
+        "time",
+        "traceback",
+        "types",
+        "unittest",
+        "unittest._log",
+        "unittest.result",
+        "unittest.util",
+        "warnings"
+      ],
+      "name": "unittest.case",
+      "path": "unittest/case.py",
+      "sha256": "45bac6d80a4fc3a0dea8340a80681e30b263f017b4a5002cb8f489a632e0f987",
+      "source": "Lib/unittest/case.py"
+    },
+    {
+      "imports": [
+        "fnmatch",
+        "functools",
+        "os",
+        "re",
+        "sys",
+        "traceback",
+        "types",
+        "unittest",
+        "unittest.case",
+        "unittest.suite",
+        "unittest.util",
+        "warnings"
+      ],
+      "name": "unittest.loader",
+      "path": "unittest/loader.py",
+      "sha256": "7f0af414bfa7fe8612a424b14cfcf8a3c34fcac999d976461beb738ef8b211b8",
+      "source": "Lib/unittest/loader.py"
+    },
+    {
+      "imports": [
+        "argparse",
+        "os",
+        "sys",
+        "unittest",
+        "unittest.loader",
+        "unittest.runner",
+        "unittest.signals",
+        "warnings"
+      ],
+      "name": "unittest.main",
+      "path": "unittest/main.py",
+      "sha256": "db58280574389c0d6cba9559cc51e1787f5b418c4e85d354aa55ca43335c487a",
+      "source": "Lib/unittest/main.py"
+    },
+    {
+      "imports": [
+        "_io",
+        "asyncio",
+        "builtins",
+        "contextlib",
+        "functools",
+        "inspect",
+        "io",
+        "pkgutil",
+        "pprint",
+        "sys",
+        "threading",
+        "types",
+        "unittest.util"
+      ],
+      "name": "unittest.mock",
+      "path": "unittest/mock.py",
+      "sha256": "1de18141992c6742bff27e77c0cbe46d53d6a5ab1850574a536910508823fc5c",
+      "source": "Lib/unittest/mock.py"
+    },
+    {
+      "imports": [
+        "functools",
+        "io",
+        "sys",
+        "traceback",
+        "unittest",
+        "unittest.util"
+      ],
+      "name": "unittest.result",
+      "path": "unittest/result.py",
+      "sha256": "5db286bdd3821d64150377e554d7edbdd58db7bb8b950772f977e9ec1d535617",
+      "source": "Lib/unittest/result.py"
+    },
+    {
+      "imports": [
+        "sys",
+        "time",
+        "unittest",
+        "unittest.case",
+        "unittest.result",
+        "unittest.signals",
+        "warnings"
+      ],
+      "name": "unittest.runner",
+      "path": "unittest/runner.py",
+      "sha256": "76d9beb9c21d0d367a1b040a921ad43f90b7971fcc8cacfccd6f9760bedf1ce2",
+      "source": "Lib/unittest/runner.py"
+    },
+    {
+      "imports": [
+        "functools",
+        "signal",
+        "weakref"
+      ],
+      "name": "unittest.signals",
+      "path": "unittest/signals.py",
+      "sha256": "f8286e818ca56e10e03745bc056cdfd31147678f9a1dc8cb6b0fe96ef9a4362a",
+      "source": "Lib/unittest/signals.py"
+    },
+    {
+      "imports": [
+        "sys",
+        "unittest",
+        "unittest.case",
+        "unittest.util"
+      ],
+      "name": "unittest.suite",
+      "path": "unittest/suite.py",
+      "sha256": "ed2da92bc9f97c53403ee2d3d12cc53b16a96e85d596ebc887b5a93458f3f6bc",
+      "source": "Lib/unittest/suite.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "os.path"
+      ],
+      "name": "unittest.util",
+      "path": "unittest/util.py",
+      "sha256": "fdcc640c3505d16deab9c32eae7c3f5f67c3b5e81c563dc6698fa7fcf403854d",
+      "source": "Lib/unittest/util.py"
+    },
+    {
+      "imports": [],
+      "name": "urllib",
+      "path": "urllib/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "Lib/urllib/__init__.py"
+    },
+    {
+      "imports": [
+        "io",
+        "urllib.response"
+      ],
+      "name": "urllib.error",
+      "path": "urllib/error.py",
+      "sha256": "d12b3cc66af3f42a8ebe63e1c91d24f92c6237b6a93a3702938dffabd812d77b",
+      "source": "Lib/urllib/error.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "functools",
+        "ipaddress",
+        "math",
+        "re",
+        "types",
+        "unicodedata",
+        "warnings"
+      ],
+      "name": "urllib.parse",
+      "path": "urllib/parse.py",
+      "sha256": "e6af7f475262f1de335bb2e41e26adb94d6103977cf5fe1ddc430dc6a3b1623f",
+      "source": "Lib/urllib/parse.py"
+    },
+    {
+      "imports": [
+        "_scproxy",
+        "base64",
+        "bisect",
+        "contextlib",
+        "email",
+        "email.utils",
+        "fnmatch",
+        "ftplib",
+        "getpass",
+        "hashlib",
+        "http.client",
+        "http.cookiejar",
+        "io",
+        "ipaddress",
+        "mimetypes",
+        "nturl2path",
+        "os",
+        "re",
+        "socket",
+        "ssl",
+        "string",
+        "sys",
+        "tempfile",
+        "time",
+        "urllib.error",
+        "urllib.parse",
+        "urllib.response",
+        "warnings",
+        "winreg"
+      ],
+      "name": "urllib.request",
+      "path": "urllib/request.py",
+      "sha256": "b9e541ae5703eb881128a4f76ebc0f00ef7ea56e8724883df413d6447ea59729",
+      "source": "Lib/urllib/request.py"
+    },
+    {
+      "imports": [
+        "tempfile"
+      ],
+      "name": "urllib.response",
+      "path": "urllib/response.py",
+      "sha256": "7e6c3b6d7a95f0d74f5968f51a87adae8a51bf42390cdfec98c7a99203e7bb76",
+      "source": "Lib/urllib/response.py"
+    },
+    {
+      "imports": [
+        "collections",
+        "time",
+        "urllib.error",
+        "urllib.parse",
+        "urllib.request"
+      ],
+      "name": "urllib.robotparser",
+      "path": "urllib/robotparser.py",
+      "sha256": "644cc6d2b09948e8782cb1e7dea3bb39a2d83932c67e7a8eae65a711318c002c",
+      "source": "Lib/urllib/robotparser.py"
+    },
+    {
+      "imports": [
+        "_warnings",
+        "builtins",
+        "linecache",
+        "re",
+        "sys",
+        "traceback",
+        "tracemalloc"
+      ],
+      "name": "warnings",
+      "path": "warnings.py",
+      "sha256": "6405e281882932205eae641b2d31fba7776f94517a206d289465a1caffbf310e",
+      "source": "Lib/warnings.py"
+    },
+    {
+      "imports": [
+        "_collections_abc",
+        "_weakref",
+        "_weakrefset",
+        "atexit",
+        "copy",
+        "gc",
+        "itertools",
+        "sys"
+      ],
+      "name": "weakref",
+      "path": "weakref.py",
+      "sha256": "56f8d313fb74019e53eb9287400702fbce788b7fe30e097b0b6e06296f3f080c",
+      "source": "Lib/weakref.py"
+    },
+    {
+      "imports": [
+        "copy",
+        "getopt",
+        "os",
+        "shlex",
+        "shutil",
+        "subprocess",
+        "sys",
+        "threading",
+        "warnings"
+      ],
+      "name": "webbrowser",
+      "path": "webbrowser.py",
+      "sha256": "cc1eccbff96cf8ce0edbeaf98b5950306cb502aab9062a08e0ec5d8aa837ea4b",
+      "source": "Lib/webbrowser.py"
+    },
+    {
+      "imports": [],
+      "name": "xml",
+      "path": "xml/__init__.py",
+      "sha256": "34296f728e7fe68cccb97a9f6edbf3bf3a686f44044c744fe85f207a92ed4811",
+      "source": "Lib/xml/__init__.py"
+    },
+    {
+      "imports": [
+        "xml.dom.domreg"
+      ],
+      "name": "xml.dom",
+      "path": "xml/dom/__init__.py",
+      "sha256": "b415a6f3d3663c3ac332ee4a0f4213eadad9281508dc97410e258a03633b063a",
+      "source": "Lib/xml/dom/__init__.py"
+    },
+    {
+      "imports": [],
+      "name": "xml.dom.NodeFilter",
+      "path": "xml/dom/NodeFilter.py",
+      "sha256": "9bfacbbb64e239a75591a7260b3ed86748eeb4366e6c40f3542753e79bace9a7",
+      "source": "Lib/xml/dom/NodeFilter.py"
+    },
+    {
+      "imports": [
+        "os",
+        "sys"
+      ],
+      "name": "xml.dom.domreg",
+      "path": "xml/dom/domreg.py",
+      "sha256": "826b02a803930834b96b1086cbee7db1d21c684f65dd3073706dc7bb5ba1a3e8",
+      "source": "Lib/xml/dom/domreg.py"
+    },
+    {
+      "imports": [
+        "xml.dom",
+        "xml.dom.NodeFilter",
+        "xml.dom.minidom",
+        "xml.dom.xmlbuilder",
+        "xml.parsers",
+        "xml.parsers.expat"
+      ],
+      "name": "xml.dom.expatbuilder",
+      "path": "xml/dom/expatbuilder.py",
+      "sha256": "80598dbc5970feaa36ea2b7549e3e76dd018fb80cf79e4a5e27e9e71af60c82c",
+      "source": "Lib/xml/dom/expatbuilder.py"
+    },
+    {
+      "imports": [
+        "xml.dom"
+      ],
+      "name": "xml.dom.minicompat",
+      "path": "xml/dom/minicompat.py",
+      "sha256": "42974c4c67803dfe80b016ff8aeea0d1e5c751703ab3aec5be765f4e534367be",
+      "source": "Lib/xml/dom/minicompat.py"
+    },
+    {
+      "imports": [
+        "io",
+        "xml.dom",
+        "xml.dom.domreg",
+        "xml.dom.expatbuilder",
+        "xml.dom.minicompat",
+        "xml.dom.pulldom",
+        "xml.dom.xmlbuilder"
+      ],
+      "name": "xml.dom.minidom",
+      "path": "xml/dom/minidom.py",
+      "sha256": "af4ee09b06efc54e7fe58032d8338c4bc8578094946d03a200740deab25d97cb",
+      "source": "Lib/xml/dom/minidom.py"
+    },
+    {
+      "imports": [
+        "io",
+        "xml.dom",
+        "xml.dom.minidom",
+        "xml.sax",
+        "xml.sax.handler"
+      ],
+      "name": "xml.dom.pulldom",
+      "path": "xml/dom/pulldom.py",
+      "sha256": "614b88673d496a360e6b10efe8d733c7c0826fb214470ff12f24a1e597699870",
+      "source": "Lib/xml/dom/pulldom.py"
+    },
+    {
+      "imports": [
+        "copy",
+        "posixpath",
+        "urllib.parse",
+        "urllib.request",
+        "xml.dom",
+        "xml.dom.NodeFilter",
+        "xml.dom.expatbuilder"
+      ],
+      "name": "xml.dom.xmlbuilder",
+      "path": "xml/dom/xmlbuilder.py",
+      "sha256": "26883dc30a461cb6a3583bd79d363858059569c04e94e3787d4d028f5fab7354",
+      "source": "Lib/xml/dom/xmlbuilder.py"
+    },
+    {
+      "imports": [],
+      "name": "xml.etree",
+      "path": "xml/etree/__init__.py",
+      "sha256": "91950edfb196c105d93886f8af7ea3c0a79e06a6b63be3e5a4ea09804e8672a6",
+      "source": "Lib/xml/etree/__init__.py"
+    },
+    {
+      "imports": [
+        "copy",
+        "urllib.parse",
+        "xml.etree",
+        "xml.etree.ElementTree"
+      ],
+      "name": "xml.etree.ElementInclude",
+      "path": "xml/etree/ElementInclude.py",
+      "sha256": "8e10c99668216701224831c82f13b36d29cd408554c19e34d290c351595df4ce",
+      "source": "Lib/xml/etree/ElementInclude.py"
+    },
+    {
+      "imports": [
+        "re"
+      ],
+      "name": "xml.etree.ElementPath",
+      "path": "xml/etree/ElementPath.py",
+      "sha256": "ae8a80a8b51567b4f0965481682705e70c73dd6bfa145283f630d6833f1b4975",
+      "source": "Lib/xml/etree/ElementPath.py"
+    },
+    {
+      "imports": [
+        "_elementtree",
+        "collections",
+        "collections.abc",
+        "contextlib",
+        "io",
+        "pyexpat",
+        "re",
+        "sys",
+        "warnings",
+        "weakref",
+        "xml.etree",
+        "xml.etree.ElementPath",
+        "xml.parsers",
+        "xml.parsers.expat"
+      ],
+      "name": "xml.etree.ElementTree",
+      "path": "xml/etree/ElementTree.py",
+      "sha256": "897618a09d05dadfa9d1707b39533526be69bf01d133747395d27fdc23db3f9f",
+      "source": "Lib/xml/etree/ElementTree.py"
+    },
+    {
+      "imports": [
+        "xml.etree.ElementTree"
+      ],
+      "name": "xml.etree.cElementTree",
+      "path": "xml/etree/cElementTree.py",
+      "sha256": "d0f57acab07fe4f9c116c3392d85946bac8e78608f409cea70005f16ea019b57",
+      "source": "Lib/xml/etree/cElementTree.py"
+    },
+    {
+      "imports": [],
+      "name": "xml.parsers",
+      "path": "xml/parsers/__init__.py",
+      "sha256": "b88497adc30d5d5eda7789c25a2206ee9270c932d584d7ac42680325651da45c",
+      "source": "Lib/xml/parsers/__init__.py"
+    },
+    {
+      "imports": [
+        "pyexpat",
+        "sys"
+      ],
+      "name": "xml.parsers.expat",
+      "path": "xml/parsers/expat.py",
+      "sha256": "64e1947747c2874117a7458bba1f07c86620cc0ed9a4a4116d262878e4a2aa09",
+      "source": "Lib/xml/parsers/expat.py"
+    },
+    {
+      "imports": [
+        "io",
+        "os",
+        "sys",
+        "xml.sax._exceptions",
+        "xml.sax.expatreader",
+        "xml.sax.handler",
+        "xml.sax.xmlreader"
+      ],
+      "name": "xml.sax",
+      "path": "xml/sax/__init__.py",
+      "sha256": "2f949d27b9eda6284482b43f4c202830fb35ea94f4101d70452119d3210bdbe0",
+      "source": "Lib/xml/sax/__init__.py"
+    },
+    {
+      "imports": [],
+      "name": "xml.sax._exceptions",
+      "path": "xml/sax/_exceptions.py",
+      "sha256": "26564d5742496196d17a4a0ee135d28f652ec81742cf2fa4bff83e64323578ac",
+      "source": "Lib/xml/sax/_exceptions.py"
+    },
+    {
+      "imports": [
+        "_weakref",
+        "weakref",
+        "xml.parsers",
+        "xml.parsers.expat",
+        "xml.sax",
+        "xml.sax._exceptions",
+        "xml.sax.handler",
+        "xml.sax.saxutils",
+        "xml.sax.xmlreader"
+      ],
+      "name": "xml.sax.expatreader",
+      "path": "xml/sax/expatreader.py",
+      "sha256": "5b6750ae591cffa303b20f092b13409a92df5ee1c403adac08dd5320eafee0be",
+      "source": "Lib/xml/sax/expatreader.py"
+    },
+    {
+      "imports": [],
+      "name": "xml.sax.handler",
+      "path": "xml/sax/handler.py",
+      "sha256": "64c7aae49f1dd382a7b9012610307bfa1d43a14a5dc09a5c8da30903f6805c3d",
+      "source": "Lib/xml/sax/handler.py"
+    },
+    {
+      "imports": [
+        "codecs",
+        "io",
+        "os",
+        "sys",
+        "urllib.parse",
+        "urllib.request",
+        "xml.sax",
+        "xml.sax.handler",
+        "xml.sax.xmlreader"
+      ],
+      "name": "xml.sax.saxutils",
+      "path": "xml/sax/saxutils.py",
+      "sha256": "3fe2cdb6386e0c4d42d37c657bbecb78b69c57aedb1610dbd8bf4043944130ab",
+      "source": "Lib/xml/sax/saxutils.py"
+    },
+    {
+      "imports": [
+        "xml.sax",
+        "xml.sax._exceptions",
+        "xml.sax.handler",
+        "xml.sax.saxutils"
+      ],
+      "name": "xml.sax.xmlreader",
+      "path": "xml/sax/xmlreader.py",
+      "sha256": "0962c8d64ac8b03148d4ae62a531f544c4fd1be2116c6f4a53b480cff463dbba",
+      "source": "Lib/xml/sax/xmlreader.py"
+    },
+    {
+      "imports": [],
+      "name": "xmlrpc",
+      "path": "xmlrpc/__init__.py",
+      "sha256": "87ad5c8954dd56fbbca04517bf87477ff4dce575170c7dd1281d7ef1f4214ac8",
+      "source": "Lib/xmlrpc/__init__.py"
+    },
+    {
+      "imports": [
+        "base64",
+        "datetime",
+        "decimal",
+        "errno",
+        "gzip",
+        "http.client",
+        "io",
+        "sys",
+        "time",
+        "urllib.parse",
+        "xml.parsers",
+        "xml.parsers.expat"
+      ],
+      "name": "xmlrpc.client",
+      "path": "xmlrpc/client.py",
+      "sha256": "c77e7072ab9aaab6c6f16f89f2e7d528183b816df5d9f80e490f773ab45fe238",
+      "source": "Lib/xmlrpc/client.py"
+    },
+    {
+      "imports": [
+        "datetime",
+        "fcntl",
+        "functools",
+        "html",
+        "http.server",
+        "inspect",
+        "os",
+        "pydoc",
+        "re",
+        "socketserver",
+        "sys",
+        "traceback",
+        "xmlrpc.client"
+      ],
+      "name": "xmlrpc.server",
+      "path": "xmlrpc/server.py",
+      "sha256": "6781c25a6224b8bafe13050d26456c8a8b480c96e7974bcf60d4deb0c4ad454c",
+      "source": "Lib/xmlrpc/server.py"
+    },
+    {
+      "imports": [
+        "argparse",
+        "binascii",
+        "bz2",
+        "importlib.util",
+        "io",
+        "lzma",
+        "os",
+        "py_compile",
+        "shutil",
+        "stat",
+        "struct",
+        "sys",
+        "threading",
+        "time",
+        "warnings",
+        "zipfile._path",
+        "zlib"
+      ],
+      "name": "zipfile",
+      "path": "zipfile/__init__.py",
+      "sha256": "94c53aedba0b0f7d6f71bf8ec34973e666ee0c0e56e6800ff4c26d2e3951987a",
+      "source": "Lib/zipfile/__init__.py"
+    },
+    {
+      "imports": [
+        "zipfile"
+      ],
+      "name": "zipfile.__main__",
+      "path": "zipfile/__main__.py",
+      "sha256": "e418cdbb27adf0063e3cec28179ac6b7bdb6ac743bb49d157f450551fcf38be2",
+      "source": "Lib/zipfile/__main__.py"
+    },
+    {
+      "imports": [
+        "contextlib",
+        "io",
+        "itertools",
+        "pathlib",
+        "posixpath",
+        "re",
+        "zipfile",
+        "zipfile._path.glob"
+      ],
+      "name": "zipfile._path",
+      "path": "zipfile/_path/__init__.py",
+      "sha256": "63fc930890d38a662253bcf7ae50a1bfa06ce38bade19084f9c89f964dcd0e12",
+      "source": "Lib/zipfile/_path/__init__.py"
+    },
+    {
+      "imports": [
+        "re"
+      ],
+      "name": "zipfile._path.glob",
+      "path": "zipfile/_path/glob.py",
+      "sha256": "64e27d3872da2ea18b901718c91297d32b9610ebdad058de8561344b0a10e8d7",
+      "source": "Lib/zipfile/_path/glob.py"
+    },
+    {
+      "imports": [
+        "_frozen_importlib",
+        "_frozen_importlib_external",
+        "_imp",
+        "_io",
+        "_warnings",
+        "importlib.readers",
+        "marshal",
+        "sys",
+        "time",
+        "zlib"
+      ],
+      "name": "zipimport",
+      "path": "zipimport.py",
+      "sha256": "a96f1d7a7b6aaf421a3cf382b94b1422f4f0ad452fdd0bb61d635b560d7a4e91",
+      "source": "Lib/zipimport.py"
+    }
+  ],
+  "schema": 1,
+  "selection": {
+    "closure": "All static imports and complete imported packages, excluding test directories.",
+    "native_modules": [
+      "re"
+    ],
+    "obsolete_paths": [
+      "asyncio.py",
+      "os/__init__.py",
+      "os/path.py",
+      "unittest.py"
+    ],
+    "preserved_paths": [
+      "_pyparse.py",
+      "_pyunparse.py",
+      "binascii.py",
+      "gc.py",
+      "itertools.py",
+      "zlib.py"
+    ],
+    "roots": [
+      "_py_abc",
+      "_pydatetime",
+      "_pydecimal",
+      "_pyio",
+      "ast",
+      "asyncio",
+      "base64",
+      "collections",
+      "contextlib",
+      "copy",
+      "dataclasses",
+      "fractions",
+      "functools",
+      "gzip",
+      "hashlib",
+      "io",
+      "json",
+      "operator",
+      "os",
+      "pathlib",
+      "queue",
+      "random",
+      "socket",
+      "string",
+      "threading",
+      "types",
+      "unittest",
+      "weakref"
+    ]
+  },
+  "upstream": {
+    "project": "CPython",
+    "sha256": "487c908ddf4097a1b9ba859f25fe46d22ccaabfb335880faac305ac62bffb79b",
+    "tag": "v3.12.12",
+    "url": "https://www.python.org/ftp/python/3.12.12/Python-3.12.12.tgz",
+    "version": "3.12.12"
+  }
+}

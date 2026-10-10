@@ -2,7 +2,6 @@ package interp
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"unicode/utf8"
@@ -14,6 +13,7 @@ import (
 // semantics are container-independent. This file mirrors src/diaspore/dspb.py.
 
 var dspbMagic = []byte("DSPB01")
+var dspbLinkedMagic = []byte("DSPB02")
 
 // dspbMaxDepth bounds node nesting on hostile input (mirrors the reference).
 const dspbMaxDepth = 8000
@@ -52,8 +52,35 @@ func indexOf(table []string, s string) (int, bool) {
 	return 0, false
 }
 
-// LooksLikeDSPB reports whether data starts with the DSPB magic.
-func LooksLikeDSPB(data []byte) bool { return bytes.HasPrefix(data, dspbMagic) }
+// LooksLikeDSPB reports whether data starts with a supported DSPB magic.
+func LooksLikeDSPB(data []byte) bool {
+	return bytes.HasPrefix(data, dspbMagic) || bytes.HasPrefix(data, dspbLinkedMagic)
+}
+
+func validStdlibID(id string) bool {
+	if len(id) != 71 || id[:7] != "sha256:" {
+		return false
+	}
+	for i := 7; i < len(id); i++ {
+		c := id[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func bundleStdlibID(bundle map[string]any) (string, error) {
+	value, present := bundle["stdlib"]
+	if !present {
+		return "", nil
+	}
+	id, ok := value.(string)
+	if !ok || !validStdlibID(id) {
+		return "", fmt.Errorf("invalid bundle stdlib: expected sha256: followed by 64 lowercase hexadecimal digits")
+	}
+	return id, nil
+}
 
 // LoadBundle decodes bundle bytes in any supported container: gzip is
 // transparently decompressed (and its payload re-sniffed, so .dspb.gz
@@ -66,9 +93,19 @@ func LoadBundle(data []byte) (map[string]any, error) {
 	if LooksLikeDSPB(data) {
 		return DecodeDSPB(data)
 	}
-	var bundle map[string]any
-	if err := json.Unmarshal(data, &bundle); err != nil {
+	value, err := DecodeJSON(data)
+	if err != nil {
 		return nil, fmt.Errorf("invalid bundle JSON: %w", err)
+	}
+	if value == nil {
+		return nil, nil
+	}
+	bundle, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid bundle JSON: expected an object")
+	}
+	if _, err := bundleStdlibID(bundle); err != nil {
+		return nil, err
 	}
 	return bundle, nil
 }
@@ -267,7 +304,14 @@ func (w *dspbWriter) node(n node) {
 		kind := nStr(n, "t")
 		w.enum(dspbConstKinds, kind, "const kind")
 		switch kind {
-		case "int", "float", "str", "bytes":
+		case "str":
+			text, err := irString(n, "v")
+			if err != nil {
+				w.fail("%v", err)
+				return
+			}
+			w.s(text)
+		case "int", "float", "bytes":
 			w.s(nStr(n, "v"))
 		case "complex":
 			w.s(nStr(n, "re"))
@@ -358,7 +402,12 @@ func (w *dspbWriter) node(n node) {
 		w.u(uint64(len(parts)))
 		for _, raw := range parts {
 			p, _ := raw.(map[string]any)
-			if s, ok := p["s"].(string); ok {
+			if _, ok := p["s"].(string); ok {
+				s, err := irString(p, "s")
+				if err != nil {
+					w.fail("%v", err)
+					return
+				}
 				w.byte(0)
 				w.s(s)
 				continue
@@ -384,6 +433,12 @@ func (w *dspbWriter) node(n node) {
 		if n["coro"] == true {
 			gb |= 2
 		}
+		if n["asyncgen"] == true {
+			gb |= 4
+		}
+		if n["annotation_scope"] == true {
+			gb |= 8
+		}
 		w.byte(gb)
 		p := nNode(n, "params")
 		vararg := nStr(p, "vararg")
@@ -395,7 +450,14 @@ func (w *dspbWriter) node(n node) {
 		if kwarg != "" {
 			pf |= 2
 		}
+		posonly, _ := p["posonly"].(float64)
+		if posonly != 0 {
+			pf |= 4
+		}
 		w.byte(pf)
+		if pf&4 != 0 {
+			w.u(uint64(posonly))
+		}
 		w.strs(nStrs(p, "args"))
 		w.nodes(nList(p, "defaults"))
 		if vararg != "" {
@@ -444,8 +506,23 @@ func (w *dspbWriter) node(n node) {
 	case "class":
 		w.s(nStr(n, "name"))
 		kwargs := nList(n, "kwargs")
+		var classFlags byte
 		if len(kwargs) > 0 {
-			w.byte(1)
+			classFlags |= 1
+		}
+		binding, hasBinding := n["binding"]
+		if hasBinding {
+			if _, ok := binding.(string); !ok {
+				w.fail("class binding must be a string")
+				return
+			}
+			classFlags |= 2
+		}
+		w.byte(classFlags)
+		if hasBinding {
+			w.s(binding.(string))
+		}
+		if len(kwargs) > 0 {
 			w.u(uint64(len(kwargs)))
 			for _, raw := range kwargs {
 				kw, _ := raw.(map[string]any)
@@ -457,8 +534,6 @@ func (w *dspbWriter) node(n node) {
 				}
 				w.node(nNode(kw, "v"))
 			}
-		} else {
-			w.byte(0)
 		}
 		w.nodes(nList(n, "bases"))
 		w.nodes(nList(n, "body"))
@@ -549,6 +624,10 @@ func EncodeDSPB(bundle map[string]any, moduleOrder []string) ([]byte, error) {
 	if mods == nil {
 		return nil, fmt.Errorf("not a diaspore v1 bundle")
 	}
+	stdlibID, err := bundleStdlibID(bundle)
+	if err != nil {
+		return nil, err
+	}
 	order := moduleOrder
 	if order == nil {
 		for name := range mods {
@@ -563,6 +642,9 @@ func EncodeDSPB(bundle map[string]any, moduleOrder []string) ([]byte, error) {
 	w.u(1)
 	main, _ := bundle["main"].(string)
 	w.s(main)
+	if stdlibID != "" {
+		w.s(stdlibID)
+	}
 	w.u(uint64(len(mods)))
 	for _, name := range order {
 		mod, ok := mods[name].(map[string]any)
@@ -587,7 +669,11 @@ func EncodeDSPB(bundle map[string]any, moduleOrder []string) ([]byte, error) {
 		return nil, w.err
 	}
 	var out bytes.Buffer
-	out.Write(dspbMagic)
+	if stdlibID == "" {
+		out.Write(dspbMagic)
+	} else {
+		out.Write(dspbLinkedMagic)
+	}
 	head := &dspbWriter{}
 	head.u(uint64(len(w.strlist)))
 	out.Write(head.buf.Bytes())
@@ -657,7 +743,11 @@ func (r *dspbReader) decNode() map[string]any {
 		kind := r.enum(dspbConstKinds, "const kind")
 		n["t"] = kind
 		switch kind {
-		case "int", "float", "str", "bytes":
+		case "str":
+			text := r.s()
+			n["v"] = text
+			preserveIRCodepoints(n, "v", text)
+		case "int", "float", "bytes":
 			n["v"] = r.s()
 		case "complex":
 			n["re"] = r.s()
@@ -744,7 +834,10 @@ func (r *dspbReader) decNode() map[string]any {
 		for i := uint64(0); i < count && r.err == nil; i++ {
 			flag := r.byte()
 			if flag == 0 {
-				parts = append(parts, map[string]any{"s": r.s()})
+				text := r.s()
+				part := map[string]any{"s": text}
+				preserveIRCodepoints(part, "s", text)
+				parts = append(parts, part)
 				continue
 			}
 			part := map[string]any{"v": r.decNode()}
@@ -766,8 +859,17 @@ func (r *dspbReader) decNode() map[string]any {
 		if gb&2 != 0 {
 			n["coro"] = true
 		}
+		if gb&4 != 0 {
+			n["asyncgen"] = true
+		}
+		if gb&8 != 0 {
+			n["annotation_scope"] = true
+		}
 		pf := r.byte()
 		p := map[string]any{}
+		if pf&4 != 0 {
+			p["posonly"] = float64(r.u())
+		}
 		setIfAny(p, "args", r.decStrs())
 		setIfAny(p, "defaults", r.decNodes())
 		if pf&1 != 0 {
@@ -818,7 +920,15 @@ func (r *dspbReader) decNode() map[string]any {
 	case "break", "continue", "pass":
 	case "class":
 		n["name"] = r.s()
-		if r.byte() != 0 {
+		classFlags := r.byte()
+		if classFlags & ^byte(3) != 0 {
+			r.fail("invalid class flags %d", classFlags)
+			return n
+		}
+		if classFlags&2 != 0 {
+			n["binding"] = r.s()
+		}
+		if classFlags&1 != 0 {
 			count := r.count()
 			kwargs := make([]any, 0, count)
 			for i := uint64(0); i < count && r.err == nil; i++ {
@@ -932,6 +1042,13 @@ func DecodeDSPB(data []byte) (map[string]any, error) {
 		return nil, fmt.Errorf("unsupported semantic version %d", v)
 	}
 	main := r.s()
+	stdlibID := ""
+	if bytes.HasPrefix(data, dspbLinkedMagic) {
+		stdlibID = r.s()
+		if r.err == nil && !validStdlibID(stdlibID) {
+			r.fail("invalid stdlib id: expected sha256: followed by 64 lowercase hexadecimal digits")
+		}
+	}
 	modules := map[string]any{}
 	modCount := r.count()
 	for i := uint64(0); i < modCount && r.err == nil; i++ {
@@ -943,10 +1060,30 @@ func DecodeDSPB(data []byte) (map[string]any, error) {
 		mod["body"] = r.decNodes()
 		modules[name] = mod
 	}
+	if r.err == nil && r.pos != len(data) {
+		r.fail("trailing bytes after bundle")
+	}
 	if r.err != nil {
 		return nil, fmt.Errorf("bad DSPB bundle: %w", r.err)
 	}
-	return map[string]any{"diaspore": float64(1), "main": main, "modules": modules}, nil
+	bundle := map[string]any{"diaspore": float64(1), "main": main, "modules": modules}
+	if stdlibID != "" {
+		bundle["stdlib"] = stdlibID
+	}
+	return bundle, nil
 }
 
-func isValidUTF8(b []byte) bool { return utf8.Valid(b) }
+func isValidUTF8(b []byte) bool {
+	for len(b) > 0 {
+		if len(b) >= 3 && b[0] == 0xed && b[1] >= 0xa0 && b[1] <= 0xbf && b[2]&0xc0 == 0x80 {
+			b = b[3:]
+			continue
+		}
+		r, size := utf8.DecodeRune(b)
+		if r == utf8.RuneError && size == 1 {
+			return false
+		}
+		b = b[size:]
+	}
+	return true
+}

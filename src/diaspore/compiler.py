@@ -7,37 +7,25 @@ from __future__ import annotations
 
 import ast
 import base64
-import gzip
 import json
 import math
 import os
 
+from .stdlib._pyparse import (
+    implicit_call_modules,
+    lower_class_pattern,
+    lower_type_scope,
+    mangle_private_name,
+    module_dependencies,
+)
+
 DIASPORE_VERSION = 1
 
-NATIVE_MODULES = {"time", "math", "json", "random", "sys", "net", "re", "tasks", "flow", "_os"}
-
-# Public names each native module exports (for `from mod import *`); kept in
-# sync with make_native_modules in vm.py.
-NATIVE_EXPORTS = {
-    "_os": ["getcwd", "kind", "listdir", "realpath"],
-    "sys": ["argv", "exit", "platform", "stderr_write", "stdin", "stdout", "stderr",
-            "getrecursionlimit", "setrecursionlimit"],
-    "math": ["pi", "e", "inf", "nan", "sqrt", "floor", "ceil", "fabs", "pow",
-             "log", "log2", "log10", "exp", "sin", "cos", "tan", "hypot",
-             "fmod", "isnan", "isinf"],
-    "time": ["time", "monotonic", "sleep"],
-    "json": ["dumps", "loads"],
-    "random": ["seed", "random", "randint", "choice", "shuffle", "Random"],
-    "re": ["IGNORECASE", "MULTILINE", "DOTALL", "search", "match", "fullmatch",
-           "findall", "split", "sub", "escape"],
-    "flow": ["suspend"],
-    "net": ["listen", "connect", "accept", "recv", "send", "close", "peer"],
-    "tasks": ["spawn", "channel", "lock"],
+NATIVE_MODULES = {
+    "builtins", "time", "math", "sys", "net", "re", "tasks", "flow", "_os", "_json", "_abc",
+    "_operator", "_diaspore_stdlib", "_diaspore_hash",
 }
 
-# Type-checking imports remain compile-time declarations; variable annotations
-# themselves are evaluated unless postponed by the annotations future.
-TYPE_ONLY_MODULES = {"typing", "__future__"}
 
 _BINOP = {
     ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "div",
@@ -56,6 +44,15 @@ _CMP = {
 
 _TRUE = {"op": "const", "t": "bool", "v": True}
 _FALSE = {"op": "const", "t": "bool", "v": False}
+
+
+def _string_fields(value: str, key: str) -> dict:
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+        return {
+            key: value.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass"),
+            "codepoints": [ord(char) for char in value],
+        }
+    return {key: value}
 
 
 def _name(id_: str) -> dict:
@@ -93,12 +90,13 @@ class DiasporeCompileError(Exception):
 
 class _Scope:
     def __init__(self, kind: str, locals_: set[str], gdecl: set[str], ndecl: set[str],
-                 class_name: str = ""):
+                 class_name: str = "", private_names: set[str] | None = None):
         self.kind = kind  # "module" | "function" | "class"
         self.locals = locals_
         self.gdecl = gdecl
         self.ndecl = ndecl
         self.class_name = class_name
+        self.private_names = private_names
 
 
 class _LocalsCollector(ast.NodeVisitor):
@@ -129,6 +127,9 @@ class _LocalsCollector(ast.NodeVisitor):
             self.visit(dec)
         for b in node.bases:
             self.visit(b)
+
+    def visit_TypeAlias(self, node):
+        self.assigned.add(node.name.id)
 
     def visit_Lambda(self, node):
         for d in node.args.defaults + [d for d in node.args.kw_defaults if d]:
@@ -186,17 +187,27 @@ class _YieldFinder(ast.NodeVisitor):
         self.found = True
 
     def visit_FunctionDef(self, node):
-        pass
+        for expr in node.decorator_list:
+            self.visit(expr)
+        self.visit(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
+    def visit_ClassDef(self, node):
+        for expr in node.decorator_list + node.bases:
+            self.visit(expr)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+
     def visit_Lambda(self, node):
-        pass
+        self.visit(node.args)
 
-    def _skip(self, node):
-        pass
+    def _comprehension(self, node):
+        self.visit(node.generators[0].iter)
 
-    visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _skip
+    visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _comprehension
 
 
 def _is_type_checking(test: ast.expr) -> bool:
@@ -240,19 +251,28 @@ class ModuleCompiler:
     """Lower one Python module into portable IR."""
 
     def __init__(self, name: str, file: str, source: str,
-                 package_ctx: str = "", star_resolver=None, is_module=None):
-        """Initialize source, package context, and import resolution callbacks."""
+                 package_ctx: str = "", is_module=None, implicit_modules: bool = True):
+        """Initialize source, package context, and module resolution."""
         self.name, self.file = name, file
         self.source = source
         self.scopes: list[_Scope] = []
         self.imports: set[str] = set()
-        # package context for resolving relative imports ("" = top level);
-        # star_resolver(absname) -> list[str] exports; is_module(absname) -> bool
+        # Empty package context denotes a top-level module.
         self.package_ctx = package_ctx
-        self.star_resolver = star_resolver
         self.is_module = is_module or (lambda name: False)
+        self.implicit_modules = implicit_modules
         self._tmp = 0
         self.future_annotations = False
+
+    def _mangle(self, name):
+        if name is None:
+            return None
+        for scope in reversed(self.scopes):
+            if scope.kind == "class" or scope.class_name:
+                if scope.private_names is not None and name not in scope.private_names:
+                    return name
+                return mangle_private_name(name, scope.class_name)
+        return name
 
     def _gensym(self, prefix: str) -> str:
         """Generate a dot-prefixed name that cannot collide with source names."""
@@ -278,8 +298,22 @@ class ModuleCompiler:
             for s in tree.body)
         self.scopes.append(_Scope("module", set(), set(), set()))
         body = [_annotation_setup(tree.body[0].lineno)] if _has_annotations(tree.body) else []
+        doc = self._docstring_assignment(tree.body)
+        if doc is not None:
+            body.append(doc)
         body.extend(self.block(tree.body))
         return {"name": self.name, "file": self.file, "body": body}
+
+    def _docstring_assignment(self, body):
+        value = None
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            value = self.expr(body[0].value)
+            ln = body[0].lineno
+        if value is None:
+            return None
+        return {"op": "assign", "targets": [_name("__doc__")], "v": value, "ln": ln}
 
     def block(self, stmts: list[ast.stmt]) -> list[dict]:
         """Compile a statement block, omitting its leading docstring."""
@@ -342,6 +376,8 @@ class ModuleCompiler:
                 return self.funcdef(s)
             case ast.ClassDef():
                 return self.classdef(s)
+            case ast.TypeAlias():
+                return self._type_scope(s, self.expr(s.value))
             case ast.Raise(exc=e, cause=c):
                 node = {"op": "raise", "ln": ln}
                 if e is not None:
@@ -354,7 +390,7 @@ class ModuleCompiler:
                 for h in hs:
                     handlers.append({
                         "t": self.expr(h.type) if h.type is not None else None,
-                        "name": h.name,
+                        "name": self._mangle(h.name),
                         "body": self.block(h.body),
                     })
                 return {"op": "try", "body": self.block(b), "handlers": handlers,
@@ -379,20 +415,19 @@ class ModuleCompiler:
             case ast.Import(names=names):
                 out = []
                 for a in names:
-                    if a.name in TYPE_ONLY_MODULES:
-                        continue
-                    self.imports.add(a.name)
+                    module = self._mangle(a.name)
+                    self.imports.add(module)
                     if a.asname:
-                        out.append({"op": "import", "module": a.name,
-                                    "alias": a.asname, "ln": ln})
+                        out.append({"op": "import", "module": module,
+                                    "alias": self._mangle(a.asname), "ln": ln})
                     elif "." in a.name:
                         # `import a.b.c` executes the chain, binds the root
-                        out.append({"op": "import", "module": a.name,
-                                    "alias": a.name.split(".")[0],
+                        out.append({"op": "import", "module": module,
+                                    "alias": self._mangle(a.name.split(".")[0]),
                                     "bind": "root", "ln": ln})
                     else:
-                        out.append({"op": "import", "module": a.name,
-                                    "alias": a.name, "ln": ln})
+                        out.append({"op": "import", "module": module,
+                                    "alias": self._mangle(a.name), "ln": ln})
                 return out or None
             case ast.ImportFrom(module=mod, names=names, level=lvl):
                 return self.import_from(mod, names, lvl, s, ln)
@@ -413,7 +448,7 @@ class ModuleCompiler:
                 for h in hs:
                     handlers.append({
                         "t": self.expr(h.type) if h.type is not None else None,
-                        "name": h.name,
+                        "name": self._mangle(h.name),
                         "body": self.block(h.body),
                     })
                 return {"op": "try", "star": True, "body": self.block(b),
@@ -451,10 +486,7 @@ class ModuleCompiler:
             if s.simple and isinstance(target, ast.Name):
                 annotation = ({"op": "const", "t": "str", "v": ast.unparse(s.annotation)}
                               if self.future_annotations else self.expr(s.annotation))
-                name = target.id
-                class_name = self.scopes[-1].class_name.lstrip("_")
-                if class_name and name.startswith("__") and not name.endswith("__"):
-                    name = "_" + class_name + name
+                name = self._mangle(target.id)
                 out.append({"op": "assign", "targets": [{
                     "op": "index", "o": _name("__annotations__"),
                     "k": {"op": "const", "t": "str", "v": name}}],
@@ -466,6 +498,8 @@ class ModuleCompiler:
 
     def import_from(self, mod, names, level: int, s, ln: int):
         """Resolve and lower a from-import using the current package context."""
+        if mod is not None:
+            mod = self._mangle(mod)
         if level:
             ctx = self.package_ctx
             if not ctx:
@@ -481,17 +515,12 @@ class ModuleCompiler:
             if mod is None:
                 raise self.err("unsupported import form", s)
             target = mod
-        if target in TYPE_ONLY_MODULES:
-            return None
         if any(a.name == "*" for a in names):
             if len(names) != 1:
                 raise self.err("unsupported import form", s)
-            if self.star_resolver is None:
-                raise self.err("'import *' is not supported here", s)
-            exported = self.star_resolver(target, self, s)
             self.imports.add(target)
             return {"op": "importfrom", "module": target,
-                    "names": [{"n": n, "alias": n} for n in exported], "ln": ln}
+                    "names": [{"n": "*", "alias": "*"}], "ln": ln}
         self.imports.add(target)
         out: list[dict] = []
         for a in names:
@@ -502,7 +531,7 @@ class ModuleCompiler:
                 self.imports.add(child)
                 out.append({"op": "import", "module": child, "bind": "none", "ln": ln})
         out.append({"op": "importfrom", "module": target,
-                    "names": [{"n": a.name, "alias": a.asname or a.name}
+                    "names": [{"n": self._mangle(a.name), "alias": self._mangle(a.asname or a.name)}
                               for a in names], "ln": ln})
         return out
 
@@ -513,12 +542,13 @@ class ModuleCompiler:
                 if arg.arg.startswith("."):
                     raise self.err("invalid parameter name", arg)
         return {
-            "args": [x.arg for x in a.posonlyargs + a.args],
+            "args": [self._mangle(x.arg) for x in a.posonlyargs + a.args],
+            "posonly": len(a.posonlyargs),
             "defaults": [self.expr(d) for d in a.defaults],
-            "vararg": a.vararg.arg if a.vararg else None,
-            "kwonly": [x.arg for x in a.kwonlyargs],
+            "vararg": self._mangle(a.vararg.arg) if a.vararg else None,
+            "kwonly": [self._mangle(x.arg) for x in a.kwonlyargs],
             "kwdefaults": [self.expr(d) if d is not None else None for d in a.kw_defaults],
-            "kwarg": a.kwarg.arg if a.kwarg else None,
+            "kwarg": self._mangle(a.kwarg.arg) if a.kwarg else None,
         }
 
     def _function_node(self, name: str, a: ast.arguments, body: list[ast.stmt],
@@ -528,6 +558,9 @@ class ModuleCompiler:
         col = _LocalsCollector()
         for st in body:
             col.visit(st)
+        col.assigned = {self._mangle(n) for n in col.assigned}
+        col.gdecl = {self._mangle(n) for n in col.gdecl}
+        col.ndecl = {self._mangle(n) for n in col.ndecl}
         param_names = set(params["args"]) | set(params["kwonly"])
         if params["vararg"]:
             param_names.add(params["vararg"])
@@ -538,81 +571,161 @@ class ModuleCompiler:
             raise self.err(f"name {bad.pop()!r} is parameter and global/nonlocal")
         locals_ = (col.assigned | param_names) - col.gdecl - col.ndecl
         for n in col.ndecl:
-            if not any(sc.kind == "function" and n in sc.locals for sc in self.scopes):
+            for sc in reversed(self.scopes):
+                if sc.kind in ("function", "annotation") and n in sc.locals:
+                    if sc.kind == "annotation":
+                        raise self.err(f"nonlocal binding not allowed for type parameter {n!r}")
+                    break
+            else:
                 raise self.err(f"no binding for nonlocal {n!r} found")
         self.scopes.append(_Scope("function", locals_, col.gdecl, col.ndecl))
         try:
             compiled = synthetic_body if synthetic_body is not None else self.block(body)
+            if (synthetic_body is None and body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                compiled.insert(0, self.stmt(body[0]))
         finally:
             self.scopes.pop()
-        # Await lowers to yield-from; coro preserves the source-level distinction.
+        # Await lowers to yield-from, so retain both source-level distinctions.
+        source_yield = _is_generator(body)
         return {
             "op": op, "name": name,
-            "gen": _is_generator(body) or coro,
+            "gen": source_yield or coro,
             "coro": coro,
+            "asyncgen": coro and source_yield,
             "params": params,
             "locals": sorted(locals_), "gdecl": sorted(col.gdecl), "ndecl": sorted(col.ndecl),
             "body": compiled, "ln": ln,
         }
 
+    def _type_scope(self, s, node, annotations=None, decorators=None, binding=None):
+        self.imports.add("_typing")
+        parameters = []
+        for param in s.type_params:
+            bound = getattr(param, "bound", None)
+            parameters.append({
+                "t": type(param).__name__, "name": param.name,
+                "binding": self._mangle(param.name),
+                "bound": self.expr(bound) if bound is not None else None,
+                "constraints": isinstance(bound, ast.Tuple),
+            })
+        name = s.name.id if isinstance(s, ast.TypeAlias) else s.name
+        if decorators is None:
+            decorators = [self.expr(d) for d in getattr(s, "decorator_list", [])]
+        return lower_type_scope(
+            name, parameters, node, decorators,
+            annotations, self._gensym, s.lineno, lambda message: self.err(message, s),
+            self._mangle(name) if binding is None else binding,
+        )
+
     def funcdef(self, s, coro: bool = False):
         """Compile a function definition and apply its decorators."""
-        node = self._function_node(s.name, s.args, s.body, s.lineno, "func",
-                                   coro=coro)
-        if not s.decorator_list:
+        if s.type_params:
+            self.scopes.append(_Scope(
+                "annotation", {self._mangle(param.name) for param in s.type_params}, set(), set()
+            ))
+        try:
+            node = self._function_node(s.name, s.args, s.body, s.lineno, "func", coro=coro)
+        finally:
+            if s.type_params:
+                self.scopes.pop()
+        if s.type_params:
+            entries = []
+            args = s.args.posonlyargs + s.args.args
+            if s.args.vararg is not None:
+                args.append(s.args.vararg)
+            args.extend(s.args.kwonlyargs)
+            if s.args.kwarg is not None:
+                args.append(s.args.kwarg)
+            pairs = [(self._mangle(arg.arg), arg.annotation)
+                     for arg in args if arg.annotation is not None]
+            if s.returns is not None:
+                pairs.append(("return", s.returns))
+            for name, annotation in pairs:
+                value = ({"op": "const", "t": "str", "v": ast.unparse(annotation)}
+                         if self.future_annotations else self.expr(annotation))
+                entries.append({"k": {"op": "const", "t": "str", "v": name}, "v": value})
+            return self._type_scope(s, node, {"op": "dict", "entries": entries})
+        binding = self._mangle(s.name)
+        if not s.decorator_list and binding == s.name:
             return node
         node["op"] = "funcexpr"
         del node["ln"]
         value: dict = node
         for dec in reversed(s.decorator_list):
             value = {"op": "call", "f": self.expr(dec), "args": [value], "kw": []}
-        return {"op": "assign", "targets": [{"op": "name", "id": s.name}],
+        return {"op": "assign", "targets": [{"op": "name", "id": binding}],
                 "v": value, "ln": s.lineno}
 
     def classdef(self, s: ast.ClassDef):
         """Compile a class body, bases, keywords, and decorators."""
-        # keywords carry n=null for `**mapping` expansion; a `metaclass=`
-        # keyword (static or via **) is resolved at runtime by the VM
-        kwargs = []
-        for kw in s.keywords:
-            kwargs.append({"n": kw.arg, "v": self.expr(kw.value)})
-        col = _LocalsCollector()
-        for st in s.body:
-            col.visit(st)
-        self.scopes.append(_Scope("class", col.assigned, col.gdecl, col.ndecl, s.name))
+        binding = self._mangle(s.name)
+        decorators = [self.expr(d) for d in s.decorator_list]
+        if s.type_params:
+            private_names = {param.name for param in s.type_params}
+            self.scopes.append(_Scope(
+                "annotation", {mangle_private_name(n, s.name) for n in private_names},
+                set(), set(), s.name, private_names,
+            ))
         try:
-            body = [_annotation_setup(s.lineno)] if _has_annotations(s.body) else []
-            body.extend(self.block(s.body))
+            kwargs = [{"n": kw.arg, "v": self.expr(kw.value)} for kw in s.keywords]
+            col = _LocalsCollector()
+            for st in s.body:
+                col.visit(st)
+            col.assigned = {mangle_private_name(n, s.name) for n in col.assigned}
+            col.gdecl = {mangle_private_name(n, s.name) for n in col.gdecl}
+            col.ndecl = {mangle_private_name(n, s.name) for n in col.ndecl}
+            self.scopes.append(_Scope("class", col.assigned, col.gdecl, col.ndecl, s.name))
+            try:
+                for name in col.ndecl:
+                    for scope in reversed(self.scopes):
+                        if scope.kind in ("function", "annotation") and name in scope.locals:
+                            if scope.kind == "annotation":
+                                raise self.err(
+                                    f"nonlocal binding not allowed for type parameter {name!r}", s
+                                )
+                            break
+                body = [_annotation_setup(s.lineno)] if _has_annotations(s.body) else []
+                doc = self._docstring_assignment(s.body)
+                if doc is not None:
+                    body.append(doc)
+                body.extend(self.block(s.body))
+            finally:
+                self.scopes.pop()
+            bases = []
+            for base in s.bases:
+                if isinstance(base, ast.Starred):
+                    bases.append({"op": "starred", "v": self.expr(base.value)})
+                else:
+                    bases.append(self.expr(base))
+            node = {"op": "class", "name": s.name, "bases": bases,
+                    "body": body, "ln": s.lineno}
+            if binding != s.name:
+                node["binding"] = binding
+            if kwargs:
+                node["kwargs"] = kwargs
+            if s.type_params:
+                return self._type_scope(s, node, decorators=decorators, binding=binding)
         finally:
-            self.scopes.pop()
-        bases = []
-        for b in s.bases:
-            if isinstance(b, ast.Starred):
-                bases.append({"op": "starred", "v": self.expr(b.value)})
-            else:
-                bases.append(self.expr(b))
-        node = {"op": "class", "name": s.name, "bases": bases,
-                "body": body, "ln": s.lineno}
-        if kwargs:
-            node["kwargs"] = kwargs
-        if not s.decorator_list:
+            if s.type_params:
+                self.scopes.pop()
+        if not decorators:
             return node
-        stmts: list[dict] = [node]
-        value: dict = {"op": "name", "id": s.name}
-        for dec in reversed(s.decorator_list):
-            value = {"op": "call", "f": self.expr(dec), "args": [value], "kw": []}
-        stmts.append({"op": "assign", "targets": [{"op": "name", "id": s.name}],
-                      "v": value, "ln": s.lineno})
-        return stmts
+        value: dict = {"op": "name", "id": binding}
+        for decorator in reversed(decorators):
+            value = {"op": "call", "f": decorator, "args": [value], "kw": []}
+        return [node, {"op": "assign", "targets": [{"op": "name", "id": binding}],
+                       "v": value, "ln": s.lineno}]
 
 
     def target(self, t: ast.expr) -> dict:
         """Compile an assignment target."""
         match t:
             case ast.Name(id=i):
-                return {"op": "name", "id": i}
+                return {"op": "name", "id": self._mangle(i)}
             case ast.Attribute(value=v, attr=n):
-                return {"op": "attr", "o": self.expr(v), "n": n}
+                return {"op": "attr", "o": self.expr(v), "n": self._mangle(n)}
             case ast.Subscript(value=v, slice=k):
                 return {"op": "index", "o": self.expr(v), "k": self.subscript(k)}
             case ast.Tuple(elts=es) | ast.List(elts=es):
@@ -659,7 +772,7 @@ class ModuleCompiler:
         if isinstance(v, float):
             return {"op": "const", "t": "float", "v": self._floatstr(v)}
         if isinstance(v, str):
-            return {"op": "const", "t": "str", "v": v}
+            return {"op": "const", "t": "str", **_string_fields(v, "v")}
         if isinstance(v, bytes):
             return {"op": "const", "t": "bytes", "v": base64.b64encode(v).decode("ascii")}
         if isinstance(v, complex):
@@ -681,9 +794,9 @@ class ModuleCompiler:
             case ast.Constant(value=v):
                 return self.const(v, e)
             case ast.Name(id=i):
-                return {"op": "name", "id": i}
+                return {"op": "name", "id": self._mangle(i)}
             case ast.Attribute(value=v, attr=n):
-                return {"op": "attr", "o": self.expr(v), "n": n}
+                return {"op": "attr", "o": self.expr(v), "n": self._mangle(n)}
             case ast.Subscript(value=v, slice=k):
                 return {"op": "index", "o": self.expr(v), "k": self.subscript(k)}
             case ast.BinOp(left=l, op=op, right=r):
@@ -711,7 +824,11 @@ class ModuleCompiler:
                     else:
                         cargs.append(self.expr(a))
                 ckw = [{"n": kw.arg, "v": self.expr(kw.value)} for kw in kws]
-                return {"op": "call", "f": self.expr(f), "args": cargs, "kw": ckw}
+                node = {"op": "call", "f": self.expr(f), "args": cargs, "kw": ckw}
+                if self.implicit_modules:
+                    for dependency in implicit_call_modules(node):
+                        self.imports.add(dependency)
+                return node
             case ast.List(elts=es):
                 return {"op": "list", "elts": self._elts(es)}
             case ast.Tuple(elts=es):
@@ -742,7 +859,7 @@ class ModuleCompiler:
                 self._check_yield(e)
                 return {"op": "yieldfrom", "v": self.expr(v)}
             case ast.NamedExpr(target=t, value=v):
-                return {"op": "namedexpr", "target": {"op": "name", "id": t.id},
+                return {"op": "namedexpr", "target": {"op": "name", "id": self._mangle(t.id)},
                         "v": self.expr(v)}
             case ast.Await(value=v):
                 if self.scopes[-1].kind != "function":
@@ -772,7 +889,7 @@ class ModuleCompiler:
         out = []
         for p in parts:
             if isinstance(p, ast.Constant):
-                out.append({"s": p.value})
+                out.append(_string_fields(p.value, "s"))
                 continue
             assert isinstance(p, ast.FormattedValue)
             conv = None
@@ -864,7 +981,7 @@ class ModuleCompiler:
 
     def _collect_target_names(self, t: ast.expr, into: set[str]):
         if isinstance(t, ast.Name):
-            into.add(t.id)
+            into.add(self._mangle(t.id))
         elif isinstance(t, (ast.Tuple, ast.List)):
             for x in t.elts:
                 self._collect_target_names(x, into)
@@ -995,17 +1112,8 @@ class ModuleCompiler:
             case ast.MatchMapping(keys=keys, patterns=pats, rest=rest):
                 return self._map_pattern(keys, pats, rest, subj, inner, ln)
             case ast.MatchClass(cls=cls, patterns=pos, kwd_attrs=attrs, kwd_patterns=kpats):
-                if pos:
-                    raise self.err(
-                        "positional class patterns are not supported; "
-                        "use keyword patterns (e.g. case Point(x=a, y=b))", p)
-                chain = inner
-                for attr, kp in zip(reversed(attrs), reversed(kpats)):
-                    sub = {"op": "attr", "o": subj, "n": attr}
-                    chain = [self._if(
-                        _call("hasattr", [subj, {"op": "const", "t": "str", "v": attr}]),
-                        self.pattern(kp, sub, chain), kp.lineno)]
-                return [self._if(_call("isinstance", [subj, self.expr(cls)]), chain, ln)]
+                return lower_class_pattern(self.expr(cls), pos, attrs, kpats,
+                                           subj, inner, ln, self._gensym, self.pattern)
             case _:
                 raise self.err(f"unsupported match pattern: {type(p).__name__}", p)
 
@@ -1048,7 +1156,7 @@ class ModuleCompiler:
         if rest is not None:
             copy = [self._bind(rest, _call("dict", [subj]), ln)]
             copy += [{"op": "del", "targets": [
-                {"op": "index", "o": _name(rest), "k": ke}], "ln": ln}
+                {"op": "index", "o": _name(self._mangle(rest)), "k": ke}], "ln": ln}
                 for ke in key_exprs]
             chain = copy + chain
         for ke, kp in zip(reversed(key_exprs), reversed(pats)):
@@ -1060,41 +1168,17 @@ class ModuleCompiler:
         return {"op": "assign", "targets": [_name(hidden)], "v": value, "ln": ln}
 
     def _bind(self, user_name: str, value: dict, ln: int) -> dict:
-        return {"op": "assign", "targets": [_name(user_name)], "v": value, "ln": ln}
+        return {"op": "assign", "targets": [_name(self._mangle(user_name))], "v": value, "ln": ln}
 
     @staticmethod
     def _if(test: dict, then: list[dict], ln: int) -> dict:
         return {"op": "if", "test": test, "then": then, "orelse": [], "ln": ln}
 
 
-# Pure-subset stdlib modules shipped with diaspore. They are searched after the
-# entry's own directory, so a user module of the same name still wins.
-STDLIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stdlib")
-
-
-def stdlib_overlay(root: str = "/stdlib") -> dict[str, str]:
-    """Return the shipped standard library as a virtual file map.
-
-    The embedded compilers (diaspore-go, the browser) have no access to this
-    package's files, so they receive the stdlib as in-memory files and search
-    `root` after the entry directory and any `--path` roots.
-
-    Args:
-        root: Absolute virtual directory the modules appear under.
-
-    Returns:
-        A mapping from virtual path to module source, sorted by path.
-    """
-    files = {}
-    for dirpath, dirnames, filenames in os.walk(STDLIB_DIR):
-        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
-        for name in sorted(filenames):
-            if name.endswith(".py"):
-                path = os.path.join(dirpath, name)
-                rel = os.path.relpath(path, STDLIB_DIR).replace(os.sep, "/")
-                with open(path, encoding="utf-8") as f:
-                    files[f"{root}/{rel}"] = f.read()
-    return dict(sorted(files.items()))
+# Host __file__ is absolute; sandbox imports must not request cwd or filesystem access.
+STDLIB_DIR = os.path.join(os.path.dirname(__file__), "stdlib")
+CPYTHON_DIR = os.path.join(os.path.dirname(__file__), "cpython")
+STDLIB_DIRS = (STDLIB_DIR, CPYTHON_DIR)
 
 
 # Bundles name stdlib modules "<stdlib>/name.py" (like CPython's "<frozen ...>"),
@@ -1102,25 +1186,13 @@ def stdlib_overlay(root: str = "/stdlib") -> dict[str, str]:
 STDLIB_FILE_PREFIX = "<stdlib>/"
 
 
-def write_stdlib_overlay(path: str) -> None:
-    """Write `stdlib_overlay()` as JSON, gzip-compressed when `path` ends in .gz.
-
-    Args:
-        path: Output file path.
-    """
-    data = (json.dumps(stdlib_overlay(), separators=(",", ":")) + "\n").encode()
-    if path.endswith(".gz"):
-        data = gzip.compress(data, mtime=0)
-    with open(path, "wb") as f:
-        f.write(data)
-
-
 def compile_bundle(entry_path: str,
                    extra_modules: set[str] | frozenset[str] = frozenset(),
                    debug: bool = False,
                    unresolved_out: dict | None = None,
                    stdlib: bool = True,
-                   search_paths: tuple[str, ...] | list[str] = ()) -> dict:
+                   search_paths: tuple[str, ...] | list[str] = (),
+                   self_contained: bool = False) -> dict:
     """Compile an entry file and its transitive source imports.
 
     Args:
@@ -1130,10 +1202,14 @@ def compile_bundle(entry_path: str,
         unresolved_out: Optional mapping populated with unresolved imports.
         stdlib: Search the bundled standard library after local modules.
         search_paths: Import roots searched after the entry directory and before stdlib.
+        self_contained: Embed reachable standard-library modules instead of linking the store.
 
     Returns:
         A compact bundle containing the entry and resolved source modules.
     """
+    from .stdlib_store import get_stdlib_id, get_stdlib_module, stdlib_module_names
+
+    library_names = set(stdlib_module_names()) if stdlib else set()
     entry_path = os.path.abspath(entry_path)
     if not os.path.exists(entry_path):
         raise DiasporeCompileError("entry file not found", entry_path)
@@ -1142,20 +1218,17 @@ def compile_bundle(entry_path: str,
     known = NATIVE_MODULES | set(extra_modules)
 
     modules: dict[str, dict] = {}
-    exports: dict[str, list[str]] = {}
     in_progress: set[str] = set()
     unresolved: dict[str, str] = {}  # dotted name -> importing file
 
     search_roots = [root, *(os.path.abspath(path) for path in search_paths)]
-    stdlib_root = None
-    if stdlib and os.path.isdir(STDLIB_DIR):
-        stdlib_root = os.path.abspath(STDLIB_DIR)
-        search_roots.append(stdlib_root)
+    stdlib_roots = STDLIB_DIRS if stdlib else ()
 
     def module_file(path: str) -> str:
         """Name a module's source in the bundle independently of the build host."""
-        if stdlib_root is not None and path.startswith(stdlib_root + os.sep):
-            return STDLIB_FILE_PREFIX + os.path.relpath(path, stdlib_root).replace(os.sep, "/")
+        for stdlib_root in stdlib_roots:
+            if path.startswith(stdlib_root + os.sep):
+                return STDLIB_FILE_PREFIX + os.path.relpath(path, stdlib_root).replace(os.sep, "/")
         rel = os.path.relpath(path)
         return path if rel.startswith("..") else rel
 
@@ -1170,37 +1243,32 @@ def compile_bundle(entry_path: str,
                 return base + ".py", False
         return None
 
-    def module_exports(name: str, body_names: set[str], compiled: dict) -> list[str]:
-        for stmt in compiled["body"]:
-            if stmt["op"] == "assign" and len(stmt["targets"]) == 1 \
-                    and stmt["targets"][0] == {"op": "name", "id": "__all__"} \
-                    and stmt["v"].get("op") == "list" \
-                    and all(e.get("op") == "const" and e.get("t") == "str"
-                            for e in stmt["v"]["elts"]):
-                return [e["v"] for e in stmt["v"]["elts"]]
-        return sorted(n for n in body_names if not n.startswith("_"))
-
-    def star_resolver(target: str, mc: ModuleCompiler, node) -> list[str]:
-        if target in NATIVE_EXPORTS:
-            return list(NATIVE_EXPORTS[target])
-        if target in known:
-            raise mc.err(f"'import *' from native module {target!r} is not supported",
-                         node)
-        if target in in_progress:
-            raise mc.err(f"'import *' from {target!r} within an import cycle", node)
-        if not ensure(target, mc, node):
-            raise mc.err(f"cannot resolve import {target!r} for 'import *'", node)
-        return exports[target]
-
-    def ensure(name: str, importer: ModuleCompiler | None, node) -> bool:
+    def ensure(name: str) -> bool:
         if name in modules or name in in_progress:
             return True
         rp = resolve_path(name)
         if rp is None:
-            return False
+            if name not in library_names:
+                return False
+            if not self_contained:
+                if "." in name:
+                    ensure(name.rsplit(".", 1)[0])
+                return True
+            import copy
+
+            module = copy.deepcopy(get_stdlib_module(name))
+            if not debug:
+                module.pop("src", None)
+            modules[name] = module
+            if "." in name:
+                ensure(name.rsplit(".", 1)[0])
+            for dependency in module_dependencies(module):
+                if not ensure(dependency) and dependency not in known:
+                    unresolved.setdefault(dependency, module["file"])
+            return True
         if "." in name:
             parent = name.rsplit(".", 1)[0]
-            if not ensure(parent, importer, node):
+            if not ensure(parent):
                 raise DiasporeCompileError(
                     f"package {parent!r} not found for module {name!r}", rp[0])
         path, is_package = rp
@@ -1213,8 +1281,9 @@ def compile_bundle(entry_path: str,
         pkg_ctx = name if is_package else (
             name.rsplit(".", 1)[0] if "." in name else "")
         mc = ModuleCompiler(name, module_file(path), source,
-                            package_ctx=pkg_ctx, star_resolver=star_resolver,
-                            is_module=lambda n: resolve_path(n) is not None)
+                            package_ctx=pkg_ctx,
+                            is_module=lambda n: resolve_path(n) is not None or n in library_names,
+                            implicit_modules=stdlib and self_contained)
         in_progress.add(name)
         try:
             compiled = mc.compile()
@@ -1223,14 +1292,12 @@ def compile_bundle(entry_path: str,
         modules[name] = compiled
         if debug:
             compiled["src"] = source.splitlines()
-        col = _LocalsCollector()
-        for st in ast.parse(source).body:
-            col.visit(st)
-        exports[name] = module_exports(name, col.assigned, compiled)
+        if stdlib and self_contained and "_abc" in mc.imports:
+            mc.imports.add("_weakref")
         for dep in sorted(mc.imports):
             if dep in modules or dep in in_progress:
                 continue
-            if ensure(dep, mc, None):
+            if ensure(dep):
                 continue
             if dep.split(".")[0] in known and "." not in dep:
                 continue
@@ -1243,8 +1310,10 @@ def compile_bundle(entry_path: str,
         ordered[name] = modules[name]
     if unresolved_out is not None:
         unresolved_out.update(sorted(unresolved.items()))
-    return compact_bundle({"diaspore": DIASPORE_VERSION, "main": entry_name,
-                           "modules": ordered})
+    bundle = {"diaspore": DIASPORE_VERSION, "main": entry_name, "modules": ordered}
+    if stdlib and not self_contained:
+        bundle["stdlib"] = get_stdlib_id()
+    return compact_bundle(bundle)
 
 
 # Readers use defaults for omitted fields (docs/spec.md section 2.2).
@@ -1252,7 +1321,9 @@ _OMIT_DEFAULTS: list[tuple[str, object]] = [
     ("orelse", []), ("finalbody", []), ("handlers", []), ("kw", []),
     ("args", []), ("elts", []), ("entries", []), ("bases", []),
     ("gdecl", []), ("ndecl", []), ("locals", []), ("gen", False), ("coro", False),
+    ("asyncgen", False), ("annotation_scope", False),
     ("defaults", []), ("kwonly", []), ("kwdefaults", []),
+    ("posonly", 0),
     ("vararg", None), ("kwarg", None), ("conv", None), ("spec", None),
     ("t", None), ("name", None),
 ]
@@ -1285,5 +1356,5 @@ def compact_bundle(bundle: dict) -> dict:
 def dumps(bundle: dict, pretty: bool = False) -> str:
     """Serialize a bundle as UTF-8-compatible JSON, optionally indented."""
     if pretty:
-        return json.dumps(bundle, indent=2, ensure_ascii=False)
-    return json.dumps(bundle, separators=(",", ":"), ensure_ascii=False)
+        return json.dumps(bundle, indent=2, ensure_ascii=True)
+    return json.dumps(bundle, separators=(",", ":"), ensure_ascii=True)

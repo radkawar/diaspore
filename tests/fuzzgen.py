@@ -12,18 +12,35 @@ import random
 
 BOUND = 100003  # prime; keeps int vars < 2**17 so depth-3 products fit int64
 
-STR_POOL = ['"diaspore"', '"abc"', '"Hello, World"', '"x,y,z"', '""', '"padded  "',
-            '"MiXeD case"', '"12345"']
-STR_METHOD_POOL = [".upper()", ".lower()", ".strip()", ".title()",
-                   '.replace("a", "_")', '.split(",")', ".swapcase()",
-                   '.count("l")', '.find("o")', ".capitalize()"]
+STR_POOL = [
+    '"diaspore"',
+    '"abc"',
+    '"Hello, World"',
+    '"x,y,z"',
+    '""',
+    '"padded  "',
+    '"MiXeD case"',
+    '"12345"',
+]
+STR_METHOD_POOL = [
+    ".upper()",
+    ".lower()",
+    ".strip()",
+    ".title()",
+    '.replace("a", "_")',
+    '.split(",")',
+    ".swapcase()",
+    '.count("l")',
+    '.find("o")',
+    ".capitalize()",
+]
 
 
 class Gen:
     def __init__(self, seed: int):
         self.r = random.Random(seed)
         self.seed = seed
-        self.vars: dict[str, str] = {}   # name -> kind
+        self.vars: dict[str, str] = {}  # name -> kind
         self.funcs: list[tuple[str, int]] = []  # name, arity
         self.lines: list[str] = []
         self.frozen: set[str] = set()  # lists being iterated: no growth
@@ -59,13 +76,14 @@ class Gen:
             case "unary":
                 return f"(-{self.int_expr(depth + 1)})"
             case "cond":
-                return (f"({self.int_expr(depth + 1)} if {self.bool_expr(depth + 1)}"
-                        f" else {self.int_expr(depth + 1)})")
+                return (
+                    f"({self.int_expr(depth + 1)} if {self.bool_expr(depth + 1)}"
+                    f" else {self.int_expr(depth + 1)})"
+                )
             case _:
                 op = r.choice(["+", "-", "*", "//", "%", "+", "-"])
                 lhs = self.int_expr(depth + 1)
-                rhs = (str(r.randint(1, 19)) if op in ("//", "%")
-                       else self.int_expr(depth + 1))
+                rhs = str(r.randint(1, 19)) if op in ("//", "%") else self.int_expr(depth + 1)
                 return f"({lhs} {op} {rhs})"
 
     def float_expr(self, depth: int = 0) -> str:
@@ -113,8 +131,7 @@ class Gen:
                     return f"str({base}{method})"
                 return f"{base}{method}"
             case "fstr":
-                inner = r.choice([self.int_expr(2), self.float_expr(1),
-                                  self.str_expr(depth + 1)])
+                inner = r.choice([self.int_expr(2), self.float_expr(1), self.str_expr(depth + 1)])
                 spec = r.choice(["", "", ":>10", ":<8", ""])
                 return f'f"v={{{inner}{spec}}}!"'
             case "slice":
@@ -134,19 +151,20 @@ class Gen:
             case "cmp":
                 op = r.choice(["==", "!=", "<", "<=", ">", ">="])
                 kind = r.choice(["int", "float", "str"])
-                e = {"int": self.int_expr, "float": self.float_expr,
-                     "str": self.str_expr}[kind]
+                e = {"int": self.int_expr, "float": self.float_expr, "str": self.str_expr}[kind]
                 return f"({e(depth + 1)} {op} {e(depth + 1)})"
             case "chain":
-                return (f"({self.int_expr(depth + 1)} < {self.int_expr(depth + 1)}"
-                        f" <= {self.int_expr(depth + 1)})")
+                return (
+                    f"({self.int_expr(depth + 1)} < {self.int_expr(depth + 1)}"
+                    f" <= {self.int_expr(depth + 1)})"
+                )
             case "not":
                 return f"(not {self.bool_expr(depth + 1)})"
             case "andor":
                 op = self.r.choice(["and", "or"])
                 return f"({self.bool_expr(depth + 1)} {op} {self.bool_expr(depth + 1)})"
             case "in":
-                return f'({self.str_expr(depth + 1)} in {self.str_expr(depth + 1)})'
+                return f"({self.str_expr(depth + 1)} in {self.str_expr(depth + 1)})"
             case _:
                 return r.choice(["True", "False"])
 
@@ -166,8 +184,9 @@ class Gen:
             case "comp":
                 src = f"range({r.randint(1, 7)})"
                 body = r.choice([f"_c * {r.randint(1, 5)}", "_c + 1", "_c * _c"])
-                cond = r.choice(["", f" if _c % {r.randint(2, 3)} == 0",
-                                 f" if _c > {r.randint(0, 3)}"])
+                cond = r.choice(
+                    ["", f" if _c % {r.randint(2, 3)} == 0", f" if _c > {r.randint(0, 3)}"]
+                )
                 return f"[{body} for _c in {src}{cond}]"
             case "sorted":
                 rev = r.choice(["", ", reverse=True"])
@@ -179,15 +198,24 @@ class Gen:
 
     def any_expr(self) -> str:
         kind = self.r.choice(["int", "float", "str", "bool", "list"])
-        return {"int": self.int_expr, "float": self.float_expr, "str": self.str_expr,
-                "bool": self.bool_expr, "list": self.list_expr}[kind]()
+        return {
+            "int": self.int_expr,
+            "float": self.float_expr,
+            "str": self.str_expr,
+            "bool": self.bool_expr,
+            "list": self.list_expr,
+        }[kind]()
 
     def stmt_assign(self, indent: int) -> None:
         kind = self.r.choice(["int", "int", "float", "str", "bool", "list"])
         # Generate the RHS before registering its target to avoid unbound names.
-        expr = {"int": lambda: f"({self.int_expr()}) % {BOUND}",
-                "float": self.float_expr, "str": self.str_expr,
-                "bool": self.bool_expr, "list": self.list_expr}[kind]()
+        expr = {
+            "int": lambda: f"({self.int_expr()}) % {BOUND}",
+            "float": self.float_expr,
+            "str": self.str_expr,
+            "bool": self.bool_expr,
+            "list": self.list_expr,
+        }[kind]()
         existing = self.pick_var(kind)
         name = existing if (existing and self.r.random() < 0.4) else self.fresh(kind)
         self.emit(f"{name} = {expr}", indent)
@@ -219,8 +247,7 @@ class Gen:
             self.scoped_block(indent + 1, min(budget, 2))
 
     def stmt_for(self, indent: int, budget: int) -> None:
-        it = self.r.choice([f"range({self.r.randint(1, 6)})",
-                            self.list_expr(1), self.str_expr(2)])
+        it = self.r.choice([f"range({self.r.randint(1, 6)})", self.list_expr(1), self.str_expr(2)])
         v = self.fresh("int")
         self.vars[v] = "any"
         self.emit(f"{v} = 0  # stays bound even if the iterable is empty", indent)
@@ -265,12 +292,14 @@ class Gen:
 
     def stmt_try(self, indent: int) -> None:
         r = self.r
-        risky = r.choice([
-            f"print(({self.int_expr(2)}) // ({self.int_expr(2)} - {self.int_expr(2)}))",
-            f"print({self.list_expr(1)}[{r.randint(0, 9)}])",
-            f"print(int({self.str_expr(2)}))",
-            f"print({self.int_expr(2)} % ({self.int_expr(2)} - {self.int_expr(2)}))",
-        ])
+        risky = r.choice(
+            [
+                f"print(({self.int_expr(2)}) // ({self.int_expr(2)} - {self.int_expr(2)}))",
+                f"print({self.list_expr(1)}[{r.randint(0, 9)}])",
+                f"print(int({self.str_expr(2)}))",
+                f"print({self.int_expr(2)} % ({self.int_expr(2)} - {self.int_expr(2)}))",
+            ]
+        )
         self.emit("try:", indent)
         self.emit(risky, indent + 1)
         if r.random() < 0.5:
@@ -307,12 +336,15 @@ class Gen:
         n = self.r.randint(1, 6)
         self.emit(f"def {gname}():", indent)
         self.emit(f"for _gi in range({n}):", indent + 1)
-        self.emit(f"yield (_gi * {self.r.randint(1, 9)} + {self.r.randint(0, 5)})",
-                  indent + 2)
-        use = self.r.choice([f"print(list({gname}()))",
-                             f"print(sum({gname}()))",
-                             f"print(max({gname}(), default=-1))",
-                             f"print([x for x in {gname}() if x % 2 == 0])"])
+        self.emit(f"yield (_gi * {self.r.randint(1, 9)} + {self.r.randint(0, 5)})", indent + 2)
+        use = self.r.choice(
+            [
+                f"print(list({gname}()))",
+                f"print(sum({gname}()))",
+                f"print(max({gname}(), default=-1))",
+                f"print([x for x in {gname}() if x % 2 == 0])",
+            ]
+        )
         self.emit(use, indent)
 
     def stmt_match(self, indent: int) -> None:
@@ -337,10 +369,15 @@ class Gen:
         if v in self.frozen:  # never grow a list that an enclosing for iterates
             self.emit(f"print(len({v}), sum({v}))", indent)
             return
-        op = self.r.choice([f"{v}.append({self.int_expr(2)})",
-                            f"{v}.reverse()", f"{v}.sort()",
-                            f"print(len({v}), {v})",
-                            f"print(sum({v}))"])
+        op = self.r.choice(
+            [
+                f"{v}.append({self.int_expr(2)})",
+                f"{v}.reverse()",
+                f"{v}.sort()",
+                f"print(len({v}), {v})",
+                f"print(sum({v}))",
+            ]
+        )
         self.emit(op, indent)
 
     def block(self, indent: int, budget: int) -> None:

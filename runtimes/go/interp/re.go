@@ -2,573 +2,794 @@ package interp
 
 import (
 	"fmt"
-	"regexp"
+	"regexp/syntax"
+	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
-// The re module (spec 11.8): a validated portable subset of Python regular
-// expressions implemented over Go's RE2 engine. Patterns outside the subset
-// raise ValueError with the same messages as the Python VM.
-
-const (
-	reIgnoreCase = 2
-	reMultiline  = 8
-	reDotAll     = 16
-)
-
-// reValidate mirrors diaspore-py's _re_validate byte for byte.
-func reValidate(pattern string) error {
-	i, n := 0, len(pattern)
-	for i < n {
-		ch := pattern[i]
-		if ch == '\\' {
-			if i+1 < n && pattern[i+1] >= '1' && pattern[i+1] <= '9' {
-				return newError("ValueError", "diaspore re: backreferences are not supported")
-			}
-			if i+1 < n && (pattern[i+1] == 'A' || pattern[i+1] == 'Z') {
-				return newError("ValueError", `diaspore re: \A/\Z are not supported (use ^ and $)`)
-			}
-			i += 2
-			continue
-		}
-		if strings.HasPrefix(pattern[i:], "(?") {
-			j := i + 2
-			flags := 0
-			for j < n && (pattern[j] == 'i' || pattern[j] == 'm' || pattern[j] == 's') {
-				flags++
-				j++
-			}
-			ok := (j < n && pattern[j] == ':') || (flags > 0 && j < n && pattern[j] == ')')
-			if !ok {
-				return newError("ValueError",
-					"diaspore re: only (?:...) groups and (?ims) flags are supported")
-			}
-			i = j + 1
-			continue
-		}
-		if (ch == '*' || ch == '+' || ch == '?') && i+1 < n && pattern[i+1] == '+' {
-			return newError("ValueError", "diaspore re: possessive quantifiers are not supported")
-		}
-		i++
-	}
-	return nil
-}
-
-// compiledRe caches the anchor variants for one (pattern, flags) key.
+// compiledRe owns a Python-compatible translation of the Go regexp program.
+// Unsupported constructs fail at compilation instead of approximating matches.
 type compiledRe struct {
-	prefix    string // inline-flag prefix, e.g. "(?im)"
-	pat       string
-	search    *regexp.Regexp
-	match     *regexp.Regexp // \A-anchored
-	fullmatch *regexp.Regexp // \A(?:p)\z
-	probe     *regexp.Regexp // lazily built: \A(?s:.)(?:p)
-}
-
-// findAllPy returns Go's match stream repaired to CPython finditer semantics:
-// Go drops an empty match occurring exactly at the end of the preceding
-// non-empty match; Python (3.7+) keeps it.
-func (c *compiledRe) findAllPy(s string) [][]int {
-	raw := c.search.FindAllStringSubmatchIndex(s, -1)
-	out := make([][]int, 0, len(raw))
-	for i, m := range raw {
-		out = append(out, m)
-		if m[1] > m[0] {
-			e := m[1]
-			if i+1 < len(raw) && raw[i+1][0] == e {
-				continue
-			}
-			if em := c.emptyMatchAt(s, e); em != nil {
-				out = append(out, em)
-			}
-		}
-	}
-	return out
-}
-
-// emptyMatchAt reports the group vector of a preferred empty match at byte
-// position e (always > 0 here: e is the end of a non-empty match). Context
-// assertions (^, $, \b) are preserved by probing on the previous rune plus
-// the suffix with a one-dot prefix.
-func (c *compiledRe) emptyMatchAt(s string, e int) []int {
-	if e <= 0 || e > len(s) {
-		return nil
-	}
-	if c.probe == nil {
-		p, err := regexp.Compile(c.prefix + `\A(?s:.)(?:` + c.pat + `)`)
-		if err != nil {
-			return nil
-		}
-		c.probe = p
-	}
-	_, size := utf8.DecodeLastRuneInString(s[:e])
-	off := e - size
-	loc := c.probe.FindStringSubmatchIndex(s[off:])
-	if loc == nil || loc[1] != size {
-		return nil // no match, or the pattern prefers a non-empty match here
-	}
-	out := make([]int, len(loc))
-	out[0], out[1] = e, e
-	for g := 2; g < len(loc); g++ {
-		if loc[g] < 0 {
-			out[g] = -1
-		} else {
-			out[g] = loc[g] + off
-		}
-	}
-	return out
+	pattern    Value
+	flags      int64
+	bytes      bool
+	prog       *syntax.Prog
+	slots      []int
+	public     map[int]int
+	names      map[string]int
+	assertions map[int]reAssertion
+	loops      map[uint32]reLoop
+	progress   map[uint32]reProgress
+	guards     int
+	specials   map[uint32]reSpecialInst
+	object     *NativeObject
+	errorClass *Class
 }
 
 type reCache struct {
-	m map[string]*compiledRe
+	m          map[string]*compiledRe
+	errorClass *Class
 }
 
-func flagPrefix(flags int64) string {
-	var b strings.Builder
-	if flags&(reIgnoreCase|reMultiline|reDotAll) != 0 {
-		b.WriteString("(?")
-		if flags&reIgnoreCase != 0 {
-			b.WriteByte('i')
+func reText(v Value) ([]rune, bool, error) {
+	switch s := rawPrim(v).(type) {
+	case string:
+		return pyRunes(s), false, nil
+	case []byte:
+		r := make([]rune, len(s))
+		for i, b := range s {
+			r[i] = rune(b)
 		}
-		if flags&reMultiline != 0 {
-			b.WriteByte('m')
-		}
-		if flags&reDotAll != 0 {
-			b.WriteByte('s')
-		}
-		b.WriteByte(')')
+		return r, true, nil
+	default:
+		return nil, false, newErrorf("TypeError", "expected string or bytes, got '%s'", typeName(v))
 	}
-	return b.String()
 }
 
-func (rc *reCache) get(pattern Value, flags int64) (*compiledRe, error) {
-	p, ok := pattern.(string)
+func reValue(s []rune, binary bool) Value {
+	if !binary {
+		return pyString(s)
+	}
+	b := make([]byte, len(s))
+	for i, r := range s {
+		b[i] = byte(r)
+	}
+	return b
+}
+
+func reInteger(v Value, name string) (int64, error) {
+	n, ok := asInt(v)
 	if !ok {
-		return nil, newError("TypeError", "re pattern must be a string")
+		return 0, newErrorf("TypeError", "%s must be an integer", name)
 	}
-	key := fmt.Sprintf("%d:%s", flags, p)
+	return n, nil
+}
+
+func reIsNone(v Value) bool { _, ok := v.(NoneType); return ok }
+
+func reArgs(name string, args []Value, kw []KwArg, names []string, required int, defaults []Value) ([]Value, error) {
+	if len(args) > len(names) {
+		return nil, newErrorf("TypeError", "%s expected at most %d arguments", name, len(names))
+	}
+	out := make([]Value, len(names))
+	copy(out[required:], defaults)
+	copy(out, args)
+	set := make([]bool, len(names))
+	for i := range args {
+		set[i] = true
+	}
+	for _, k := range kw {
+		index := -1
+		for i, n := range names {
+			if n == k.Name {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return nil, newErrorf("TypeError", "%s got an unexpected keyword argument '%s'", name, k.Name)
+		}
+		if set[index] {
+			return nil, newErrorf("TypeError", "%s got multiple values for '%s'", name, k.Name)
+		}
+		out[index] = k.Val
+		set[index] = true
+	}
+	for i := 0; i < required; i++ {
+		if !set[i] {
+			return nil, newErrorf("TypeError", "%s missing required argument '%s'", name, names[i])
+		}
+	}
+	return out, nil
+}
+
+func (rc *reCache) get(pattern Value, flags int64) (result *compiledRe, err error) {
+	if rc.errorClass == nil {
+		rc.errorClass = makeReErrorClass()
+	}
+	defer func() { err = reRaiseDiagnostic(err, pattern, rc.errorClass) }()
+	if object, ok := pattern.(*NativeObject); ok && object.Kind == "re.Pattern" {
+		if flags != 0 {
+			return nil, newError("ValueError", "cannot process flags argument with a compiled pattern")
+		}
+		return object.payload.(*compiledRe), nil
+	}
+	cacheFlags := flags
+	runes, binary, err := reText(pattern)
+	if err != nil {
+		return nil, err
+	}
+	if flags & ^int64(reIgnoreCase|reLocale|reMultiline|reDotAll|reUnicode|reVerbose|reASCII) != 0 {
+		return nil, newError("ValueError", "unsupported regex flags")
+	}
+	if flags&reLocale != 0 {
+		return nil, newError("ValueError", "LOCALE is not supported")
+	}
+	if flags&reASCII != 0 && flags&reUnicode != 0 {
+		return nil, newError("ValueError", "ASCII and UNICODE flags are incompatible")
+	}
+	if binary {
+		if flags&reUnicode != 0 {
+			return nil, newError("ValueError", "cannot use UNICODE flag with a bytes pattern")
+		}
+	} else if flags&reASCII == 0 {
+		flags |= reUnicode
+	}
+	source := pyString(runes)
+	key := fmt.Sprintf("%t:%d:%s", binary, cacheFlags, source)
 	if c, ok := rc.m[key]; ok {
 		return c, nil
 	}
-	if err := reValidate(p); err != nil {
+	translateFlags := flags
+	if binary {
+		translateFlags |= reASCII
+	}
+	prefix := "__diaspore_assert_"
+	for strings.Contains(source, prefix) {
+		prefix += "_"
+	}
+	t := &reTranslator{s: source, bytes: binary, prefix: prefix, assertions: map[string]string{}, global: translateFlags, asciiExplicit: flags&reASCII != 0, explicitModes: cacheFlags & (reASCII | reUnicode)}
+	translated, err := t.translate(translateFlags, false)
+	if err != nil {
 		return nil, err
 	}
-	prefix := flagPrefix(flags)
-	compile := func(src string) (*regexp.Regexp, error) {
-		re, err := regexp.Compile(src)
-		if err != nil {
-			msg := err.Error()
-			if i := strings.Index(msg, ": "); i >= 0 {
-				msg = msg[i+2:]
-			}
-			return nil, newErrorf("ValueError", "diaspore re: invalid pattern: %s", msg)
+	parsed, err := syntax.Parse(translated, syntax.Perl)
+	if err != nil {
+		return nil, reSyntaxDiagnostic(err)
+	}
+	c := &compiledRe{pattern: pattern, flags: t.global, bytes: binary, slots: []int{0}, public: map[int]int{0: 0}, names: map[string]int{}, assertions: map[int]reAssertion{}, errorClass: rc.errorClass}
+	if binary && !t.asciiExplicit {
+		c.flags &^= reASCII
+	}
+	for slot, name := range parsed.CapNames() {
+		if slot == 0 {
+			continue
 		}
-		return re, nil
+		if assertion, ok := t.assertions[name]; ok {
+			c.assertions[slot] = reAssertion{assertion}
+			continue
+		}
+		if _, ok := t.specials[name]; ok {
+			continue
+		}
+		group := len(c.slots)
+		c.slots = append(c.slots, slot)
+		c.public[slot] = group
+		if name != "" {
+			if _, exists := c.names[name]; exists {
+				return nil, reFailure("redefinition of group name " + name)
+			}
+			c.names[name] = group
+		}
 	}
-	c := &compiledRe{prefix: prefix, pat: p}
-	var err error
-	if c.search, err = compile(prefix + p); err != nil {
+	specials, err := c.prepareSpecials(parsed, t.specials)
+	if err != nil {
 		return nil, err
 	}
-	if c.match, err = compile(prefix + `\A(?:` + p + `)`); err != nil {
-		return nil, err
-	}
-	if c.fullmatch, err = compile(prefix + `\A(?:` + p + `)\z`); err != nil {
-		return nil, err
+	c.prog, c.loops, c.progress, c.guards, c.specials = reCompileProgram(parsed, specials)
+	c.object = c.makeObject()
+	if len(rc.m) >= 512 {
+		clear(rc.m)
 	}
 	rc.m[key] = c
 	return c, nil
 }
 
-// runeIndex converts a byte offset in s to a code-point offset (CPython
-// match positions are code-point based).
-func runeIndex(s string, byteOff int) int64 {
-	return int64(utf8.RuneCountInString(s[:byteOff]))
+func (c *compiledRe) groupNumber(v Value) (int, error) {
+	if name, ok := v.(string); ok {
+		if n, found := c.names[name]; found {
+			return n, nil
+		}
+		return 0, newError("IndexError", "no such group")
+	}
+	n, ok := asInt(v)
+	if !ok || n < 0 || n >= int64(len(c.slots)) {
+		return 0, newError("IndexError", "no such group")
+	}
+	return int(n), nil
 }
 
-// wrapMatch builds a re.Match NativeObject over a submatch-index vector.
-func wrapMatch(s string, loc []int) Value {
-	nGroups := len(loc)/2 - 1
-	groupVal := func(n int) Value {
-		if n < 0 || n > nGroups {
-			return nil
-		}
-		if loc[2*n] < 0 {
-			return None
-		}
-		return s[loc[2*n]:loc[2*n+1]]
+func (c *compiledRe) groupValue(s []rune, loc []int, n int, def Value) Value {
+	if loc[2*n] < 0 {
+		return def
 	}
-	groupArg := func(name string, args []Value) (int, error) {
-		n := int64(0)
-		if len(args) > 1 {
-			return 0, newErrorf("TypeError", "%s expected at most 1 arguments, got %d",
-				name, len(args))
-		}
-		if len(args) == 1 {
-			v, ok := asInt(args[0])
-			if !ok {
-				return 0, newError("IndexError", "no such group")
-			}
-			n = v
-		}
-		if n < 0 || int(n) > nGroups {
-			return 0, newError("IndexError", "no such group")
-		}
-		return int(n), nil
-	}
-	spanOf := func(n int) (Value, Value) {
-		if loc[2*n] < 0 {
-			return int64(-1), int64(-1)
-		}
-		return mkInt(runeIndex(s, loc[2*n])), mkInt(runeIndex(s, loc[2*n+1]))
-	}
-	return &NativeObject{Kind: "re.Match", methods: map[string]*Builtin{
-		"group": bi("group", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			n, err := groupArg("group", args)
-			if err != nil {
-				return nil, err
-			}
-			return groupVal(n), nil
-		}),
-		"groups": bi("groups", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			items := make([]Value, nGroups)
-			for i := 1; i <= nGroups; i++ {
-				items[i-1] = groupVal(i)
-			}
-			return &Tuple{Items: items}, nil
-		}),
-		"start": bi("start", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			n, err := groupArg("start", args)
-			if err != nil {
-				return nil, err
-			}
-			v, _ := spanOf(n)
-			return v, nil
-		}),
-		"end": bi("end", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			n, err := groupArg("end", args)
-			if err != nil {
-				return nil, err
-			}
-			_, v := spanOf(n)
-			return v, nil
-		}),
-		"span": bi("span", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			n, err := groupArg("span", args)
-			if err != nil {
-				return nil, err
-			}
-			a, b := spanOf(n)
-			return &Tuple{Items: []Value{a, b}}, nil
-		}),
-	}}
+	return reValue(s[loc[2*n]:loc[2*n+1]], c.bytes)
 }
 
-// reEscapeSet is CPython's re.escape special-character set.
-var reEscapeSet = func() [128]bool {
-	var set [128]bool
-	for _, c := range []byte("()[]{}?*+-|^$\\.&~# \t\n\r\v\f") {
-		set[c] = true
-	}
-	return set
-}()
-
-func reEscape(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r < 128 && reEscapeSet[r] {
-			b.WriteByte('\\')
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
-
-// expandTemplate applies a sub() replacement template to one match.
-func expandTemplate(b *strings.Builder, repl, s string, loc []int) error {
-	nGroups := len(loc)/2 - 1
-	for i := 0; i < len(repl); i++ {
-		c := repl[i]
-		if c != '\\' {
-			b.WriteByte(c)
-			continue
-		}
-		i++
-		if i >= len(repl) {
-			return newError("ValueError", "diaspore re: bad escape (end of pattern)")
-		}
-		e := repl[i]
-		switch {
-		case e >= '1' && e <= '9':
-			n := int(e - '0')
-			if n > nGroups {
-				return newErrorf("ValueError", "invalid group reference %d", n)
+func (c *compiledRe) wrapMatch(original Value, s []rune, loc []int, pos, end int) *NativeObject {
+	last := loc[len(loc)-1]
+	var lastIndex, lastGroup Value = None, None
+	if last > 0 {
+		lastIndex = int64(last)
+		for name, n := range c.names {
+			if n == last {
+				lastGroup = name
+				break
 			}
-			if loc[2*n] >= 0 {
-				b.WriteString(s[loc[2*n]:loc[2*n+1]])
-			}
-		case e == '\\':
-			b.WriteByte('\\')
-		case e == 'n':
-			b.WriteByte('\n')
-		case e == 't':
-			b.WriteByte('\t')
-		case e == 'r':
-			b.WriteByte('\r')
-		case e == 'f':
-			b.WriteByte('\f')
-		case e == 'v':
-			b.WriteByte('\v')
-		case e == 'a':
-			b.WriteByte('\a')
-		case e == 'b':
-			b.WriteByte('\b')
-		case e == '0':
-			b.WriteByte(0)
-		default:
-			return newErrorf("ValueError", `diaspore re: bad escape \%c`, e)
 		}
 	}
-	return nil
-}
-
-func (vm *VM) makeReModule() *NativeModule {
-	cache := &reCache{m: map[string]*compiledRe{}}
-
-	intArg := func(what string, v Value) (int64, error) {
-		n, ok := asInt(v)
-		if !ok {
-			return 0, newErrorf("TypeError", "%s must be an integer", what)
-		}
-		return n, nil
+	regs := &Tuple{Items: make([]Value, len(c.slots))}
+	for group := range c.slots {
+		regs.Items[group] = &Tuple{Items: []Value{int64(loc[2*group]), int64(loc[2*group+1])}}
 	}
-
-	// parse handles the (pattern, string, flags=0) argument shape shared by
-	// search/match/fullmatch/findall.
-	parse := func(name string, args []Value, kw []KwArg) (*compiledRe, string, error) {
-		if err := needArgs(name, args, 2, 3); err != nil {
-			return nil, "", err
+	obj := &NativeObject{Kind: "re.Match", attrs: map[string]Value{"re": c.object, "string": original, "pos": int64(pos), "endpos": int64(end), "lastindex": lastIndex, "lastgroup": lastGroup, "regs": regs}, methods: map[string]*Builtin{}}
+	obj.methods["group"] = bi("group", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		if len(kw) != 0 {
+			return nil, newError("TypeError", "group takes no keyword arguments")
 		}
-		flags := int64(0)
-		if len(args) == 3 {
-			f, err := intArg("flags", args[2])
-			if err != nil {
-				return nil, "", err
-			}
-			flags = f
+		if len(args) == 0 {
+			return c.groupValue(s, loc, 0, None), nil
 		}
-		if v, ok := kwGet(kw, "flags"); ok {
-			f, err := intArg("flags", v)
-			if err != nil {
-				return nil, "", err
-			}
-			flags = f
-		}
-		c, err := cache.get(args[0], flags)
-		if err != nil {
-			return nil, "", err
-		}
-		s, ok := args[1].(string)
-		if !ok {
-			return nil, "", newErrorf("TypeError",
-				"expected string or bytes-like object, got '%s'", typeName(args[1]))
-		}
-		return c, s, nil
-	}
-
-	matcher := func(name string, pick func(c *compiledRe) *regexp.Regexp) *Builtin {
-		return bi(name, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			c, s, err := parse(name, args, kw)
+		values := make([]Value, len(args))
+		for i, arg := range args {
+			n, err := c.groupNumber(arg)
 			if err != nil {
 				return nil, err
 			}
-			loc := pick(c).FindStringSubmatchIndex(s)
-			if loc == nil {
-				return None, nil
+			values[i] = c.groupValue(s, loc, n, None)
+		}
+		if len(values) == 1 {
+			return values[0], nil
+		}
+		return &Tuple{Items: values}, nil
+	})
+	obj.methods["__getitem__"] = bi("__getitem__", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		if err := needArgs("__getitem__", args, 1, 1); err != nil {
+			return nil, err
+		}
+		return obj.methods["group"].Fn(vm, args, kw)
+	})
+	for _, operation := range []string{"groups", "groupdict"} {
+		name := operation
+		obj.methods[name] = bi(name, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			values, err := reArgs(name, args, kw, []string{"default"}, 0, []Value{None})
+			if err != nil {
+				return nil, err
 			}
-			return wrapMatch(s, loc), nil
+			if name == "groupdict" {
+				d := NewDict()
+				for slot, groupName := range c.progGroupNames() {
+					if groupName != "" {
+						d.SetStr(groupName, c.groupValue(s, loc, slot, values[0]))
+					}
+				}
+				return d, nil
+			}
+			out := make([]Value, len(c.slots)-1)
+			for i := range out {
+				out[i] = c.groupValue(s, loc, i+1, values[0])
+			}
+			return &Tuple{Items: out}, nil
 		})
 	}
-
-	findall := bi("findall", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		c, s, err := parse("findall", args, kw)
+	for _, operation := range []string{"start", "end", "span"} {
+		name := operation
+		obj.methods[name] = bi(name, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			values, err := reArgs(name, args, kw, []string{"group"}, 0, []Value{int64(0)})
+			if err != nil {
+				return nil, err
+			}
+			n, err := c.groupNumber(values[0])
+			if err != nil {
+				return nil, err
+			}
+			a, b := int64(loc[2*n]), int64(loc[2*n+1])
+			if name == "start" {
+				return a, nil
+			}
+			if name == "end" {
+				return b, nil
+			}
+			return &Tuple{Items: []Value{a, b}}, nil
+		})
+	}
+	obj.methods["expand"] = bi("expand", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		values, err := reArgs("expand", args, kw, []string{"template"}, 1, nil)
 		if err != nil {
 			return nil, err
 		}
-		nGroups := c.search.NumSubexp()
-		locs := c.findAllPy(s)
+		parts, err := c.template(values[0])
+		if err != nil {
+			return nil, err
+		}
+		return c.expand(parts, s, loc), nil
+	})
+	return obj
+}
+
+func (c *compiledRe) progGroupNames() []string {
+	names := make([]string, len(c.slots))
+	for name, n := range c.names {
+		names[n] = name
+	}
+	return names
+}
+
+type reMatchIterator struct {
+	vm             *VM
+	c              *compiledRe
+	original       Value
+	text           []rune
+	pos, end, next int
+	nonempty, done bool
+}
+
+func (it *reMatchIterator) KindName() string { return "callable_iterator" }
+func (it *reMatchIterator) location() ([]int, error) {
+	if it.done {
+		return nil, nil
+	}
+	for it.next <= it.end {
+		loc, err := it.c.run(it.vm, it.text, it.next, it.end, false, it.nonempty)
+		if err != nil {
+			return nil, err
+		}
+		if loc != nil {
+			it.next = loc[1]
+			it.nonempty = loc[0] == loc[1]
+			return loc, nil
+		}
+		it.next++
+		it.nonempty = false
+	}
+	it.done = true
+	return nil, nil
+}
+func (it *reMatchIterator) Next() (Value, bool, error) {
+	loc, err := it.location()
+	if err != nil {
+		return nil, false, err
+	}
+	if loc == nil {
+		return nil, false, nil
+	}
+	return it.c.wrapMatch(it.original, it.text, loc, it.pos, it.end), true, nil
+}
+
+func reBound(v Value, length int, name string) (int, error) {
+	n, err := reInteger(v, name)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 {
+		return 0, nil
+	}
+	if n > int64(length) {
+		return length, nil
+	}
+	return int(n), nil
+}
+
+func (c *compiledRe) makeObject() *NativeObject {
+	index := NewDict()
+	for slot, name := range c.progGroupNames() {
+		if name != "" {
+			index.SetStr(name, int64(slot))
+		}
+	}
+	obj := &NativeObject{Kind: "re.Pattern", payload: c, attrs: map[string]Value{"pattern": c.pattern, "flags": c.flags, "groups": int64(len(c.slots) - 1), "groupindex": index}, methods: map[string]*Builtin{}}
+	for _, operation := range []string{"search", "match", "fullmatch", "findall", "finditer", "split", "sub", "subn"} {
+		name := operation
+		obj.methods[name] = bi(name, func(vm *VM, args []Value, kw []KwArg) (Value, error) { return c.invoke(vm, name, args, kw) })
+	}
+	return obj
+}
+
+func (c *compiledRe) invoke(vm *VM, name string, args []Value, kw []KwArg) (Value, error) {
+	var names []string
+	var defaults []Value
+	required := 1
+	switch name {
+	case "split":
+		names = []string{"string", "maxsplit"}
+		defaults = []Value{int64(0)}
+	case "sub", "subn":
+		names = []string{"repl", "string", "count"}
+		defaults = []Value{int64(0)}
+		required = 2
+	default:
+		names = []string{"string", "pos", "endpos"}
+		defaults = []Value{int64(0), missingV}
+	}
+	values, err := reArgs(name, args, kw, names, required, defaults)
+	if err != nil {
+		return nil, err
+	}
+	original := values[0]
+	if required == 2 {
+		original = values[1]
+	}
+	text, binary, err := reText(original)
+	if err != nil {
+		return nil, err
+	}
+	if binary != c.bytes {
+		return nil, newError("TypeError", "cannot mix string and bytes patterns")
+	}
+	pos, end := 0, len(text)
+	limit := int64(0)
+	if name == "split" || required == 2 {
+		limit, err = reInteger(values[len(values)-1], names[len(names)-1])
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		pos, err = reBound(values[1], len(text), "pos")
+		if err != nil {
+			return nil, err
+		}
+		if values[2] != missingV {
+			end, err = reBound(values[2], len(text), "endpos")
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	it := &reMatchIterator{vm: vm, c: c, original: original, text: text, pos: pos, end: end, next: pos}
+	if name == "finditer" {
+		return it, nil
+	}
+	if name == "match" || name == "fullmatch" || name == "search" {
+		var loc []int
+		if pos <= end {
+			if name == "search" {
+				loc, err = it.location()
+			} else {
+				loc, err = c.run(vm, text, pos, end, name == "fullmatch", false)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		if loc == nil {
+			return None, nil
+		}
+		return c.wrapMatch(original, text, loc, pos, end), nil
+	}
+	if name == "findall" {
 		out := &List{}
-		for _, loc := range locs {
-			switch {
-			case nGroups == 0:
-				out.Items = append(out.Items, s[loc[0]:loc[1]])
-			case nGroups == 1:
-				out.Items = append(out.Items, groupOrEmpty(s, loc, 1))
-			default:
-				row := make([]Value, nGroups)
-				for g := 1; g <= nGroups; g++ {
-					row[g-1] = groupOrEmpty(s, loc, g)
+		for {
+			loc, err := it.location()
+			if err != nil {
+				return nil, err
+			}
+			if loc == nil {
+				break
+			}
+			empty := reValue(nil, c.bytes)
+			if len(c.slots) == 1 {
+				out.Items = append(out.Items, c.groupValue(text, loc, 0, empty))
+			} else if len(c.slots) == 2 {
+				out.Items = append(out.Items, c.groupValue(text, loc, 1, empty))
+			} else {
+				row := make([]Value, len(c.slots)-1)
+				for i := range row {
+					row[i] = c.groupValue(text, loc, i+1, empty)
 				}
 				out.Items = append(out.Items, &Tuple{Items: row})
 			}
 		}
 		return out, nil
-	})
-
-	split := bi("split", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := needArgs("split", args, 2, 4); err != nil {
-			return nil, err
-		}
-		maxsplit, flags := int64(0), int64(0)
-		var err error
-		if len(args) >= 3 {
-			if maxsplit, err = intArg("maxsplit", args[2]); err != nil {
-				return nil, err
-			}
-		}
-		if v, ok := kwGet(kw, "maxsplit"); ok {
-			if maxsplit, err = intArg("maxsplit", v); err != nil {
-				return nil, err
-			}
-		}
-		if len(args) == 4 {
-			if flags, err = intArg("flags", args[3]); err != nil {
-				return nil, err
-			}
-		}
-		if v, ok := kwGet(kw, "flags"); ok {
-			if flags, err = intArg("flags", v); err != nil {
-				return nil, err
-			}
-		}
-		c, err := cache.get(args[0], flags)
-		if err != nil {
-			return nil, err
-		}
-		s, ok := args[1].(string)
-		if !ok {
-			return nil, newErrorf("TypeError",
-				"expected string or bytes-like object, got '%s'", typeName(args[1]))
-		}
-		nGroups := c.search.NumSubexp()
+	}
+	if name == "split" {
 		out := &List{}
 		last := 0
-		count := int64(0)
-		for _, loc := range c.findAllPy(s) {
-			if maxsplit > 0 && count >= maxsplit {
-				break
-			}
-			out.Items = append(out.Items, s[last:loc[0]])
-			for g := 1; g <= nGroups; g++ {
-				if loc[2*g] < 0 {
-					out.Items = append(out.Items, None)
-				} else {
-					out.Items = append(out.Items, s[loc[2*g]:loc[2*g+1]])
-				}
-			}
-			last = loc[1]
-			count++
-		}
-		out.Items = append(out.Items, s[last:])
-		return out, nil
-	})
-
-	sub := bi("sub", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := needArgs("sub", args, 3, 5); err != nil {
-			return nil, err
-		}
-		repl, ok := args[1].(string)
-		if !ok {
-			return nil, newError("TypeError", "diaspore re: repl must be a string")
-		}
-		if i := strings.Index(repl, `\g`); i >= 0 {
-			return nil, newError("ValueError", `diaspore re: \g<...> replacements are not supported`)
-		}
-		count := int64(0)
-		if len(args) >= 4 {
-			n, ok := asInt(args[3])
-			if !ok {
-				return nil, newError("TypeError", "count must be an integer")
-			}
-			count = n
-		}
-		if v, ok := kwGet(kw, "count"); ok {
-			n, ok := asInt(v)
-			if !ok {
-				return nil, newError("TypeError", "count must be an integer")
-			}
-			count = n
-		}
-		flags := int64(0)
-		if len(args) == 5 {
-			f, ok := asInt(args[4])
-			if !ok {
-				return nil, newError("TypeError", "flags must be an integer")
-			}
-			flags = f
-		}
-		if v, ok := kwGet(kw, "flags"); ok {
-			f, ok := asInt(v)
-			if !ok {
-				return nil, newError("TypeError", "flags must be an integer")
-			}
-			flags = f
-		}
-		c, err := cache.get(args[0], flags)
-		if err != nil {
-			return nil, err
-		}
-		s, ok := args[2].(string)
-		if !ok {
-			return nil, newErrorf("TypeError",
-				"expected string or bytes-like object, got '%s'", typeName(args[2]))
-		}
-		var b strings.Builder
-		last := 0
 		done := int64(0)
-		for _, loc := range c.findAllPy(s) {
-			if count > 0 && done >= count {
+		for limit >= 0 && (limit == 0 || done < limit) {
+			loc, err := it.location()
+			if err != nil {
+				return nil, err
+			}
+			if loc == nil {
 				break
 			}
-			b.WriteString(s[last:loc[0]])
-			if err := expandTemplate(&b, repl, s, loc); err != nil {
-				return nil, err
+			out.Items = append(out.Items, reValue(text[last:loc[0]], c.bytes))
+			for g := 1; g < len(c.slots); g++ {
+				out.Items = append(out.Items, c.groupValue(text, loc, g, None))
 			}
 			last = loc[1]
 			done++
 		}
-		b.WriteString(s[last:])
-		return b.String(), nil
-	})
-
-	escape := bi("escape", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := needArgs("escape", args, 1, 1); err != nil {
+		out.Items = append(out.Items, reValue(text[last:], c.bytes))
+		return out, nil
+	}
+	replacement := values[0]
+	var parts []reTemplatePart
+	callable := false
+	switch rawPrim(replacement).(type) {
+	case string, []byte:
+		parts, err = c.template(replacement)
+		if err != nil {
 			return nil, err
 		}
-		s, ok := args[0].(string)
-		if !ok {
-			return nil, newErrorf("TypeError", "expected string, got '%s'", typeName(args[0]))
+	default:
+		accepted, err := biCallable(vm, []Value{replacement}, nil)
+		if err != nil {
+			return nil, err
 		}
-		return reEscape(s), nil
-	})
-
-	return &NativeModule{Name: "re", NS: map[string]Value{
-		"IGNORECASE": int64(reIgnoreCase),
-		"MULTILINE":  int64(reMultiline),
-		"DOTALL":     int64(reDotAll),
-		"search":     matcher("search", func(c *compiledRe) *regexp.Regexp { return c.search }),
-		"match":      matcher("match", func(c *compiledRe) *regexp.Regexp { return c.match }),
-		"fullmatch":  matcher("fullmatch", func(c *compiledRe) *regexp.Regexp { return c.fullmatch }),
-		"findall":    findall,
-		"split":      split,
-		"sub":        sub,
-		"escape":     escape,
-	}}
+		if accepted != true {
+			return nil, newError("TypeError", "replacement must be a string or callable")
+		}
+		callable = true
+	}
+	var result []rune
+	last := 0
+	done := int64(0)
+	for limit >= 0 && (limit == 0 || done < limit) {
+		loc, err := it.location()
+		if err != nil {
+			return nil, err
+		}
+		if loc == nil {
+			break
+		}
+		result = append(result, text[last:loc[0]]...)
+		if callable {
+			value, err := vm.call(replacement, []Value{c.wrapMatch(original, text, loc, pos, end)}, nil)
+			if err != nil {
+				return nil, err
+			}
+			if !reIsNone(value) {
+				runes, binary, err := reText(value)
+				if err != nil {
+					return nil, err
+				}
+				if binary != c.bytes {
+					return nil, newError("TypeError", "replacement has the wrong string type")
+				}
+				result = append(result, runes...)
+			}
+		} else {
+			result = c.appendTemplate(result, parts, text, loc)
+		}
+		last = loc[1]
+		done++
+	}
+	result = append(result, text[last:]...)
+	value := reValue(result, c.bytes)
+	if name == "subn" {
+		return &Tuple{Items: []Value{value, done}}, nil
+	}
+	return value, nil
 }
 
-func groupOrEmpty(s string, loc []int, g int) Value {
-	if loc[2*g] < 0 {
-		return ""
+type reTemplatePart struct {
+	literal []rune
+	group   int
+}
+
+func (c *compiledRe) template(value Value) (result []reTemplatePart, err error) {
+	defer func() { err = reRaiseDiagnostic(err, value, c.errorClass) }()
+	r, binary, err := reText(value)
+	if err != nil {
+		return nil, err
 	}
-	return s[loc[2*g]:loc[2*g+1]]
+	if binary != c.bytes {
+		return nil, newError("TypeError", "replacement has the wrong string type")
+	}
+	var parts []reTemplatePart
+	var literal []rune
+	flush := func() {
+		if len(literal) > 0 {
+			parts = append(parts, reTemplatePart{literal: literal, group: -1})
+			literal = nil
+		}
+	}
+	for i := 0; i < len(r); i++ {
+		ch := r[i]
+		if ch != '\\' {
+			literal = append(literal, ch)
+			continue
+		}
+		escapeStart := i
+		i++
+		if i == len(r) {
+			return nil, reErrorAt("bad escape (end of pattern)", escapeStart)
+		}
+		ch = r[i]
+		switch {
+		case ch == 'g':
+			if i+1 >= len(r) || r[i+1] != '<' {
+				return nil, reErrorAt("missing <", i+1)
+			}
+			i += 2
+			start := i
+			for i < len(r) && r[i] != '>' {
+				i++
+			}
+			if i == start {
+				return nil, reErrorAt("missing group name", start)
+			}
+			if i == len(r) {
+				return nil, reErrorAt("missing >, unterminated name", start)
+			}
+			name := pyString(r[start:i])
+			numeric := true
+			for _, digit := range r[start:i] {
+				if digit < '0' || digit > '9' {
+					numeric = false
+					break
+				}
+			}
+			var group int
+			if numeric {
+				n, parseErr := strconv.ParseInt(name, 10, 64)
+				if parseErr != nil || n >= int64(len(c.slots)) {
+					number := strings.TrimLeft(name, "0")
+					if number == "" {
+						number = "0"
+					}
+					return nil, reErrorAt("invalid group reference "+number, start)
+				}
+				group = int(n)
+			} else {
+				ascii := true
+				for _, ch := range r[start:i] {
+					if ch > 127 {
+						ascii = false
+						break
+					}
+				}
+				if !pyIsIdentifier(name) || binary && !ascii {
+					return nil, reErrorAt("bad character in group name "+reprString(name), start)
+				}
+				var exists bool
+				group, exists = c.names[name]
+				if !exists {
+					return nil, newError("IndexError", "unknown group name "+reprString(name))
+				}
+			}
+			flush()
+			parts = append(parts, reTemplatePart{group: group})
+		case ch >= '0' && ch <= '9':
+			start := i
+			if ch == '0' || i+2 < len(r) && ch <= '7' && r[i+1] >= '0' && r[i+1] <= '7' && r[i+2] >= '0' && r[i+2] <= '7' {
+				for i+1 < len(r) && i-start < 2 && r[i+1] >= '0' && r[i+1] <= '7' {
+					i++
+				}
+				n, parseErr := strconv.ParseInt(string(r[start:i+1]), 8, 32)
+				if parseErr != nil || n > 255 {
+					return nil, reErrorAt("octal escape value "+pyString(r[escapeStart:i+1])+" outside of range 0-0o377", escapeStart)
+				}
+				literal = append(literal, rune(n))
+			} else {
+				if i+1 < len(r) && r[i+1] >= '0' && r[i+1] <= '9' {
+					i++
+				}
+				n, _ := strconv.ParseInt(string(r[start:i+1]), 10, 64)
+				if n >= int64(len(c.slots)) {
+					return nil, reErrorAt(fmt.Sprintf("invalid group reference %d", n), start)
+				}
+				flush()
+				parts = append(parts, reTemplatePart{group: int(n)})
+			}
+		case ch == '\\':
+			literal = append(literal, '\\')
+		case strings.ContainsRune("nrtfavb", ch):
+			literal = append(literal, map[rune]rune{'n': '\n', 'r': '\r', 't': '\t', 'f': '\f', 'a': '\a', 'v': '\v', 'b': '\b'}[ch])
+		case ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z':
+			return nil, reErrorAt("bad escape \\"+string(ch), escapeStart)
+		default:
+			literal = append(literal, '\\', ch)
+		}
+	}
+	flush()
+	return parts, nil
+}
+func (c *compiledRe) appendTemplate(out []rune, parts []reTemplatePart, s []rune, loc []int) []rune {
+	for _, part := range parts {
+		if part.group < 0 {
+			out = append(out, part.literal...)
+		} else if loc[2*part.group] >= 0 {
+			out = append(out, s[loc[2*part.group]:loc[2*part.group+1]]...)
+		}
+	}
+	return out
+}
+func (c *compiledRe) expand(parts []reTemplatePart, s []rune, loc []int) Value {
+	return reValue(c.appendTemplate(nil, parts, s, loc), c.bytes)
+}
+
+func (vm *VM) makeReModule() *NativeModule {
+	cache := &reCache{m: map[string]*compiledRe{}, errorClass: makeReErrorClass()}
+	ns := map[string]Value{"NOFLAG": int64(0), "I": int64(reIgnoreCase), "IGNORECASE": int64(reIgnoreCase), "L": int64(reLocale), "LOCALE": int64(reLocale), "M": int64(reMultiline), "MULTILINE": int64(reMultiline), "S": int64(reDotAll), "DOTALL": int64(reDotAll), "U": int64(reUnicode), "UNICODE": int64(reUnicode), "X": int64(reVerbose), "VERBOSE": int64(reVerbose), "A": int64(reASCII), "ASCII": int64(reASCII), "DEBUG": int64(128), "T": int64(1), "TEMPLATE": int64(1), "error": cache.errorClass, "PatternError": cache.errorClass}
+	ns["compile"] = bi("compile", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		values, err := reArgs("compile", args, kw, []string{"pattern", "flags"}, 1, []Value{int64(0)})
+		if err != nil {
+			return nil, err
+		}
+		flags, err := reInteger(values[1], "flags")
+		if err != nil {
+			return nil, err
+		}
+		c, err := cache.get(values[0], flags)
+		if err != nil {
+			return nil, err
+		}
+		return c.object, nil
+	})
+	for _, operation := range []string{"search", "match", "fullmatch", "findall", "finditer", "split", "sub", "subn"} {
+		name := operation
+		ns[name] = bi(name, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			names := []string{"pattern", "string", "flags"}
+			required := 2
+			defaults := []Value{int64(0)}
+			if name == "split" {
+				names = []string{"pattern", "string", "maxsplit", "flags"}
+				defaults = []Value{int64(0), int64(0)}
+			}
+			if name == "sub" || name == "subn" {
+				names = []string{"pattern", "repl", "string", "count", "flags"}
+				required = 3
+				defaults = []Value{int64(0), int64(0)}
+			}
+			values, err := reArgs(name, args, kw, names, required, defaults)
+			if err != nil {
+				return nil, err
+			}
+			flags, err := reInteger(values[len(values)-1], "flags")
+			if err != nil {
+				return nil, err
+			}
+			c, err := cache.get(values[0], flags)
+			if err != nil {
+				return nil, err
+			}
+			return c.invoke(vm, name, values[1:len(values)-1], nil)
+		})
+	}
+	ns["escape"] = bi("escape", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		values, err := reArgs("escape", args, kw, []string{"pattern"}, 1, nil)
+		if err != nil {
+			return nil, err
+		}
+		r, binary, err := reText(values[0])
+		if err != nil {
+			return nil, err
+		}
+		out := make([]rune, 0, len(r))
+		for _, ch := range r {
+			if strings.ContainsRune("()[]{}?*+-|^$\\.&~# \t\n\r\v\f", ch) {
+				out = append(out, '\\')
+			}
+			out = append(out, ch)
+		}
+		return reValue(out, binary), nil
+	})
+	ns["purge"] = bi("purge", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		if err := noArgs("purge", args, kw); err != nil {
+			return nil, err
+		}
+		clear(cache.m)
+		return None, nil
+	})
+	for _, name := range []string{"Pattern", "Match"} {
+		kind := "re." + name
+		typ := &BuiltinType{Name: kind, ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			return nil, newError("TypeError", "cannot create regex objects directly")
+		}}
+		ns[name] = typ
+		vm.types[kind] = typ
+	}
+	return &NativeModule{Name: "re", NS: ns}
 }

@@ -8,19 +8,69 @@ form, so validation and digests remain independent of the container.
 from __future__ import annotations
 
 import io
+import sys
+
+from .validator import BundleValidationError, _stdlib_id
 
 MAGIC = b"DSPB01"
+MAGIC_LINKED = b"DSPB02"
 
 OPS = [
-    "const", "name", "attr", "index", "slicelit", "starred", "call", "binop",
-    "unary", "boolop", "compare", "cond", "list", "tuple", "set", "dict",
-    "fstring", "func", "funcexpr", "yield", "yieldfrom", "namedexpr",
-    "expr", "assign", "augassign", "if", "while", "for", "break", "continue",
-    "pass", "return", "class", "raise", "try", "with", "import", "importfrom",
+    "const",
+    "name",
+    "attr",
+    "index",
+    "slicelit",
+    "starred",
+    "call",
+    "binop",
+    "unary",
+    "boolop",
+    "compare",
+    "cond",
+    "list",
+    "tuple",
+    "set",
+    "dict",
+    "fstring",
+    "func",
+    "funcexpr",
+    "yield",
+    "yieldfrom",
+    "namedexpr",
+    "expr",
+    "assign",
+    "augassign",
+    "if",
+    "while",
+    "for",
+    "break",
+    "continue",
+    "pass",
+    "return",
+    "class",
+    "raise",
+    "try",
+    "with",
+    "import",
+    "importfrom",
     "del",
 ]
-BIN_KINDS = ["add", "sub", "mul", "div", "floordiv", "mod", "pow", "lshift",
-             "rshift", "bitand", "bitor", "bitxor", "matmul"]
+BIN_KINDS = [
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "floordiv",
+    "mod",
+    "pow",
+    "lshift",
+    "rshift",
+    "bitand",
+    "bitor",
+    "bitxor",
+    "matmul",
+]
 CMP_KINDS = ["eq", "ne", "lt", "le", "gt", "ge", "in", "notin", "is", "isnot"]
 UNARY_KINDS = ["neg", "pos", "not", "invert"]
 CONST_KINDS = ["int", "float", "str", "bytes", "bool", "none", "ellipsis", "complex"]
@@ -77,6 +127,17 @@ class _Writer:
 _MAX_DEPTH = 8000  # Bound nesting in untrusted input.
 
 
+def _depth_budget() -> int:
+    # A child can add _dec, _dec_inner, _dec_nodes, and a comprehension frame.
+    # Leave room for scalar readers and constructing the validation error.
+    frame = sys._getframe()
+    available = sys.getrecursionlimit() - 32
+    while frame is not None:
+        available -= 1
+        frame = frame.f_back
+    return min(_MAX_DEPTH, max(0, available // 4))
+
+
 class _Reader:
     def __init__(self, data: bytes, pos: int):
         """Read from an initial byte offset with an empty string table."""
@@ -84,6 +145,7 @@ class _Reader:
         self.pos = pos
         self.strings: list[str] = []
         self.depth = 0
+        self.max_depth = _depth_budget()
 
     def u(self) -> int:
         """Read an unsigned LEB128 integer."""
@@ -130,12 +192,14 @@ class _Reader:
 # Nodes begin with opcode and flags bytes; bit zero marks a source line.
 # Higher bits mark optional fields in the order specified by docs/dspb.md.
 
+
 def _flags(node: dict, opts: list[str]) -> int:
     f = 1 if node.get("ln") is not None else 0
     for i, key in enumerate(opts):
         if node.get(key) is not None:
             f |= 1 << (i + 1)
     return f
+
 
 # Optional fields consume flag bits after the source-line flag.
 _OPT: dict[str, list[str]] = {
@@ -164,6 +228,15 @@ def _enc_opt(w: _Writer, node) -> None:
         _enc(w, node)
 
 
+def _literal_fields(value: str, key: str) -> dict:
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+        return {
+            key: value.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass"),
+            "codepoints": [ord(char) for char in value],
+        }
+    return {key: value}
+
+
 def _enc(w: _Writer, node: dict) -> None:
     op = node["op"]
     w.byte(_OP_IDX[op])
@@ -175,7 +248,8 @@ def _enc(w: _Writer, node: dict) -> None:
             kind = node["t"]
             w.byte(_CONST_IDX[kind])
             if kind in ("int", "float", "str", "bytes"):
-                w.s(node["v"])
+                w.s("".join(map(chr, node["codepoints"]))
+                    if kind == "str" and "codepoints" in node else node["v"])
             elif kind == "complex":
                 w.s(node["re"])
                 w.s(node["im"])
@@ -249,7 +323,7 @@ def _enc(w: _Writer, node: dict) -> None:
             for p in parts:
                 if "s" in p:
                     w.byte(0)
-                    w.s(p["s"])
+                    w.s("".join(map(chr, p["codepoints"])) if "codepoints" in p else p["s"])
                 else:
                     flag = 1
                     if p.get("spec") is not None:
@@ -261,10 +335,22 @@ def _enc(w: _Writer, node: dict) -> None:
                         _enc(w, p["spec"])
         case "func" | "funcexpr":
             w.s(node["name"])
-            w.byte((1 if node.get("gen") else 0) | (2 if node.get("coro") else 0))
+            w.byte(
+                (1 if node.get("gen") else 0)
+                | (2 if node.get("coro") else 0)
+                | (4 if node.get("asyncgen") else 0)
+                | (8 if node.get("annotation_scope") else 0)
+            )
             p = node.get("params", {})
-            pf = (1 if p.get("vararg") else 0) | (2 if p.get("kwarg") else 0)
+            posonly = p.get("posonly", 0)
+            if type(posonly) is not int or not 0 <= posonly <= len(p.get("args", [])):
+                raise DSPBError("invalid positional-only parameter count")
+            pf = (
+                (1 if p.get("vararg") else 0) | (2 if p.get("kwarg") else 0) | (4 if posonly else 0)
+            )
             w.byte(pf)
+            if posonly:
+                w.u(posonly)
             _enc_strs(w, p.get("args", []))
             _enc_nodes(w, p.get("defaults", []))
             if p.get("vararg"):
@@ -307,7 +393,12 @@ def _enc(w: _Writer, node: dict) -> None:
         case "class":
             w.s(node["name"])
             kwargs = node.get("kwargs", [])
-            w.byte(1 if kwargs else 0)
+            has_binding = "binding" in node
+            w.byte((1 if kwargs else 0) | (2 if has_binding else 0))
+            if has_binding:
+                if not isinstance(node["binding"], str):
+                    raise DSPBError("class binding must be a string")
+                w.s(node["binding"])
             if kwargs:
                 w.u(len(kwargs))
                 for kw in kwargs:
@@ -328,8 +419,7 @@ def _enc(w: _Writer, node: dict) -> None:
             handlers = node.get("handlers", [])
             w.u(len(handlers))
             for h in handlers:
-                hf = (1 if h.get("t") is not None else 0) \
-                    | (2 if h.get("name") is not None else 0)
+                hf = (1 if h.get("t") is not None else 0) | (2 if h.get("name") is not None else 0)
                 w.byte(hf)
                 if h.get("t") is not None:
                     _enc(w, h["t"])
@@ -390,9 +480,9 @@ def _dec_strs(r: _Reader) -> list:
 
 def _dec(r: _Reader) -> dict:
     r.depth += 1
-    if r.depth > _MAX_DEPTH:
-        raise DSPBError("node nesting too deep")
     try:
+        if r.depth > r.max_depth:
+            raise DSPBError("node nesting too deep")
         return _dec_inner(r)
     finally:
         r.depth -= 1
@@ -413,7 +503,9 @@ def _dec_inner(r: _Reader) -> dict:
         case "const":
             kind = _enum_at(CONST_KINDS, r.byte(), "const-kind")
             n["t"] = kind
-            if kind in ("int", "float", "str", "bytes"):
+            if kind == "str":
+                n.update(_literal_fields(r.s(), "v"))
+            elif kind in ("int", "float", "bytes"):
                 n["v"] = r.s()
             elif kind == "complex":
                 n["re"] = r.s()
@@ -485,7 +577,7 @@ def _dec_inner(r: _Reader) -> dict:
             for _ in range(r.count()):
                 flag = r.byte()
                 if flag == 0:
-                    parts.append({"s": r.s()})
+                    parts.append(_literal_fields(r.s(), "s"))
                 else:
                     part = {"v": _dec(r)}
                     conv = _enum_at(CONV_KINDS, r.byte(), "conv")
@@ -502,9 +594,18 @@ def _dec_inner(r: _Reader) -> dict:
                 n["gen"] = True
             if gbyte & 2:
                 n["coro"] = True
+            if gbyte & 4:
+                n["asyncgen"] = True
+            if gbyte & 8:
+                n["annotation_scope"] = True
             pf = r.byte()
             p: dict = {}
+            posonly = r.u() if pf & 4 else 0
+            if posonly:
+                p["posonly"] = posonly
             args = _dec_strs(r)
+            if posonly > len(args):
+                raise DSPBError("invalid positional-only parameter count")
             if args:
                 p["args"] = args
             defaults = _dec_nodes(r)
@@ -559,7 +660,12 @@ def _dec_inner(r: _Reader) -> dict:
             pass
         case "class":
             n["name"] = r.s()
-            if r.byte():
+            class_flags = r.byte()
+            if class_flags & ~3:
+                raise DSPBError("bad class flags")
+            if class_flags & 2:
+                n["binding"] = r.s()
+            if class_flags & 1:
                 kwargs = []
                 for _ in range(r.count()):
                     name = r.s() if r.byte() else None
@@ -626,6 +732,13 @@ def _dec_inner(r: _Reader) -> dict:
     return n
 
 
+def _check_stdlib_id(value) -> None:
+    try:
+        _stdlib_id(value, "$.stdlib")
+    except BundleValidationError as exc:
+        raise DSPBError(str(exc)) from None
+
+
 def encode(bundle: dict) -> bytes:
     """Encode a bundle as a DSPB container.
 
@@ -643,6 +756,10 @@ def encode(bundle: dict) -> bytes:
     w = _Writer()
     w.u(1)  # Keep the semantic version aligned with JSON's "diaspore" field.
     w.s(bundle["main"])
+    linked = "stdlib" in bundle
+    if linked:
+        _check_stdlib_id(bundle["stdlib"])
+        w.s(bundle["stdlib"])
     mods = bundle["modules"]
     w.u(len(mods))
     for name, mod in mods.items():
@@ -659,10 +776,10 @@ def encode(bundle: dict) -> bytes:
     head = _Writer()
     head.u(len(w.strlist))
     for s in w.strlist:
-        raw = s.encode("utf-8")
+        raw = s.encode("utf-8", errors="surrogatepass")
         head.u(len(raw))
         head.buf.write(raw)
-    return MAGIC + head.buf.getvalue() + body
+    return (MAGIC_LINKED if linked else MAGIC) + head.buf.getvalue() + body
 
 
 def decode(data: bytes) -> dict:
@@ -677,22 +794,27 @@ def decode(data: bytes) -> dict:
     Raises:
         DSPBError: The container is malformed or its version is unsupported.
     """
-    if not data.startswith(MAGIC):
-        raise DSPBError("not an DSPB bundle")
+    linked = data.startswith(MAGIC_LINKED)
+    if not linked and not data.startswith(MAGIC):
+        raise DSPBError("not a DSPB bundle")
     r = _Reader(data, len(MAGIC))
     for _ in range(r.count()):
         length = r.u()
-        raw = r.data[r.pos:r.pos + length]
+        raw = r.data[r.pos : r.pos + length]
         if len(raw) != length:
             raise DSPBError("truncated string table")
         r.pos += length
         try:
-            r.strings.append(raw.decode("utf-8"))
+            r.strings.append(raw.decode("utf-8", errors="surrogatepass"))
         except UnicodeDecodeError:
             raise DSPBError("invalid UTF-8 in string table") from None
     if r.u() != 1:
         raise DSPBError("unsupported semantic version")
     main = r.s()
+    bundle = {"diaspore": 1, "main": main}
+    if linked:
+        bundle["stdlib"] = r.s()
+        _check_stdlib_id(bundle["stdlib"])
     modules: dict[str, dict] = {}
     for _ in range(r.count()):
         name = r.s()
@@ -701,4 +823,7 @@ def decode(data: bytes) -> dict:
             mod["src"] = _dec_strs(r)
         mod["body"] = _dec_nodes(r)
         modules[name] = mod
-    return {"diaspore": 1, "main": main, "modules": modules}
+    if r.pos != len(data):
+        raise DSPBError("trailing data after DSPB bundle")
+    bundle["modules"] = modules
+    return bundle

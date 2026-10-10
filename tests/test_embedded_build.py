@@ -40,13 +40,12 @@ def _write_program(tmp_path: Path) -> Path:
 
 def _build_and_run(cmd: list[str], entry: Path, tmp_path: Path) -> Result:
     bundle = tmp_path / "main.dsp.json"
-    build = subprocess.run([*cmd, "build", str(entry), "-o", str(bundle)],
-                           capture_output=True, text=True, timeout=120)
+    build = subprocess.run(
+        [*cmd, "build", str(entry), "-o", str(bundle)], capture_output=True, text=True, timeout=120
+    )
     assert build.returncode == 0, build.stderr
-    proc = subprocess.run([*cmd, "run", str(bundle)],
-                          capture_output=True, text=True, timeout=120)
-    return Result(proc.stdout, proc.returncode,
-                  _last_stderr_line(proc.stderr, proc.returncode))
+    proc = subprocess.run([*cmd, "run", str(bundle)], capture_output=True, text=True, timeout=120)
+    return Result(proc.stdout, proc.returncode, _last_stderr_line(proc.stderr, proc.returncode))
 
 
 def test_go_build_bundles_stdlib(go_vm: Path, tmp_path: Path) -> None:

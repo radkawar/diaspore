@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // fmtCpart formats a complex component like CPython: float repr without a
@@ -95,7 +96,9 @@ func reprString(s string) string {
 	}
 	var b strings.Builder
 	b.WriteByte(q)
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		r, size := pyDecodeRuneInString(s[i:])
+		i += size
 		switch {
 		case r == '\\':
 			b.WriteString(`\\`)
@@ -108,8 +111,15 @@ func reprString(s string) string {
 			b.WriteString(`\r`)
 		case r == '\t':
 			b.WriteString(`\t`)
-		case r < 0x20 || r == 0x7f:
-			fmt.Fprintf(&b, `\x%02x`, r)
+		case !unicode.IsPrint(r):
+			switch {
+			case r <= 0xff:
+				fmt.Fprintf(&b, `\x%02x`, r)
+			case r <= 0xffff:
+				fmt.Fprintf(&b, `\u%04x`, r)
+			default:
+				fmt.Fprintf(&b, `\U%08x`, r)
+			}
 		default:
 			b.WriteRune(r)
 		}
@@ -159,6 +169,12 @@ func reprBytes(bs []byte) string {
 }
 
 func reprRange(r *Range) string {
+	if r.big != nil {
+		if r.big.step.IsInt64() && r.big.step.Int64() == 1 {
+			return fmt.Sprintf("range(%s, %s)", r.big.start.String(), r.big.stop.String())
+		}
+		return fmt.Sprintf("range(%s, %s, %s)", r.big.start.String(), r.big.stop.String(), r.big.step.String())
+	}
 	if r.Step == 1 {
 		return fmt.Sprintf("range(%d, %d)", r.Start, r.Stop)
 	}
@@ -233,6 +249,10 @@ func (vm *VM) repr(v Value) (string, error) {
 	case *classDict:
 		s, err := vm.repr(t.snapshot())
 		return "mappingproxy(" + s + ")", err
+	case *metadataNamespace:
+		return vm.repr(t.snapshot())
+	case *GenericAlias, *UnionType:
+		return vm.genericRepr(t)
 	case bool:
 		if t {
 			return "True", nil
@@ -248,6 +268,10 @@ func (vm *VM) repr(v Value) (string, error) {
 		return reprString(t), nil
 	case []byte:
 		return reprBytes(t), nil
+	case *ByteArray:
+		return "bytearray(" + reprBytes(t.data) + ")", nil
+	case *MemoryView:
+		return fmt.Sprintf("<memory at %p>", t), nil
 	case *Range:
 		return reprRange(t), nil
 	case *List:
@@ -395,6 +419,8 @@ func (vm *VM) str(v Value) (string, error) {
 	switch t := v.(type) {
 	case string:
 		return t, nil
+	case *classDict:
+		return vm.str(t.snapshot())
 	case *Instance:
 		if t.Class.IsSub(baseExc) {
 			if _, ok := t.Class.Lookup("__str__"); !ok {
@@ -430,7 +456,9 @@ func (vm *VM) ascii(v Value) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
-	for _, c := range r {
+	for i := 0; i < len(r); {
+		c, size := pyDecodeRuneInString(r[i:])
+		i += size
 		switch {
 		case c < 0x80:
 			b.WriteRune(c)
@@ -453,6 +481,40 @@ func (vm *VM) excStr(inst *Instance) (string, error) {
 	if message, ok := unicodeErrorStr(inst); ok {
 		return message, nil
 	}
+	if inst.Class.IsSub(excClasses["OSError"]) {
+		errno, hasErrno := inst.dictLookup("errno")
+		message, hasMessage := inst.dictLookup("strerror")
+		if _, none := errno.(NoneType); hasErrno && hasMessage && !none {
+			number, err := vm.str(errno)
+			if err != nil {
+				return "", err
+			}
+			reason, err := vm.str(message)
+			if err != nil {
+				return "", err
+			}
+			text := "[Errno " + number + "] " + reason
+			if filename, ok := inst.dictLookup("filename"); ok {
+				if _, none := filename.(NoneType); !none {
+					name, err := vm.repr(filename)
+					if err != nil {
+						return "", err
+					}
+					text += ": " + name
+					if filename2, ok := inst.dictLookup("filename2"); ok {
+						if _, none := filename2.(NoneType); !none {
+							name2, err := vm.repr(filename2)
+							if err != nil {
+								return "", err
+							}
+							text += " -> " + name2
+						}
+					}
+				}
+			}
+			return text, nil
+		}
+	}
 	args := excArgs(inst)
 	if inst.Class.IsSub(excClasses["KeyError"]) && len(args) == 1 {
 		return vm.repr(args[0])
@@ -467,15 +529,15 @@ func (vm *VM) excStr(inst *Instance) (string, error) {
 }
 
 func unicodeErrorStr(inst *Instance) (string, bool) {
-	encoding, hasEncoding := inst.D["encoding"].(string)
-	reason, hasReason := inst.D["reason"].(string)
-	start, hasStart := asInt(inst.D["start"])
-	end, hasEnd := asInt(inst.D["end"])
+	encoding, hasEncoding := inst.dictValue("encoding").(string)
+	reason, hasReason := inst.dictValue("reason").(string)
+	start, hasStart := asInt(inst.dictValue("start"))
+	end, hasEnd := asInt(inst.dictValue("end"))
 	if !hasEncoding || !hasReason || !hasStart || !hasEnd || start < 0 || end <= start {
 		return "", false
 	}
 	if inst.Class.IsSub(excClasses["UnicodeEncodeError"]) {
-		text, ok := inst.D["object"].(string)
+		text, ok := inst.dictValue("object").(string)
 		if !ok {
 			return "", false
 		}
@@ -484,7 +546,9 @@ func unicodeErrorStr(inst *Instance) (string, bool) {
 				encoding, start, end-1, reason), true
 		}
 		index := int64(0)
-		for _, r := range text {
+		for i := 0; i < len(text); {
+			r, size := pyDecodeRuneInString(text[i:])
+			i += size
 			if index == start {
 				var escaped string
 				switch {
@@ -502,7 +566,7 @@ func unicodeErrorStr(inst *Instance) (string, bool) {
 		}
 	}
 	if inst.Class.IsSub(excClasses["UnicodeDecodeError"]) {
-		data, ok := inst.D["object"].([]byte)
+		data, ok := inst.dictValue("object").([]byte)
 		if !ok || start >= int64(len(data)) {
 			return "", false
 		}
@@ -530,7 +594,7 @@ type fmtSpec struct {
 
 func parseFmtSpec(spec string) (*fmtSpec, error) {
 	fs := &fmtSpec{fill: ' '}
-	rs := []rune(spec)
+	rs := pyRunes(spec)
 	i := 0
 	isAlign := func(r rune) bool { return r == '<' || r == '>' || r == '^' || r == '=' }
 	if len(rs) >= 2 && isAlign(rs[1]) {
@@ -583,7 +647,7 @@ func parseFmtSpec(spec string) (*fmtSpec, error) {
 	case 0, 'd', 'b', 'o', 'x', 'X', 'f', 'e', 'g', '%', 's':
 		return fs, nil
 	}
-	return nil, newErrorf("ValueError", "Unknown format code '%c'", fs.typ)
+	return nil, newErrorf("ValueError", "Unknown format code '%s'", pyRuneString(fs.typ))
 }
 
 // formatValue implements format(v, spec) for the supported mini-language.
@@ -638,7 +702,7 @@ func formatStr(s string, fs *fmtSpec) (string, error) {
 	switch fs.typ {
 	case 0, 's':
 	default:
-		return "", newErrorf("ValueError", "Unknown format code '%c' for object of type 'str'", fs.typ)
+		return "", newErrorf("ValueError", "Unknown format code '%s' for object of type 'str'", pyRuneString(fs.typ))
 	}
 	if fs.sign != 0 {
 		return "", newError("ValueError", "Sign not allowed in string format specifier")
@@ -646,15 +710,21 @@ func formatStr(s string, fs *fmtSpec) (string, error) {
 	if fs.align == '=' {
 		return "", newError("ValueError", "'=' alignment not allowed in string format specifier")
 	}
-	rs := []rune(s)
-	if fs.hasPrec && len(rs) > fs.prec {
-		rs = rs[:fs.prec]
+	length := 0
+	for offset := 0; offset < len(s); {
+		if fs.hasPrec && length == fs.prec {
+			s = s[:offset]
+			break
+		}
+		_, size := pyDecodeRuneInString(s[offset:])
+		offset += size
+		length++
 	}
 	align := fs.align
 	if align == 0 {
 		align = '<'
 	}
-	return pad(string(rs), len(rs), align, fs.fill, fs.width), nil
+	return pad(s, length, align, fs.fill, fs.width), nil
 }
 
 func formatInt(n int64, fs *fmtSpec) (string, error) {
@@ -720,7 +790,7 @@ func formatFloat(f float64, fs *fmtSpec) (string, error) {
 			body = strings.TrimPrefix(pyFloatStr(av), "-")
 		}
 	case 'd', 'b', 'o', 'x', 'X':
-		return "", newErrorf("ValueError", "Unknown format code '%c' for object of type 'float'", fs.typ)
+		return "", newErrorf("ValueError", "Unknown format code '%s' for object of type 'float'", pyRuneString(fs.typ))
 	}
 	if fs.comma {
 		if dot := strings.IndexAny(body, ".e%"); dot >= 0 {
@@ -742,7 +812,7 @@ func groupWithZeroFill(digits, rest string, neg bool, fs *fmtSpec) string {
 		if neg || fs.sign == '+' || fs.sign == ' ' {
 			signLen = 1
 		}
-		room := fs.width - signLen - len([]rune(rest))
+		room := fs.width - signLen - pyRuneCount(rest)
 		for len(grouped) < room {
 			digits = "0" + digits
 			grouped = groupDigits(digits)
@@ -784,14 +854,14 @@ func padNumber(body string, neg bool, fs *fmtSpec) string {
 		align = '>'
 	}
 	if align == '=' {
-		n := fs.width - len(sign) - len([]rune(body))
+		n := fs.width - len(sign) - pyRuneCount(body)
 		if n < 0 {
 			n = 0
 		}
-		return sign + strings.Repeat(string(fs.fill), n) + body
+		return sign + strings.Repeat(pyRuneString(fs.fill), n) + body
 	}
 	s := sign + body
-	return pad(s, len([]rune(s)), align, fs.fill, fs.width)
+	return pad(s, pyRuneCount(s), align, fs.fill, fs.width)
 }
 
 func pad(s string, runeLen int, align rune, fill rune, width int) string {
@@ -801,12 +871,12 @@ func pad(s string, runeLen int, align rune, fill rune, width int) string {
 	}
 	switch align {
 	case '<':
-		return s + strings.Repeat(string(fill), n)
+		return s + strings.Repeat(pyRuneString(fill), n)
 	case '>':
-		return strings.Repeat(string(fill), n) + s
+		return strings.Repeat(pyRuneString(fill), n) + s
 	case '^':
 		left := n / 2
-		return strings.Repeat(string(fill), left) + s + strings.Repeat(string(fill), n-left)
+		return strings.Repeat(pyRuneString(fill), left) + s + strings.Repeat(pyRuneString(fill), n-left)
 	}
 	return s
 }

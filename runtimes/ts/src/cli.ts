@@ -22,7 +22,7 @@ import { Interp, type Policy, type JournalEntry } from "./interp.ts";
 import { cmdBuild, cmdSelftestBuild } from "./build.ts";
 import { loadBundle } from "./index.ts";
 import { type Value, NONE, DiasporeError, SuspendSig } from "./values.ts";
-import { maybeGunzip, bundleDigest, buildSnapshot, parseSnapshot, payloadJSON } from "./flow.ts";
+import { maybeGunzip, buildSnapshot, parseSnapshot, validateSnapshotBundle, payloadJSON } from "./flow.ts";
 import { jsonLoads } from "./json.ts";
 
 function usage(): never {
@@ -31,7 +31,7 @@ function usage(): never {
       "                  [--allow-spawn] [--max-steps N] [--max-depth N]\n" +
       "                  [--durable] [--snapshot PATH] [--deterministic]\n" +
       "       diaspore-ts resume <bundle> <snapshot> [--send JSON] [--snapshot OUT] [--max-steps N] [--max-depth N]\n" +
-      "       diaspore-ts build <entry.py> [-o OUT[.gz]] [--path DIR]... [--debug] [--pretty]\n" +
+      "       diaspore-ts build <entry.py> [-o OUT[.gz]] [--path DIR]... [--debug] [--pretty] [--self-contained] [--no-stdlib]\n" +
       "       diaspore-ts selftest-build\n",
   );
   process.exit(2);
@@ -256,18 +256,19 @@ function cmdRun(rest: string[]): number {
     process.stderr.write(`diaspore: ${(e as Error).message}\n`);
     return 2;
   }
-  if (a.durable) {
-    try {
-      return I.run();
-    } catch (e) {
-      if (e instanceof SuspendSig) {
-        const snap = a.snapshot !== "" ? a.snapshot : a.pos[0] + ".flow.json";
-        return finishSuspend(I, bundle, e, snap);
-      }
-      throw e;
+  let suspended = false;
+  try {
+    return I.run();
+  } catch (e) {
+    if (e instanceof SuspendSig) {
+      suspended = true;
+      const snap = a.snapshot !== "" ? a.snapshot : a.pos[0] + ".flow.json";
+      return finishSuspend(I, bundle, e, snap);
     }
+    throw e;
+  } finally {
+    if (!suspended) I.close();
   }
-  return I.run();
 }
 
 function cmdResume(rest: string[]): number {
@@ -286,14 +287,10 @@ function cmdResume(rest: string[]): number {
   } catch (e) {
     die((e as Error).message);
   }
-  if (parsed.bundleSha !== null) {
-    const actual = bundleDigest(bundle);
-    if (parsed.bundleSha !== actual) {
-      die(
-        `snapshot was taken from a different bundle ` +
-          `(snapshot ${parsed.bundleSha.slice(0, 12)}..., this bundle ${actual.slice(0, 12)}...)`,
-      );
-    }
+  try {
+    validateSnapshotBundle(parsed, bundle);
+  } catch (error) {
+    die((error as Error).message);
   }
   let send: Value = NONE;
   if (a.hasSend) {
@@ -318,14 +315,18 @@ function cmdResume(rest: string[]): number {
     process.stderr.write(`diaspore: ${(e as Error).message}\n`);
     return 2;
   }
+  let suspended = false;
   try {
     return I.run();
   } catch (e) {
     if (e instanceof SuspendSig) {
+      suspended = true;
       const snapOut = a.snapshot !== "" ? a.snapshot : a.pos[1];
       return finishSuspend(I, bundle, e, snapOut);
     }
     throw e;
+  } finally {
+    if (!suspended) I.close();
   }
 }
 

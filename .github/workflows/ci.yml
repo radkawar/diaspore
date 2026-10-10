@@ -37,3 +37,11 @@ jobs:
       - run: make test
       - name: Differential fuzzing
         run: make fuzz SEEDS=100
+      - name: CPython compatibility ratchet
+        run: make cpython
+      - name: CPython compatibility scoreboard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpython-scoreboard
+          path: build/cpython-regressions/

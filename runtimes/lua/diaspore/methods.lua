@@ -6,6 +6,9 @@ local format = require("diaspore.format")
 local iter = require("diaspore.iter")
 local ops = require("diaspore.ops")
 local H = require("diaspore.helpers")
+local buffer = require("diaspore.buffer")
+local bigint = require("diaspore.bigint")
+local pcall = require("diaspore.protected").call
 
 local M = {}
 
@@ -16,7 +19,9 @@ local chars = values.chars
 local as_index = values.as_index
 local need_args = H.need_args
 local no_kw = H.no_kw
-local want_int = H.want_int
+local function want_int(what, v)
+  return values.to_size(H.want_int(what, v))
+end
 local want_str = H.want_str
 
 local function is_none(v)
@@ -26,6 +31,45 @@ end
 local function kindof(v)
   if type(v) == "table" then return v.kind end
   return nil
+end
+
+local function split_arguments(name, args, kw)
+  need_args(name, args, 0, 2)
+  local sep, count = args[1], args[2]
+  for _, entry in ipairs(kw) do
+    if entry.k == "sep" then
+      if sep ~= nil then throw("TypeError", name .. "() got multiple values for argument 'sep'") end
+      sep = entry.v
+    elseif entry.k == "maxsplit" then
+      if count ~= nil then throw("TypeError", name .. "() got multiple values for argument 'maxsplit'") end
+      count = entry.v
+    else throw("TypeError", "'" .. entry.k .. "' is an invalid keyword argument for " .. name .. "()") end
+  end
+  return sep, count == nil and -1 or want_int("maxsplit", count)
+end
+
+local function split_literal(data, sep, count, from_right)
+  if sep == "" then throw("ValueError", "empty separator") end
+  if from_right then data, sep = data:reverse(), sep:reverse() end
+  local parts, first = {}, 1
+  while count < 0 or #parts < count do
+    local at = data:find(sep, first, true)
+    if at == nil then break end
+    parts[#parts + 1] = data:sub(first, at - 1)
+    first = at + #sep
+  end
+  parts[#parts + 1] = data:sub(first)
+  if from_right then
+    for i = 1, #parts // 2 do
+      local j = #parts - i + 1
+      parts[i], parts[j] = parts[j]:reverse(), parts[i]:reverse()
+    end
+    if #parts % 2 == 1 then
+      local middle = #parts // 2 + 1
+      parts[middle] = parts[middle]:reverse()
+    end
+  end
+  return parts
 end
 
 -- ---------------------------------------------------------------------------
@@ -60,7 +104,7 @@ local function split_whitespace(s, maxsplit, from_right)
     fields[#fields + 1] = table.concat(cs, "", i, j - 1)
     i = j
   end
-  if maxsplit < 0 or #fields - 1 <= maxsplit then return fields end
+  if maxsplit < 0 or #fields <= maxsplit then return fields end
   if not from_right then
     local parts = {}
     local pos = 1
@@ -94,27 +138,19 @@ local LINE_BREAK_CPS = {
   [0x1E] = true, [0x85] = true, [0x2028] = true, [0x2029] = true,
 }
 
-local function split_lines(s)
-  local out = {}
-  local cur = {}
-  local cs = chars(s)
-  local i = 1
-  while i <= #cs do
-    local ch = cs[i]
-    local cp = utf8.codepoint(ch, 1, 1, true)
-    if LINE_BREAK_CPS[cp] then
-      out[#out + 1] = table.concat(cur)
-      cur = {}
-    elseif cp == 0x0D then
-      if i + 1 <= #cs and cs[i + 1] == "\n" then i = i + 1 end
-      out[#out + 1] = table.concat(cur)
-      cur = {}
-    else
-      cur[#cur + 1] = ch
+local function split_lines(s, keepends)
+  local out, first = {}, 1
+  for pos, cp in utf8.codes(s, true) do
+    if pos >= first and (LINE_BREAK_CPS[cp] or cp == 0x0D) then
+      local last = pos
+      if cp == 0x0D and s:byte(pos + 1) == 0x0A then last = pos + 1
+      elseif cp == 0x85 then last = pos + 1
+      elseif cp == 0x2028 or cp == 0x2029 then last = pos + 2 end
+      out[#out + 1] = s:sub(first, keepends and last or pos - 1)
+      first = last + 1
     end
-    i = i + 1
   end
-  if #cur > 0 then out[#out + 1] = table.concat(cur) end
+  if first <= #s then out[#out + 1] = s:sub(first) end
   return out
 end
 
@@ -129,24 +165,22 @@ end
 local function str_region(rs, args, from)
   local n = #rs
   local start, stop = 0, n
-  local function adjust(v, def)
+  local function adjust(v, def, is_start)
     if is_none(v) then return def end
     local x = as_index(v)
     if x == nil then
       throw("TypeError",
         "slice indices must be integers or None or have an __index__ method")
     end
+    x = values.clamp_index(x, -n, is_start and n + 1 or n)
     if x < 0 then
       x = x + n
       if x < 0 then x = 0 end
-    elseif x > n then
-      x = n
     end
     return x
   end
-  if #args >= from then start = adjust(args[from], 0) end
-  if #args >= from + 1 then stop = adjust(args[from + 1], n) end
-  if stop < start then stop = start end
+  if #args >= from then start = adjust(args[from], 0, true) end
+  if #args >= from + 1 then stop = adjust(args[from + 1], n, false) end
   return start, stop
 end
 
@@ -159,6 +193,7 @@ local function runes_match(rs, sub, at) -- at 0-based
 end
 
 local function find_runes(rs, sub, start, stop, last) -- 0-based region, ret 0-based or -1
+  if start > stop then return -1 end
   if #sub == 0 then
     if last then return stop end
     return start
@@ -230,7 +265,60 @@ end
 -- str methods
 
 local function str_method(s, n)
-  if n == "upper" then
+  if n == "maketrans" then
+    return function(I, args, kw)
+      need_args(n, args, 1, 3); no_kw(n, kw)
+      local result = values.new_dict()
+      if #args == 1 then
+        local mapping = I:raw(args[1])
+        if kindof(mapping) ~= "dict" then throw("TypeError", "if you give only one argument to maketrans it must be a dict") end
+        for _, entry in ipairs(values.dict_entries(mapping)) do
+          local key = entry.k
+          if type(key) == "string" then
+            if values.str_len(key) ~= 1 then throw("ValueError", "string keys in translate table must be of length 1") end
+            key = utf8.codepoint(key, 1, -1, true)
+          elseif not bigint.is_int(key) and type(key) ~= "boolean" then
+            throw("TypeError", "keys in translate table must be strings or integers")
+          end
+          values.dict_set(result, key, entry.v)
+        end
+      else
+        local from, to = chars(want_str("maketrans", args[1])), chars(want_str("maketrans", args[2]))
+        if #from ~= #to then throw("ValueError", "the first two maketrans arguments must have equal length") end
+        for i, character in ipairs(from) do
+          values.dict_set(result, utf8.codepoint(character, 1, -1, true), utf8.codepoint(to[i], 1, -1, true))
+        end
+        if #args == 3 then
+          for _, cp in utf8.codes(want_str("maketrans", args[3]), true) do values.dict_set(result, cp, NONE) end
+        end
+      end
+      return result
+    end
+  elseif n == "translate" then
+    return function(I, args, kw)
+      need_args(n, args, 1, 1); no_kw(n, kw)
+      local result = {}
+      for _, cp in utf8.codes(s, true) do
+        I:fuel()
+        local saved = #I.stack
+        local ok, replacement = pcall(ops.get_index, I, args[1], cp)
+        if not ok then
+          if values.is_exc(replacement) and values.exc_isa(replacement.value, "LookupError") then
+            I:trim(saved); replacement = cp
+          else error(replacement, 0) end
+        end
+        if replacement ~= NONE then
+          if type(replacement) == "string" then result[#result + 1] = replacement
+          elseif bigint.is_int(replacement) or type(replacement) == "boolean" then
+            local number = values.as_index(replacement)
+            if bigint.cmp(number, 0) < 0 or bigint.cmp(number, 0x10ffff) > 0 then throw("ValueError", "character mapping must be in range(0x110000)") end
+            result[#result + 1] = utf8.char(number)
+          else throw("TypeError", "character mapping must return integer, None or str") end
+        end
+      end
+      return table.concat(result)
+    end
+  elseif n == "upper" then
     return function(_I, args, kw)
       no_kw(n, kw)
       return H.str_upper(s)
@@ -284,53 +372,64 @@ local function str_method(s, n)
     end
   elseif n == "split" or n == "rsplit" then
     return function(_I, args, kw)
-      no_kw(n, kw)
-      need_args(n, args, 0, 2)
-      local maxsplit = -1
-      if #args >= 2 then maxsplit = want_int("maxsplit", args[2]) end
-      local sep = nil
-      if #args >= 1 and not is_none(args[1]) then
-        sep = want_str("sep", args[1])
-        if sep == "" then throw("ValueError", "empty separator") end
-      end
+      local sep, maxsplit = split_arguments(n, args, kw)
+      if sep ~= nil and not is_none(sep) then
+        sep = want_str("sep", sep)
+      else sep = nil end
       local parts
       if sep == nil then
         parts = split_whitespace(s, maxsplit, n == "rsplit")
-      elseif n == "split" then
-        parts = {}
-        local rest_from = 1
-        while maxsplit < 0 or #parts < maxsplit do
-          local at = s:find(sep, rest_from, true)
-          if at == nil then break end
-          parts[#parts + 1] = s:sub(rest_from, at - 1)
-          rest_from = at + #sep
-        end
-        parts[#parts + 1] = s:sub(rest_from)
-      else -- rsplit with sep
-        local all = {}
-        local from = 1
-        while true do
-          local at = s:find(sep, from, true)
-          if at == nil then break end
-          all[#all + 1] = s:sub(from, at - 1)
-          from = at + #sep
-        end
-        all[#all + 1] = s:sub(from)
-        if maxsplit >= 0 and #all - 1 > maxsplit then
-          local keep = #all - maxsplit
-          local head = table.concat(all, sep, 1, keep)
-          parts = { head }
-          for i = keep + 1, #all do parts[#parts + 1] = all[i] end
-        else
-          parts = all
-        end
+      else
+        parts = split_literal(s, sep, maxsplit, n == "rsplit")
       end
       return str_list(parts)
     end
+  elseif n == "expandtabs" then
+    return function(I, args, kw)
+      need_args(n, args, 0, 1)
+      local tabsize = args[1]
+      for _, entry in ipairs(kw) do
+        if entry.k ~= "tabsize" then throw("TypeError", "'" .. entry.k .. "' is an invalid keyword argument for expandtabs()") end
+        if tabsize ~= nil then throw("TypeError", "expandtabs() got multiple values for argument 'tabsize'") end
+        tabsize = entry.v
+      end
+      tabsize = tabsize == nil and 8 or H.want_int("tabsize", tabsize)
+      if bigint.is_bigint(tabsize) or tabsize < -0x80000000 or tabsize > 0x7fffffff then
+        throw("OverflowError", "Python int too large to convert to C int")
+      end
+      if not s:find("\t", 1, true) then return s end
+      local parts, first, column, size = {}, 1, 0, #s
+      for pos, cp in utf8.codes(s, true) do
+        if cp == 9 then
+          parts[#parts + 1] = s:sub(first, pos - 1)
+          local padding = tabsize > 0 and tabsize - column or 0
+          size = size - 1
+          if size > math.maxinteger - padding then throw("OverflowError", "expanded string is too long") end
+          size = size + padding
+          I:fuel_n(padding)
+          parts[#parts + 1] = string.rep(" ", padding)
+          first, column = pos + 1, 0
+        elseif cp == 10 or cp == 13 then
+          column = 0
+        elseif tabsize > 0 then
+          column = column + 1
+          if column == tabsize then column = 0 end
+        end
+      end
+      parts[#parts + 1] = s:sub(first)
+      return table.concat(parts)
+    end
   elseif n == "splitlines" then
-    return function(_I, args, kw)
-      no_kw(n, kw)
-      return str_list(split_lines(s))
+    return function(I, args, kw)
+      need_args(n, args, 0, 1)
+      local keepends = args[1]
+      for _, entry in ipairs(kw) do
+        if entry.k ~= "keepends" then throw("TypeError", "'" .. entry.k .. "' is an invalid keyword argument for splitlines()") end
+        if keepends ~= nil then throw("TypeError", "splitlines() got multiple values for argument 'keepends'") end
+        keepends = entry.v
+      end
+      I:fuel_n(#s)
+      return str_list(split_lines(s, keepends ~= nil and I:truth(keepends)))
     end
   elseif n == "join" then
     return function(I, args, kw)
@@ -366,6 +465,7 @@ local function str_method(s, n)
       local rs = chars(s)
       local start, stop = str_region(rs, args, 2)
       if n == "count" then
+        if start > stop then return 0 end
         local region = {}
         for i = start + 1, stop do region[#region + 1] = rs[i] end
         return count_runes(region, chars(sub))
@@ -395,20 +495,23 @@ local function str_method(s, n)
             .. type_name(p))
         end
         if n == "startswith" then
-          if region:sub(1, #p) == p then return true end
+          if start <= stop and region:sub(1, #p) == p then return true end
         else
-          if p == "" or region:sub(-#p) == p then return true end
+          if start <= stop and (p == "" or region:sub(-#p) == p) then return true end
         end
       end
       return false
     end
-  elseif n == "isdigit" or n == "isalpha" or n == "isalnum" or n == "isspace" then
+  elseif n == "isdigit" or n == "isdecimal" or n == "isalpha" or n == "isalnum" or n == "isspace" then
     return function(_I, args, kw)
       no_kw(n, kw)
+      need_args(n, args, 0, 0)
       if s == "" then return false end
       for _, cp in utf8.codes(s, true) do
         local ok
-        if n == "isdigit" then
+        if n == "isdecimal" then
+          ok = H.decimal_value(cp) ~= nil
+        elseif n == "isdigit" then
           ok = H.is_digit_cp(cp)
         elseif n == "isalpha" then
           ok = H.is_alpha_cp(cp)
@@ -448,19 +551,17 @@ local function str_method(s, n)
         end
         fill = f
       end
-      local pad = w - #chars(s)
-      if pad <= 0 then return s end
+      local size = #chars(s)
+      if w <= size then return s end
+      local pad = w - size
       if n == "ljust" then return s .. string.rep(fill, pad) end
       return string.rep(fill, pad) .. s
     end
   elseif n == "encode" then
     return function(_I, args, kw)
-      need_args(n, args, 0, 1)
-      local enc = "utf-8"
-      if #args == 1 then enc = want_str("encoding", args[1]) end
-      local kv = H.kw_get(kw, "encoding")
-      if kv ~= nil then enc = want_str("encoding", kv) end
-      return H.encode_str_to(s, enc)
+      need_args(n, args, 0, 2)
+      local enc, errors = require("diaspore.encoding").arguments(args, kw)
+      return H.encode_str_to(s, enc, errors, _I)
     end
   elseif n == "partition" or n == "rpartition" then
     return function(_I, args, kw)
@@ -514,8 +615,9 @@ local function str_method(s, n)
         end
         fill = f
       end
-      local marg = w - #chars(s)
-      if marg <= 0 then return s end
+      local size = #chars(s)
+      if w <= size then return s end
+      local marg = w - size
       local left = (marg >> 1) + (marg & w & 1)
       return string.rep(fill, left) .. s .. string.rep(fill, marg - left)
     end
@@ -557,14 +659,14 @@ end
 local function seq_index_of(I, items, args) -- 0-based or -1
   local start, stop = 0, #items
   if #args >= 2 then
-    start = want_int("start", args[2])
+    start = values.clamp_index(H.want_int("start", args[2]), -#items, #items)
     if start < 0 then
       start = start + #items
       if start < 0 then start = 0 end
     end
   end
   if #args >= 3 then
-    stop = want_int("stop", args[3])
+    stop = values.clamp_index(H.want_int("stop", args[3]), -#items, #items)
     if stop < 0 then stop = stop + #items end
     if stop > #items then stop = #items end
   end
@@ -768,6 +870,11 @@ local function set_method(s, n)
       values.set_discard(s, args[1])
       return NONE
     end
+  elseif n == "pop" then
+    return function(_I, args, kw)
+      need_args(n, args, 0, 0); no_kw(n, kw)
+      return values.set_pop(s)
+    end
   elseif n == "clear" then
     return function()
       values.set_clear(s)
@@ -778,6 +885,30 @@ local function set_method(s, n)
       need_args(n, args, 0, 0)
       if s.frozen then return s end
       return values.set_copy(s)
+    end
+  elseif n == "difference_update" then
+    return function(I, args, kw)
+      no_kw(n, kw)
+      for _, source in ipairs(args) do
+        local other = I:raw(source)
+        if other == s then
+          values.set_clear(s)
+        elseif kindof(other) == "set" then
+          for slot, entry in pairs(other.map) do
+            I:fuel()
+            values.set_discard(s, entry.v, entry.hk or slot)
+          end
+        else
+          local it = iter.get_iter(I, source)
+          while true do
+            local value, more = it.next()
+            if not more then break end
+            I:fuel()
+            values.set_discard(s, value)
+          end
+        end
+      end
+      return NONE
     end
   elseif n == "union" or n == "intersection" or n == "difference"
       or n == "symmetric_difference" then
@@ -845,31 +976,60 @@ end
 local WS_BYTES = { [0x20] = true, [0x09] = true, [0x0A] = true, [0x0D] = true,
                    [0x0B] = true, [0x0C] = true }
 
-local function bytes_fields(data)
-  local out = {}
-  local i = 1
-  local n = #data
-  while i <= n do
-    while i <= n and WS_BYTES[data:byte(i)] do i = i + 1 end
-    if i > n then break end
+local function bytes_fields(data, count, from_right)
+  if from_right then data = data:reverse() end
+  local out, i, size = {}, 1, #data
+  while i <= size do
+    while i <= size and WS_BYTES[data:byte(i)] do i = i + 1 end
+    if i > size then break end
+    if count >= 0 and #out == count then out[#out + 1] = data:sub(i); break end
     local j = i
-    while j <= n and not WS_BYTES[data:byte(j)] do j = j + 1 end
+    while j <= size and not WS_BYTES[data:byte(j)] do j = j + 1 end
     out[#out + 1] = data:sub(i, j - 1)
     i = j
   end
+  if from_right then
+    for j = 1, #out // 2 do
+      local last = #out - j + 1
+      out[j], out[last] = out[last]:reverse(), out[j]:reverse()
+    end
+    if #out % 2 == 1 then
+      local middle = #out // 2 + 1
+      out[middle] = out[middle]:reverse()
+    end
+  end
   return out
+end
+
+local function bytes_like(value)
+  if not buffer.is_buffer(value) then
+    throw("TypeError", "a bytes-like object is required, not '" .. type_name(value) .. "'")
+  end
+  buffer.check(value)
+  if kindof(value) == "memoryview" and value.length > 1 and value.stride ~= value.itemsize then
+    throw("BufferError", "memoryview: underlying buffer is not C-contiguous")
+  end
+  return buffer.data(value)
+end
+
+--- Build the identity byte translation table with the requested substitutions.
+function M.bytes_maketrans(_I, args, kw)
+  need_args("maketrans", args, 2, 2); no_kw("maketrans", kw)
+  local from, to = bytes_like(args[1]), bytes_like(args[2])
+  if #from ~= #to then throw("ValueError", "maketrans arguments must have same length") end
+  local result = {}
+  for byte = 0, 255 do result[byte + 1] = string.char(byte) end
+  for i = 1, #from do result[from:byte(i) + 1] = to:sub(i, i) end
+  return values.bytes(table.concat(result))
 end
 
 local function bytes_method(b, n)
   local data = b.b
   if n == "decode" then
     return function(_I, args, kw)
-      need_args(n, args, 0, 1)
-      local enc = "utf-8"
-      if #args == 1 then enc = want_str("encoding", args[1]) end
-      local kv = H.kw_get(kw, "encoding")
-      if kv ~= nil then enc = want_str("encoding", kv) end
-      return H.decode_bytes(b, enc)
+      need_args(n, args, 0, 2)
+      local enc, errors = require("diaspore.encoding").arguments(args, kw)
+      return H.decode_bytes(b, enc, errors, _I)
     end
   elseif n == "find" then
     return function(_I, args)
@@ -884,28 +1044,62 @@ local function bytes_method(b, n)
       if at == nil then return -1 end
       return at - 1
     end
-  elseif n == "split" then
-    return function(_I, args)
-      need_args(n, args, 0, 2)
+  elseif n == "maketrans" then
+    return M.bytes_maketrans
+  elseif n == "join" then
+    return function(I, args, kw)
+      need_args(n, args, 1, 1); no_kw(n, kw)
+      local items = iter.iter_to_array(I, args[1])
+      local parts, size = {}, 0
+      for i, item in ipairs(items) do
+        if not buffer.is_buffer(item) or kindof(item) == "memoryview"
+            and (item.released or item.length > 1 and item.stride ~= item.itemsize) then
+          throw("TypeError", "sequence item " .. (i - 1) .. ": expected a bytes-like object, "
+            .. type_name(item) .. " found")
+        end
+        local part = bytes_like(item)
+        local added = #part
+        if i > 1 then added = values.to_size(bigint.add(added, #data), "join() result is too long") end
+        size = values.to_size(bigint.add(size, added), "join() result is too long")
+        parts[i] = part
+      end
+      I:fuel_n(size)
+      return values.bytes(table.concat(parts, data))
+    end
+  elseif n == "translate" then
+    return function(I, args, kw)
+      need_args(n, args, 1, 2)
+      local deleted = args[2]
+      for _, entry in ipairs(kw) do
+        if entry.k ~= "delete" then throw("TypeError", "'" .. entry.k .. "' is an invalid keyword argument for translate()") end
+        if deleted ~= nil then throw("TypeError", "translate() got multiple values for argument 'delete'") end
+        deleted = entry.v
+      end
+      local translation = not is_none(args[1]) and bytes_like(args[1]) or nil
+      if translation ~= nil and #translation ~= 256 then throw("ValueError", "translation table must be 256 characters long") end
+      local removed = {}
+      if deleted ~= nil then
+        local chars = bytes_like(deleted)
+        for i = 1, #chars do removed[chars:byte(i)] = true end
+      end
+      local parts = {}
+      I:fuel_n(#data)
+      for i = 1, #data do
+        local byte = data:byte(i)
+        if not removed[byte] then
+          parts[#parts + 1] = translation and translation:sub(byte + 1, byte + 1) or data:sub(i, i)
+        end
+      end
+      return values.bytes(table.concat(parts))
+    end
+  elseif n == "split" or n == "rsplit" then
+    return function(_I, args, kw)
+      local sep, maxsplit = split_arguments(n, args, kw)
       local parts
-      if #args == 0 or is_none(args[1]) then
-        parts = bytes_fields(data)
+      if sep == nil or is_none(sep) then
+        parts = bytes_fields(data, maxsplit, n == "rsplit")
       else
-        local sep = args[1]
-        if kindof(sep) ~= "bytes" then
-          throw("TypeError", "a bytes-like object is required, not '"
-            .. type_name(sep) .. "'")
-        end
-        if sep.b == "" then throw("ValueError", "empty separator") end
-        parts = {}
-        local from = 1
-        while true do
-          local at = data:find(sep.b, from, true)
-          if at == nil then break end
-          parts[#parts + 1] = data:sub(from, at - 1)
-          from = at + #sep.b
-        end
-        parts[#parts + 1] = data:sub(from)
+        parts = split_literal(data, bytes_like(sep), maxsplit, n == "rsplit")
       end
       local out = {}
       for i = 1, #parts do out[i] = values.bytes(parts[i]) end
@@ -990,6 +1184,31 @@ local function bytes_method(b, n)
       end
       return false
     end
+  elseif n == "ljust" or n == "rjust" or n == "center" or n == "zfill" then
+    return function(I, args, kw)
+      need_args(n, args, 1, n == "zfill" and 1 or 2); no_kw(n, kw)
+      local width = want_int("width", args[1])
+      local fill = " "
+      if args[2] ~= nil then
+        local k = kindof(args[2])
+        if (k ~= "bytes" and k ~= "bytearray") or #args[2].b ~= 1 then
+          throw("TypeError", n .. "() argument 2 must be a byte string of length 1, not " .. type_name(args[2]))
+        end
+        fill = args[2].b
+      end
+      if width <= #data then return values.bytes(data) end
+      local padding = width - #data
+      I:fuel_n(width)
+      if n == "zfill" then
+        local first = data:sub(1, 1)
+        if first == "+" or first == "-" then return values.bytes(first .. string.rep("0", padding) .. data:sub(2)) end
+        return values.bytes(string.rep("0", padding) .. data)
+      end
+      if n == "ljust" then return values.bytes(data .. string.rep(fill, padding)) end
+      if n == "rjust" then return values.bytes(string.rep(fill, padding) .. data) end
+      local left = (padding >> 1) + (padding & width & 1)
+      return values.bytes(string.rep(fill, left) .. data .. string.rep(fill, padding - left))
+    end
   elseif n == "upper" or n == "lower" then
     return function()
       if n == "upper" then return values.bytes(data:upper()) end
@@ -1004,11 +1223,72 @@ end
 
 --- Look up a method on a builtin value, or return nil.
 function M.builtin_method(_I, o, n)
+  local t = type(o)
+  local k = t == "table" and o.kind or nil
   local fn = nil
-  if type(o) == "string" then
+  if (t == "number" or t == "boolean" or k == "bigint") and values.is_int_kind(o) then
+    local value = values.as_index(o)
+    if n == "to_bytes" then
+      return values.builtin(n, function(I, args, kw) return buffer.to_bytes(I, value, args, kw) end)
+    end
+    if n == "bit_length" or n == "bit_count" or n == "conjugate" or n == "as_integer_ratio"
+        or n == "is_integer" or n == "__int__" or n == "__index__" or n == "__float__"
+        or n == "__trunc__" or n == "__floor__" or n == "__ceil__" then
+      return values.builtin(n, function(_, args, kw)
+        need_args(n, args, 0, 0); no_kw(n, kw)
+        if n == "bit_length" then return bigint.bit_length(value) end
+        if n == "bit_count" then return bigint.bit_count(value) end
+        if n == "as_integer_ratio" then return values.tuple({ value, 1 }) end
+        if n == "is_integer" then return true end
+        if n == "__float__" then return bigint.to_float(value) end
+        return value
+      end)
+    end
+  end
+  if t == "string" and (n == "isidentifier" or n == "isascii" or n == "isprintable") then
+    return values.builtin(n, function(_, args, kw)
+      need_args(n, args, 0, 0); no_kw(n, kw)
+      if n == "isascii" then return values.is_ascii(o) end
+      return require("diaspore.identifier")[n](o)
+    end)
+  end
+  if t == "string" and (n == "format" or n == "format_map") then
+    return values.builtin(n, function(I, args, kw)
+      if n == "format_map" then
+        need_args(n, args, 1, 1); no_kw(n, kw)
+        return require("diaspore.interpolation").format(I, o, {}, {}, args[1], ops)
+      end
+      return require("diaspore.interpolation").format(I, o, args, kw, nil, ops)
+    end)
+  end
+  if (k == "bytes" or k == "bytearray") and n == "maketrans" then
+    return values.builtin(n, M.bytes_maketrans)
+  end
+  if k == "bytearray" or k == "memoryview" or k == "bytes" and n == "hex" then
+    local attr = buffer.attr(_I, o, n)
+    if attr ~= nil then return attr end
+    if k == "bytearray" and bytes_method(values.bytes(o.b), n) ~= nil then
+      return values.builtin(n, function(I, args, kw)
+        local converted = {}
+        for i, value in ipairs(args) do
+          converted[i] = buffer.is_buffer(value) and n ~= "join" and n ~= "translate"
+            and n ~= "split" and n ~= "rsplit" and n ~= "ljust" and n ~= "rjust" and n ~= "center"
+            and values.bytes(buffer.data(value)) or value
+        end
+        local result = bytes_method(values.bytes(o.b), n)(I, converted, kw)
+        if kindof(result) == "bytes" then return buffer.bytearray(result.b) end
+        if kindof(result) == "list" then
+          for i, value in ipairs(result.items) do
+            if kindof(value) == "bytes" then result.items[i] = buffer.bytearray(value.b) end
+          end
+        end
+        return result
+      end)
+    end
+  end
+  if t == "string" then
     fn = str_method(o, n)
   else
-    local k = kindof(o)
     if k == "list" then
       fn = list_method(o, n)
     elseif k == "dict" then
@@ -1023,7 +1303,7 @@ function M.builtin_method(_I, o, n)
       end
       if n == "get" or n == "copy" then
         fn = function(I, args, kw)
-          return dict_method(values.namespace_dict(o.cls), n)(I, args, kw)
+          return dict_method(values.proxy_dict(o), n)(I, args, kw)
         end
       end
     elseif k == "set" then
@@ -1049,7 +1329,7 @@ function M.builtin_method(_I, o, n)
     throw("AttributeError", "'" .. type_name(o) .. "' object has no attribute '" .. n .. "'")
   end
   return values.builtin(n, function(I, args, kw)
-    if kindof(o) == "set" and o.frozen then no_kw(n, kw or {}) end
+    if k == "set" and o.frozen then no_kw(n, kw or {}) end
     return fn(I, args, kw or {})
   end)
 end
@@ -1062,9 +1342,13 @@ local function set_of(names)
 end
 
 M.METHOD_SETS = {
-  str = set_of({ "upper", "lower", "title", "capitalize", "casefold", "strip",
-    "lstrip", "rstrip", "split", "rsplit", "splitlines", "join", "replace",
-    "find", "rfind", "index", "count", "startswith", "endswith", "isdigit",
+  int = set_of({ "bit_length", "bit_count", "to_bytes", "conjugate", "as_integer_ratio",
+    "is_integer", "__int__", "__index__", "__float__", "__trunc__", "__floor__", "__ceil__" }),
+  str = set_of({ "format", "format_map", "upper", "lower", "title", "capitalize", "casefold", "strip",
+    "isidentifier", "isascii", "isprintable",
+    "maketrans", "translate",
+    "lstrip", "rstrip", "split", "rsplit", "splitlines", "expandtabs", "join", "replace",
+    "find", "rfind", "index", "count", "startswith", "endswith", "isdigit", "isdecimal",
     "isalpha", "isalnum", "isspace", "zfill", "ljust", "rjust", "encode",
     "partition", "rpartition", "removeprefix", "removesuffix", "center",
     "islower", "isupper", "swapcase" }),
@@ -1072,14 +1356,19 @@ M.METHOD_SETS = {
     "index", "count", "reverse", "sort", "copy" }),
   dict = set_of({ "get", "keys", "values", "items", "pop", "update",
     "setdefault", "clear", "copy" }),
-  set = set_of({ "add", "remove", "discard", "clear", "copy", "union",
-    "intersection", "difference", "symmetric_difference", "issubset",
+  set = set_of({ "add", "remove", "discard", "pop", "clear", "copy", "union",
+    "intersection", "difference", "difference_update", "symmetric_difference", "issubset",
     "issuperset", "isdisjoint" }),
   frozenset = set_of({ "copy", "union", "intersection", "difference",
     "symmetric_difference", "issubset", "issuperset", "isdisjoint" }),
   tuple = set_of({ "count", "index" }),
-  bytes = set_of({ "decode", "find", "split", "strip", "lstrip", "rstrip",
-    "replace", "startswith", "endswith", "upper", "lower" }),
+  bytes = set_of({ "hex", "decode", "find", "split", "rsplit", "strip", "lstrip", "rstrip",
+    "replace", "startswith", "endswith", "upper", "lower", "join", "maketrans", "translate",
+    "ljust", "rjust", "center", "zfill" }),
+  bytearray = set_of({ "hex", "decode", "find", "split", "rsplit", "strip", "lstrip", "rstrip",
+    "replace", "startswith", "endswith", "upper", "lower", "join", "maketrans", "translate",
+    "ljust", "rjust", "center", "zfill",
+    "append", "extend", "insert", "clear", "copy", "reverse", "pop", "remove" }),
 }
 
 return M

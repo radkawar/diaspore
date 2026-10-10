@@ -31,6 +31,10 @@ type runOpts struct {
 	Send           string `json:"send"`
 }
 
+type compileOpts struct {
+	SelfContained bool `json:"self_contained"`
+}
+
 func result(stdout, stderr string, code int, steps int64) map[string]any {
 	return map[string]any{
 		"stdout": stdout,
@@ -72,6 +76,7 @@ func diasporeRun(this js.Value, jsArgs []js.Value) (out any) {
 		interp.WithStderr(&stderr),
 		interp.WithMaxSteps(opts.MaxSteps),
 		interp.WithMaxDepth(opts.MaxDepth),
+		interp.WithSnippetCompiler(dspc.CompileSnippet),
 	}
 	if len(opts.Args) > 0 {
 		vmOpts = append(vmOpts, interp.WithArgs(opts.Args))
@@ -79,6 +84,7 @@ func diasporeRun(this js.Value, jsArgs []js.Value) (out any) {
 	if opts.Durable || opts.ResumeSnapshot != "" {
 		vmOpts = append(vmOpts, interp.WithDurable())
 		vm := interp.New(bundle, vmOpts...)
+		defer vm.Close()
 		var out *interp.FlowOutcome
 		if opts.ResumeSnapshot != "" {
 			var send interp.Value
@@ -97,6 +103,7 @@ func diasporeRun(this js.Value, jsArgs []js.Value) (out any) {
 		} else {
 			out = vm.RunDurable()
 		}
+		vm.Close()
 		res := result(stdout.String(), stderr.String(), out.Code, vm.Steps())
 		if out.Suspended {
 			res["code"] = 7
@@ -109,34 +116,17 @@ func diasporeRun(this js.Value, jsArgs []js.Value) (out any) {
 		return res
 	}
 	vm := interp.New(bundle, vmOpts...)
+	defer vm.Close()
 	code := vm.Run()
+	vm.Close()
 	return result(stdout.String(), stderr.String(), code, vm.Steps())
 }
 
 // compileSource grants the compiler access only to supplied in-memory sources.
 func compileSource(path, source string, files map[string]string) (dspc.Result, error) {
-	compiler, err := dspc.Bundle()
-	if err != nil {
-		return dspc.Result{}, err
-	}
-	overlay := make(map[string]string, len(files)+1)
-	for name, text := range files {
-		overlay[name] = text
-	}
-	overlay[path] = source
-	var stdout, stderr bytes.Buffer
-	vm := interp.New(compiler,
-		interp.WithArgs([]string{"dspc", "--path", "/site-packages", "--stdlib", "/stdlib", "--debug", path}),
-		interp.WithCaps("fs"),
-		interp.WithPolicy(map[string]map[string][]string{"fs": {"read": {"/src", "/site-packages", "/stdlib"}}}),
-		interp.WithFSOverlay(overlay),
-		interp.WithMaxSteps(compilerMaxSteps),
-		interp.WithMaxDepth(3000),
-		interp.WithStdout(&stdout),
-		interp.WithStderr(&stderr),
-	)
-	code := vm.Run()
-	return dspc.Result{Bundle: stdout.String(), Stderr: stderr.String(), Code: code}, nil
+	return dspc.CompileSource(path, source, dspc.CompileOptions{
+		Debug: true, SearchPaths: []string{"/site-packages"}, Sources: files,
+	}, interp.WithMaxSteps(compilerMaxSteps))
 }
 
 func sourceArgs(args []js.Value) (string, map[string]string, error) {
@@ -162,7 +152,16 @@ func diasporeCompile(this js.Value, args []js.Value) (out any) {
 	if err != nil {
 		return map[string]any{"bundle": "", "stderr": err.Error() + "\n", "code": 2}
 	}
-	r, err := compileSource("/src/main.py", source, files)
+	opts := compileOpts{}
+	if len(args) > 2 && args[2].Type() == js.TypeString && args[2].String() != "" {
+		if err := json.Unmarshal([]byte(args[2].String()), &opts); err != nil {
+			return map[string]any{"bundle": "", "stderr": "invalid compile options: " + err.Error() + "\n", "code": 2}
+		}
+	}
+	r, err := dspc.CompileSource("/src/main.py", source, dspc.CompileOptions{
+		Debug: true, SearchPaths: []string{"/site-packages"}, Sources: files,
+		SelfContained: opts.SelfContained,
+	}, interp.WithMaxSteps(compilerMaxSteps))
 	if err != nil {
 		return map[string]any{"bundle": "", "stderr": err.Error() + "\n", "code": 70}
 	}
@@ -221,8 +220,10 @@ func newSession() (*replSession, error) {
 	bundle["modules"].(map[string]any)[bundle["main"].(string)].(map[string]any)["file"] = "<console>"
 	s := &replSession{}
 	s.vm = interp.New(bundle, interp.WithStdout(&s.stdout), interp.WithStderr(&s.stderr),
-		interp.WithMaxSteps(defaultMaxSteps), interp.WithMaxDepth(1000))
+		interp.WithMaxSteps(defaultMaxSteps), interp.WithMaxDepth(1000),
+		interp.WithSnippetCompiler(dspc.CompileSnippet))
 	if code := s.vm.Run(); code != 0 {
+		s.vm.Close()
 		return nil, fmt.Errorf("%s", s.stderr.String())
 	}
 	return s, nil
@@ -309,6 +310,7 @@ func diasporeRepl(this js.Value, args []js.Value) (out any) {
 		code = s.vm.ReportError(err)
 		if raised, ok := err.(*interp.Raised); ok {
 			if exception, ok := raised.Exc.(*interp.Instance); ok && exception.Class.Name == "SystemExit" {
+				s.vm.Close()
 				session = nil
 				fmt.Fprintln(&s.stdout, "Session reset.")
 			}
@@ -318,8 +320,19 @@ func diasporeRepl(this js.Value, args []js.Value) (out any) {
 }
 
 func diasporeReplReset(this js.Value, args []js.Value) any {
+	if session != nil {
+		session.vm.Close()
+	}
 	session = nil
 	return result("", "", 0, 0)
+}
+
+func diasporeStdlibId(this js.Value, args []js.Value) any {
+	id, err := interp.StdlibID()
+	if err != nil {
+		return "diaspore: " + err.Error()
+	}
+	return id
 }
 
 func main() {
@@ -327,5 +340,6 @@ func main() {
 	js.Global().Set("diasporeCompile", js.FuncOf(diasporeCompile))
 	js.Global().Set("diasporeRepl", js.FuncOf(diasporeRepl))
 	js.Global().Set("diasporeReplReset", js.FuncOf(diasporeReplReset))
+	js.Global().Set("diasporeStdlibId", js.FuncOf(diasporeStdlibId))
 	select {}
 }

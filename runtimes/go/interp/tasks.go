@@ -1,6 +1,9 @@
 package interp
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // The tasks module (spec 11.9): concurrency with GIL semantics. One logical
 // interpreter lock (vm.gil) is held whenever diaspore code runs; it is released
@@ -9,9 +12,30 @@ import "sync"
 
 // blocking releases the interpreter lock around a host-blocking operation.
 func (vm *VM) blocking(f func()) {
+	taskID := vm.taskID
+	activeFrame := vm.metadata.active
+	vm.metadata.active = nil
 	vm.gil.Unlock()
 	f()
 	vm.gil.Lock()
+	vm.taskID = taskID
+	vm.metadata.active = activeFrame
+}
+
+func (vm *VM) clearTaskContext(taskID int64) error {
+	module, imported := vm.moduleDict.GetStr("_contextvars")
+	if !imported {
+		return nil
+	}
+	hook, err := vm.getAttr(module, "_clear_thread_context")
+	if err != nil {
+		if _, absent := raisedAs(err, "AttributeError"); absent {
+			return nil
+		}
+		return err
+	}
+	_, err = vm.call(hook, []Value{mkInt(taskID + 1)}, nil)
+	return err
 }
 
 type diasporeTask struct {
@@ -132,11 +156,22 @@ func (vm *VM) makeTasksModule() *NativeModule {
 		fn := args[0]
 		fnArgs := append([]Value{}, args[1:]...)
 		t := &diasporeTask{finished: make(chan struct{})}
+		vm.nextTaskID++
+		taskID := vm.nextTaskID
 		go func() {
 			vm.gil.Lock()
+			previous := vm.taskID
+			previousFrame := vm.metadata.active
+			vm.metadata.active = nil
+			vm.taskID = taskID
 			v, err := vm.call(fn, fnArgs, nil)
+			if cleanupErr := vm.clearTaskContext(taskID); err == nil {
+				err = cleanupErr
+			}
 			t.value, t.err = v, err
 			t.done = true
+			vm.taskID = previous
+			vm.metadata.active = previousFrame
 			vm.gil.Unlock()
 			close(t.finished)
 		}()
@@ -220,16 +255,84 @@ func (vm *VM) makeTasksModule() *NativeModule {
 	})
 
 	lock := bi("lock", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := vm.requireCap("spawn"); err != nil {
-			return nil, err
-		}
 		if err := noArgs("lock", args, kw); err != nil {
 			return nil, err
 		}
 		sem := make(chan struct{}, 1)
 		acquire := bi("acquire", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			vm.blocking(func() { sem <- struct{}{} })
-			return None, nil
+			if err := argCount("acquire", args, 0, 2); err != nil {
+				return nil, err
+			}
+			blocking, timeout := true, float64(-1)
+			for i, a := range args {
+				if i == 0 {
+					v, err := vm.truth(a)
+					if err != nil {
+						return nil, err
+					}
+					blocking = v
+				} else {
+					v, ok := asFloat(a)
+					if !ok {
+						return nil, newError("TypeError", "timeout must be a number")
+					}
+					timeout = v
+				}
+			}
+			for _, k := range kw {
+				switch k.Name {
+				case "blocking":
+					if len(args) > 0 {
+						return nil, newError("TypeError", "multiple values for blocking")
+					}
+					v, err := vm.truth(k.Val)
+					if err != nil {
+						return nil, err
+					}
+					blocking = v
+				case "timeout":
+					if len(args) > 1 {
+						return nil, newError("TypeError", "multiple values for timeout")
+					}
+					v, ok := asFloat(k.Val)
+					if !ok {
+						return nil, newError("TypeError", "timeout must be a number")
+					}
+					timeout = v
+				default:
+					return nil, newErrorf("TypeError", "invalid keyword argument '%s'", k.Name)
+				}
+			}
+			if timeout < 0 && timeout != -1 {
+				return nil, newError("ValueError", "timeout value must be positive")
+			}
+			if !blocking && timeout != -1 {
+				return nil, newError("ValueError", "can't specify a timeout for a non-blocking call")
+			}
+			select {
+			case sem <- struct{}{}:
+				return true, nil
+			default:
+			}
+			if !blocking {
+				return false, nil
+			}
+			acquired := false
+			vm.blocking(func() {
+				if timeout == -1 {
+					sem <- struct{}{}
+					acquired = true
+					return
+				}
+				timer := time.NewTimer(time.Duration(timeout * float64(time.Second)))
+				defer timer.Stop()
+				select {
+				case sem <- struct{}{}:
+					acquired = true
+				case <-timer.C:
+				}
+			})
+			return acquired, nil
 		})
 		release := func(name string, exitRet Value) *Builtin {
 			return bi(name, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -242,7 +345,13 @@ func (vm *VM) makeTasksModule() *NativeModule {
 			})
 		}
 		return &NativeObject{Kind: "tasks.Lock", methods: map[string]*Builtin{
-			"acquire":   acquire,
+			"acquire": acquire,
+			"locked": bi("locked", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+				if err := noArgs("locked", args, kw); err != nil {
+					return nil, err
+				}
+				return len(sem) != 0, nil
+			}),
 			"release":   release("release", None),
 			"__enter__": acquire,
 			"__exit__":  release("__exit__", false),
@@ -251,5 +360,17 @@ func (vm *VM) makeTasksModule() *NativeModule {
 
 	return &NativeModule{Name: "tasks", NS: map[string]Value{
 		"spawn": spawn, "channel": channel, "lock": lock,
+		"get_ident": bi("get_ident", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs("get_ident", args, kw); err != nil {
+				return nil, err
+			}
+			return vm.taskID + 1, nil
+		}),
+		"main_ident": bi("main_ident", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs("main_ident", args, kw); err != nil {
+				return nil, err
+			}
+			return int64(1), nil
+		}),
 	}}
 }

@@ -1,11 +1,10 @@
--- Native modules (spec section 11): time, math, json, random, sys, flow - plus the
--- diaspore-lua stubs for net/re/tasks - plus builtin open() and file methods.
+-- Native modules and capability-checked host I/O.
 
 local values = require("diaspore.values")
 local format = require("diaspore.format")
-local json = require("diaspore.json")
-local iter = require("diaspore.iter")
 local H = require("diaspore.helpers")
+local bigint = require("diaspore.bigint")
+local ops = require("diaspore.ops")
 
 local M = {}
 
@@ -18,6 +17,8 @@ local bi = values.builtin
 local arg_count = H.arg_count
 
 local function native_module(name, ns)
+  ns.__name__ = name
+  if ns.__doc__ == nil then ns.__doc__ = NONE end
   return { kind = "nativemodule", name = name, ns = ns }
 end
 
@@ -25,7 +26,7 @@ local function is_none(v)
   return type(v) == "table" and v.kind == "none"
 end
 
--- diaspore-lua: tasks, net, and re exist but every function raises RuntimeError.
+-- Pure Lua has no task or network provider.
 local function stub_module(name, fns)
   local ns = {}
   for _, f in ipairs(fns) do
@@ -104,6 +105,22 @@ local function math_fn(name, arity, f)
 end
 
 local function make_math_module()
+  local coefficients = { 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7 }
+  local function log_gamma(x)
+    if x ~= x then return x end
+    if math.abs(x) == math.huge then return math.huge end
+    if x <= 0 and x == math.floor(x) then domain_err() end
+    if x < 0.5 then return math.log(math.pi) - math.log(math.abs(math.sin(math.pi * x))) - log_gamma(1 - x) end
+    x = x - 1
+    local sum = 0.99999999999980993
+    for i, coefficient in ipairs(coefficients) do sum = sum + coefficient / (x + i) end
+    local t = x + 7.5
+    local result = 0.9189385332046727 + (x + 0.5) * math.log(t) - t + math.log(sum)
+    if result == math.huge then throw("OverflowError", "math range error") end
+    return result
+  end
   local function int_round(name, f)
     return bi(name, function(_I, args, kw)
       arg_count(name, args, 1, 1)
@@ -117,16 +134,20 @@ local function make_math_module()
       if x == math.huge or x == -math.huge then
         throw("OverflowError", "cannot convert float infinity to integer")
       end
-      local r = f(x)
-      local iv = math.tointeger(r)
-      if iv == nil then
-        throw("OverflowError", "diaspore-lua: integer overflow (int64 limit)")
-      end
-      return iv
+      return bigint.from_float(f(x))
     end)
   end
   return native_module("math", {
     pi = math.pi,
+    tau = 2 * math.pi,
+    acos = math_fn("acos", 1, function(xs)
+      if xs[1] < -1 or xs[1] > 1 then domain_err() end
+      return math.acos(xs[1])
+    end),
+    isfinite = math_fn("isfinite", 1, function(xs)
+      return xs[1] == xs[1] and math.abs(xs[1]) ~= math.huge
+    end),
+    lgamma = math_fn("lgamma", 1, function(xs) return log_gamma(xs[1]) end),
     e = math.exp(1.0),
     inf = math.huge,
     nan = 0 / 0,
@@ -137,6 +158,43 @@ local function make_math_module()
       return math.sqrt(xs[1])
     end),
     fabs = math_fn("fabs", 1, function(xs) return math.abs(xs[1]) end),
+    copysign = math_fn("copysign", 2, function(xs)
+      local negative = string.pack(">d", xs[2]):byte(1) >= 128
+      return negative and -math.abs(xs[1]) or math.abs(xs[1])
+    end),
+    frexp = math_fn("frexp", 1, function(xs)
+      local x = xs[1]
+      if x == 0 or x ~= x or math.abs(x) == math.huge then
+        return values.tuple({ x, 0 })
+      end
+      local bits = string.unpack(">I8", string.pack(">d", x))
+      local exponent = (bits >> 52) & 0x7ff
+      local shift = 0
+      if exponent == 0 then
+        x = x * 2.0 ^ 54
+        bits = string.unpack(">I8", string.pack(">d", x))
+        exponent = (bits >> 52) & 0x7ff
+        shift = 54
+      end
+      local fraction = string.unpack(">d", string.pack(">I8",
+        (bits & 0x800fffffffffffff) | (1022 << 52)))
+      return values.tuple({ fraction, exponent - 1022 - shift })
+    end),
+    ldexp = bi("ldexp", function(_I, args, kw)
+      arg_count("ldexp", args, 2, 2)
+      H.no_kw("ldexp", kw)
+      local x, exponent = as_float(args[1]), as_index(args[2])
+      if x == nil then throw("TypeError", "must be real number, not " .. type_name(args[1])) end
+      if exponent == nil then throw("TypeError", "Expected an int as second argument to ldexp.") end
+      if x == 0 or x ~= x or math.abs(x) == math.huge then return x end
+      if bigint.cmp(exponent, 2098) > 0 then throw("OverflowError", "math range error") end
+      if bigint.cmp(exponent, -2098) < 0 then return x * 0.0 end
+      while exponent > 1023 do x = x * 2.0 ^ 1023; exponent = exponent - 1023 end
+      while exponent < -1022 do x = x * 2.0 ^ -1022; exponent = exponent + 1022 end
+      local result = x * 2.0 ^ exponent
+      if math.abs(result) == math.huge then throw("OverflowError", "math range error") end
+      return result
+    end),
     pow = math_fn("pow", 2, function(xs)
       local x, y = xs[1], xs[2]
       if x == 0.0 and y < 0 then domain_err() end
@@ -145,9 +203,17 @@ local function make_math_module()
       end
       return x ^ y
     end),
-    log = math_fn("log", 1, function(xs)
-      if xs[1] <= 0 then domain_err() end
-      return math.log(xs[1])
+    log = bi("log", function(_I, args, kw)
+      arg_count("log", args, 1, 2); H.no_kw("log", kw)
+      local x = as_float(args[1])
+      if x == nil then throw("TypeError", "must be real number") end
+      if x <= 0 then domain_err() end
+      if #args == 1 then return math.log(x) end
+      local base = as_float(args[2])
+      if base == nil then throw("TypeError", "must be real number") end
+      if base <= 0 then domain_err() end
+      if base == 1 then throw("ZeroDivisionError", "float division by zero") end
+      return math.log(x) / math.log(base)
     end),
     log2 = math_fn("log2", 1, function(xs)
       if xs[1] <= 0 then domain_err() end
@@ -193,191 +259,6 @@ local function make_math_module()
 end
 
 -- ---------------------------------------------------------------------------
--- json
-
-local function make_json_module()
-  return native_module("json", {
-    dumps = bi("dumps", function(_I, args, kw)
-      arg_count("dumps", args, 1, 2)
-      local indent = NONE
-      if #args == 2 then indent = args[2] end
-      local kv = H.kw_get(kw, "indent")
-      if kv ~= nil then indent = kv end
-      return json.dumps(args[1], indent)
-    end),
-    loads = bi("loads", function(_I, args, kw)
-      arg_count("loads", args, 1, 1)
-      return json.to_diaspore(json.parse(H.want_str("loads arg", args[1])))
-    end),
-  })
-end
-
--- ---------------------------------------------------------------------------
--- random (algorithm is VM-specific; excluded from conformance)
-
-local function make_random_type(I)
-  local Random
-  Random = values.btype("Random", function(_I, args, kw)
-    arg_count("Random", args, 0, 1)
-    H.no_kw("Random", kw)
-    local state = {}
-    local rng = { kind = "nativeobject", nkind = "Random", pytype = Random, props = {} }
-    local function seed(value)
-      local n
-      if value == nil or is_none(value) then
-        n = I.deterministic and 0
-          or (os.time() ~ math.floor(os.clock() * 1000000) ~ values.obj_id(rng))
-      else
-        n = as_index(value)
-        if n == nil then
-          local t = type(value)
-          if t == "string" then value = values.bytes(value)
-          elseif t ~= "number" and not (t == "table" and value.kind == "bytes") then
-            throw("TypeError", "seed must be None, int, float, str, or bytes")
-          end
-          n = values.hash_value(value)
-        end
-      end
-      -- SplitMix64 initializes the four words of the independent xoshiro state.
-      for i = 1, 4 do
-        n = n + 0x9e3779b97f4a7c15
-        local z = (n ~ (n >> 30)) * 0xbf58476d1ce4e5b9
-        z = (z ~ (z >> 27)) * 0x94d049bb133111eb
-        state[i] = z ~ (z >> 31)
-      end
-    end
-    local function next_bits()
-      local x = state[2] * 5
-      local result = ((x << 7) | (x >> 57)) * 9
-      local t = state[2] << 17
-      state[3] = state[3] ~ state[1]
-      state[4] = state[4] ~ state[2]
-      state[2] = state[2] ~ state[3]
-      state[1] = state[1] ~ state[4]
-      state[3] = state[3] ~ t
-      state[4] = (state[4] << 45) | (state[4] >> 19)
-      return result
-    end
-    local function randint(a, b)
-      if b < a then throw("ValueError", "empty range for randint()") end
-      local size = b - a + 1
-      if size <= 0 then
-        while true do
-          I:fuel()
-          local n = next_bits()
-          if n >= a and n <= b then return n end
-        end
-      end
-      local mask = size - 1
-      mask = mask | (mask >> 1)
-      mask = mask | (mask >> 2)
-      mask = mask | (mask >> 4)
-      mask = mask | (mask >> 8)
-      mask = mask | (mask >> 16)
-      mask = mask | (mask >> 32)
-      while true do
-        I:fuel()
-        local n = next_bits() & mask
-        if n < size then return a + n end
-      end
-    end
-    rng.methods = {
-      seed = bi("seed", function(_I2, a, keywords)
-        arg_count("seed", a, 0, 1)
-        H.no_kw("seed", keywords)
-        seed(a[1])
-        return NONE
-      end),
-      random = bi("random", function(_I2, a, keywords)
-        arg_count("random", a, 0, 0)
-        H.no_kw("random", keywords)
-        return (next_bits() >> 11) * 0x1.0p-53
-      end),
-      randint = bi("randint", function(_I2, a, keywords)
-        arg_count("randint", a, 2, 2)
-        H.no_kw("randint", keywords)
-        local lower, upper = as_index(a[1]), as_index(a[2])
-        if lower == nil or upper == nil then throw("TypeError", "randint requires integers") end
-        return randint(lower, upper)
-      end),
-      choice = bi("choice", function(I2, a, keywords)
-        arg_count("choice", a, 1, 1)
-        H.no_kw("choice", keywords)
-        local items = iter.iter_to_array(I2, a[1])
-        if #items == 0 then throw("IndexError", "Cannot choose from an empty sequence") end
-        return items[randint(1, #items)]
-      end),
-      shuffle = bi("shuffle", function(_I2, a, keywords)
-        arg_count("shuffle", a, 1, 1)
-        H.no_kw("shuffle", keywords)
-        if type(a[1]) ~= "table" or a[1].kind ~= "list" then
-          throw("TypeError", "shuffle requires a list")
-        end
-        local items = a[1].items
-        for i = #items, 2, -1 do
-          local j = randint(1, i)
-          items[i], items[j] = items[j], items[i]
-        end
-        return NONE
-      end),
-    }
-    seed(args[1])
-    return rng
-  end)
-  return Random
-end
-
-local function make_random_module(I)
-  if I.deterministic then
-    math.randomseed(0)
-  else
-    math.randomseed(os.time())
-  end
-  return native_module("random", {
-    Random = make_random_type(I),
-    seed = bi("seed", function(_I, args, kw)
-      arg_count("seed", args, 1, 1)
-      local n = as_index(args[1])
-      if n == nil then throw("TypeError", "seed must be an integer in diaspore") end
-      math.randomseed(n)
-      return NONE
-    end),
-    random = bi("random", function()
-      return math.random()
-    end),
-    randint = bi("randint", function(_I, args, kw)
-      arg_count("randint", args, 2, 2)
-      local a = as_index(args[1])
-      local b = as_index(args[2])
-      if a == nil or b == nil then throw("TypeError", "randint requires integers") end
-      if b < a then throw("ValueError", "empty range for randint()") end
-      return math.random(a, b)
-    end),
-    choice = bi("choice", function(I2, args, kw)
-      arg_count("choice", args, 1, 1)
-      local items = iter.iter_to_array(I2, args[1])
-      if #items == 0 then
-        throw("IndexError", "Cannot choose from an empty sequence")
-      end
-      return items[math.random(1, #items)]
-    end),
-    shuffle = bi("shuffle", function(_I, args, kw)
-      arg_count("shuffle", args, 1, 1)
-      local l = args[1]
-      if type(l) ~= "table" or l.kind ~= "list" then
-        throw("TypeError", "shuffle requires a list")
-      end
-      local items = l.items
-      for i = #items, 2, -1 do
-        local j = math.random(1, i)
-        items[i], items[j] = items[j], items[i]
-      end
-      return NONE
-    end),
-  })
-end
-
--- ---------------------------------------------------------------------------
 -- sys
 
 local function sys_stream(I, name)
@@ -389,7 +270,7 @@ local function sys_stream(I, name)
       if #args == 0 or is_none(args[1]) then return -1 end
       local size = as_index(args[1])
       if size == nil then throw("TypeError", "argument should be integer or None") end
-      return size
+      return values.to_size(size)
     end
     methods.read = bi("read", function(_I, args, kw)
       local size = read_size("read", args, kw)
@@ -439,12 +320,147 @@ end
 local function make_sys_module(I)
   local argv = {}
   for i = 1, #I.argv do argv[i] = I.argv[i] end
+  local namespace = values.new_class("SimpleNamespace", {}, {})
+  namespace.interp = I
+  namespace.ns.__init__ = bi("__init__", function(_, args, kw)
+    arg_count("SimpleNamespace", args, 1, 1)
+    for _, entry in ipairs(kw) do args[1].d[entry.k] = entry.v end
+    return NONE
+  end)
+  local function record(fields)
+    local result = values.new_instance(namespace)
+    result.d = fields
+    return result
+  end
+  local version_type = values.new_class("version_info", { I.types.tuple }, {})
+  local version = values.new_instance(version_type)
+  version.prim = values.tuple({ 3, 12, 12, "final", 0 })
+  version.d = { major = 3, minor = 12, micro = 12, releaselevel = "final", serial = 0 }
+  local function numeric_info(name, names, items)
+    local cls = values.new_class(name, { I.types.tuple }, {
+      __module__ = "sys", __qualname__ = name, __slots__ = values.tuple({}),
+      n_fields = #names, n_sequence_fields = #names, n_unnamed_fields = 0,
+    })
+    cls.interp, cls.has_dict, cls.has_weakref = I, false, false
+    local indices = {}
+    local function readonly() throw("AttributeError", "readonly attribute") end
+    for index, field in ipairs(names) do
+      indices[field] = index
+      cls.ns[field] = values.property(bi(field, function(_, args)
+        return args[1].prim.items[index]
+      end), bi(field, readonly), bi(field, readonly))
+    end
+    local function set_attr(_, args)
+      local field = args[2]
+      if indices[field] then readonly() end
+      if values.class_lookup(cls, field) ~= nil then
+        throw("AttributeError", "'sys." .. name .. "' object attribute '" .. field .. "' is read-only")
+      end
+      throw("AttributeError", "'sys." .. name .. "' object has no attribute '" .. field .. "'")
+    end
+    cls.ns.__setattr__ = bi("__setattr__", set_attr)
+    cls.ns.__delattr__ = bi("__delattr__", set_attr)
+    cls.ns.__repr__ = bi("__repr__", function(vm, args)
+      local parts = {}
+      for index, field in ipairs(names) do
+        parts[index] = field .. "=" .. ops.repr(vm, args[1].prim.items[index])
+      end
+      return "sys." .. name .. "(" .. table.concat(parts, ", ") .. ")"
+    end)
+    local result = values.new_instance(cls)
+    result.prim = values.tuple(items)
+    return result
+  end
+  local float_info = numeric_info("float_info",
+    { "max", "max_exp", "max_10_exp", "min", "min_exp", "min_10_exp",
+      "dig", "mant_dig", "epsilon", "radix", "rounds" },
+    { 0x1.fffffffffffffp1023, 1024, 308, 0x1p-1022, -1021, -307, 15, 53, 0x1p-52, 2, 1 })
+  local int_info = numeric_info("int_info",
+    { "bits_per_digit", "sizeof_digit", "default_max_str_digits", "str_digits_check_threshold" },
+    { 24, string.packsize("j"), 0, 0 })
+  local hash_info = numeric_info("hash_info",
+    { "width", "modulus", "inf", "nan", "imag", "algorithm", "hash_bits", "seed_bits", "cutoff" },
+    { 64, 0x1fffffffffffffff, 314159, values.hash_value(0 / 0), 1000003, "fnv1a64", 64, 0, 0 })
+  local unraisable = bi("unraisablehook", function(_, args, kw)
+    arg_count("unraisablehook", args, 1, 1); H.no_kw("unraisablehook", kw)
+    local record = args[1]
+    local message = I:get_attr(record, "err_msg")
+    local exception = I:get_attr(record, "exc_value")
+    local cls = I:get_attr(record, "exc_type")
+    I:ewrite((message == NONE and "Exception ignored" or I:str(message)) .. ":\n")
+    if cls ~= NONE then I:ewrite(I:get_attr(cls, "__name__") .. ": " .. I:str(exception) .. "\n") end
+    return NONE
+  end)
+  local excepthook = require("diaspore.sys_exceptions").make_excepthook(I)
   return native_module("sys", {
+    excepthook = excepthook,
+    __excepthook__ = excepthook,
+    unraisablehook = unraisable,
+    __unraisablehook__ = unraisable,
     argv = values.list(argv),
+    warnoptions = values.list({}),
     platform = "diaspore-lua",
+    byteorder = string.pack("I2", 1):byte(1) == 1 and "little" or "big",
+    maxsize = math.maxinteger,
+    maxunicode = 0x10ffff,
+    version_info = version,
+    float_info = float_info,
+    int_info = int_info,
+    hash_info = hash_info,
+    version = "3.12.12 (Diaspore Lua)",
+    hexversion = 0x030c0cf0,
+    implementation = record({ name = "diaspore", cache_tag = NONE,
+      version = version, hexversion = 0x030c0cf0 }),
+    flags = record({ debug = 0, inspect = 0, interactive = 0, optimize = 0,
+      dont_write_bytecode = 1, no_user_site = 1, no_site = 1,
+      ignore_environment = 1, verbose = 0, bytes_warning = 0, quiet = 0,
+      hash_randomization = 0, isolated = 1, dev_mode = false, utf8_mode = 1,
+      warn_default_encoding = 0, safe_path = true, int_max_str_digits = 0 }),
+    modules = I.modules_dict,
+    builtin_module_names = values.tuple({ "builtins", "sys", "time", "math", "_os", "posix",
+      "_abc", "_json", "_operator", "_diaspore_stdlib", "net", "re", "flow" }),
+    getdefaultencoding = bi("getdefaultencoding", function(_I, args, kw)
+      arg_count("getdefaultencoding", args, 0, 0); H.no_kw("getdefaultencoding", kw)
+      return "utf-8"
+    end),
+    getfilesystemencoding = bi("getfilesystemencoding", function(_I, args, kw)
+      arg_count("getfilesystemencoding", args, 0, 0); H.no_kw("getfilesystemencoding", kw)
+      return "utf-8"
+    end),
+    getfilesystemencodeerrors = bi("getfilesystemencodeerrors", function(_I, args, kw)
+      arg_count("getfilesystemencodeerrors", args, 0, 0); H.no_kw("getfilesystemencodeerrors", kw)
+      return "surrogateescape"
+    end),
+    intern = bi("intern", function(_I, args, kw)
+      arg_count("intern", args, 1, 1); H.no_kw("intern", kw)
+      return H.want_str("intern() argument", args[1])
+    end),
+    exception = bi("exception", function(_I, args, kw)
+      arg_count("exception", args, 0, 0); H.no_kw("exception", kw)
+      return I.exc_stack[#I.exc_stack] or NONE
+    end),
+    exc_info = bi("exc_info", function(_I, args, kw)
+      arg_count("exc_info", args, 0, 0); H.no_kw("exc_info", kw)
+      local exc = I.exc_stack[#I.exc_stack]
+      if not exc then return values.tuple({ NONE, NONE, NONE }) end
+      return values.tuple({ exc.cls, exc, exc.d.__traceback__ or NONE })
+    end),
     stdin = sys_stream(I, "stdin"),
     stdout = sys_stream(I, "stdout"),
     stderr = sys_stream(I, "stderr"),
+    _getframe = bi("_getframe", function(_I, args, kw)
+      arg_count("_getframe", args, 0, 1); H.no_kw("_getframe", kw)
+      local depth = args[1] == nil and 0 or as_index(args[1])
+      if depth == nil then throw("TypeError", "an integer is required") end
+      if bigint.cmp(depth, -2147483648) < 0 or bigint.cmp(depth, 2147483647) > 0 then
+        throw("OverflowError", "Python int too large to convert to C int")
+      end
+      if depth < 0 then depth = 0 end
+      local entry = I.stack[#I.stack]
+      while depth > 0 and entry do entry, depth = entry.previous, depth - 1 end
+      if not entry then throw("ValueError", "call stack is not deep enough") end
+      return require("diaspore.metadata").frame(I, entry)
+    end),
     getrecursionlimit = bi("getrecursionlimit", function(_I, args, kw)
       arg_count("getrecursionlimit", args, 0, 0)
       H.no_kw("getrecursionlimit", kw)
@@ -455,6 +471,9 @@ local function make_sys_module(I)
       H.no_kw("setrecursionlimit", kw)
       local limit = as_index(args[1])
       if limit == nil then throw("TypeError", "an integer is required") end
+      if bigint.cmp(limit, -2147483648) < 0 or bigint.cmp(limit, 2147483647) > 0 then
+        throw("OverflowError", "Python int too large to convert to C int")
+      end
       if limit < 1 then throw("ValueError", "recursion limit must be greater or equal than 1") end
       limit = math.min(limit, I.max_depth)
       if limit <= I.depth then
@@ -466,7 +485,9 @@ local function make_sys_module(I)
     end),
     exit = bi("exit", function(_I, args, kw)
       arg_count("exit", args, 0, 1)
-      local code = #args == 1 and args[1] or 0
+      H.no_kw("sys.exit", kw)
+      local code = args[1]
+      if code == NONE then code = nil end
       values.throw_val(values.make_exc("SystemExit", code))
     end),
     stderr_write = bi("stderr_write", function(I2, args, kw)
@@ -501,8 +522,32 @@ local function os_path(I, name, args, kw)
   return I:require_fs("read", path)
 end
 
-local function make_os_module()
-  return native_module("_os", {
+local function metadata_unavailable()
+  local message = "diaspore-lua cannot read file metadata"
+  local exception = values.make_exc("OSError", 38, message)
+  exception.d.errno = 38
+  exception.d.strerror = message
+  values.throw_val(exception)
+end
+
+local function make_os_module(I)
+  local module = native_module("_os", {
+    urandom = bi("urandom", function(I, args, kw)
+      arg_count("urandom", args, 1, 1); H.no_kw("urandom", kw)
+      if I.deterministic then throw("PermissionError", "entropy is unavailable in deterministic mode") end
+      local length = as_index(args[1])
+      if length == nil then throw("TypeError", "an integer is required") end
+      length = values.to_size(length)
+      if length < 0 then throw("ValueError", "negative argument not allowed") end
+      I:fuel_n(length)
+      if length == 0 then return values.bytes("") end
+      local source = io.open("/dev/urandom", "rb")
+      if source == nil then throw("NotImplementedError", "OS entropy source is unavailable") end
+      local data = source:read(length)
+      source:close()
+      if data == nil or #data ~= length then throw("OSError", "OS entropy source returned insufficient data") end
+      return values.bytes(data)
+    end),
     getcwd = bi("getcwd", function(I, args, kw)
       arg_count("getcwd", args, 0, 0)
       H.no_kw("getcwd", kw)
@@ -529,14 +574,46 @@ local function make_os_module()
       end
       throw(errno == 13 and "PermissionError" or "OSError", tostring(message))
     end),
+    mkdir = bi("mkdir", function(I, args, kw)
+      arg_count("mkdir", args, 1, 2); H.no_kw("mkdir", kw)
+      local path = H.want_str("path", args[1])
+      if path:find("\0", 1, true) then throw("ValueError", "embedded null byte") end
+      I:require_fs("write", path)
+      local exception = values.make_exc("OSError", 38, "diaspore-lua cannot create directories")
+      exception.d.errno, exception.d.strerror = 38, "diaspore-lua cannot create directories"
+      values.throw_val(exception)
+    end),
     listdir = bi("listdir", function(I, args, kw)
       os_path(I, "listdir", args, kw)
       throw("NotImplementedError", "diaspore-lua cannot list directories")
+    end),
+    stat = bi("stat", function(I, args, kw)
+      os_path(I, "stat", args, kw)
+      metadata_unavailable()
+    end),
+    lstat = bi("lstat", function(I, args, kw)
+      os_path(I, "lstat", args, kw)
+      metadata_unavailable()
+    end),
+    readlink = bi("readlink", function(I, args, kw)
+      os_path(I, "readlink", args, kw)
+      metadata_unavailable()
     end),
     realpath = bi("realpath", function(I, args, kw)
       return os_path(I, "realpath", args, kw)
     end),
   })
+  for name, method in pairs(require("diaspore.fds").methods(I)) do module.ns[name] = method end
+  if I.fs_overlay ~= nil then
+    for name, method in pairs(module.ns) do
+      if name ~= "urandom" then
+        module.ns[name] = bi(name, function()
+          throw("NotImplementedError", "compiler filesystem exposes only read-only open()")
+        end)
+      end
+    end
+  end
+  return module
 end
 
 -- ---------------------------------------------------------------------------
@@ -566,6 +643,7 @@ function M.bi_open(I, args, kw)
       throw("NotImplementedError", "only UTF-8 text is supported")
     end
   end
+  if I.fs_overlay ~= nil then return require("diaspore.overlay").open(I, path, mode) end
   local kind = (mode == "r" or mode == "rb") and "read" or "write"
   local real = I:require_fs(kind, path)
   local lua_mode = mode
@@ -598,7 +676,7 @@ function M.file_method(I, fo, n)
           throw("TypeError", "argument should be integer or None, not '"
             .. type_name(args[1]) .. "'")
         end
-        count = v
+        count = values.to_size(v)
       end
       local data
       if count < 0 then
@@ -623,12 +701,9 @@ function M.file_method(I, fo, n)
       if fo.closed then throw("ValueError", "I/O operation on closed file.") end
       local v = args[1]
       if fo.binary then
-        if type(v) ~= "table" or v.kind ~= "bytes" then
-          throw("TypeError", "a bytes-like object is required, not '"
-            .. type_name(v) .. "'")
-        end
-        fo.f:write(v.b)
-        return #v.b
+        local data = require("diaspore.buffer").data(v)
+        fo.f:write(data)
+        return #data
       end
       if type(v) ~= "string" then
         throw("TypeError", "write() argument must be str, not " .. type_name(v))
@@ -649,18 +724,37 @@ end
 
 --- Build the native module namespaces for an interpreter.
 function M.make_native_modules(I)
-  return {
+  local modules = {
+    builtins = native_module("builtins", I.builtins),
     time = make_time_module(I),
     math = make_math_module(),
-    json = make_json_module(),
-    random = make_random_module(I),
     sys = make_sys_module(I),
-    _os = make_os_module(),
+    _os = make_os_module(I),
+    _json = require("diaspore.json_native").make_module(I),
+    _abc = require("diaspore.abc").make_module(I),
+    _diaspore_stdlib = require("diaspore.stdlib").make_module(I.stdlib or I.stdlib_override),
+    _operator = native_module("_operator", {
+      add = bi("add", function(I2, args, kw)
+        arg_count("add", args, 2, 2); H.no_kw("add", kw)
+        return ops.binop(I2, "add", args[1], args[2], false)
+      end),
+      index = bi("index", function(I2, args, kw)
+        arg_count("index", args, 1, 1); H.no_kw("index", kw)
+        return H.index_value(I2, args[1])
+      end),
+    }),
     net = stub_module("net", { "listen", "connect", "accept", "recv", "send", "close", "peer" }),
-    re = stub_module("re", { "search", "match", "fullmatch", "findall", "split", "sub", "escape" }),
-    tasks = stub_module("tasks", { "spawn", "channel", "lock" }),
+    re = require("diaspore.regex").make_module(I),
     flow = make_flow_module(),
   }
+  for name, module in pairs(modules) do
+    if module.ns.__name__ == nil then module.ns.__name__ = module.name or name end
+    if module.ns.__doc__ == nil then module.ns.__doc__ = NONE end
+    if module.ns.__package__ == nil then module.ns.__package__ = (module.name or name):match("^(.*)%.[^.]+$") or "" end
+    if module.ns.__loader__ == nil then module.ns.__loader__ = NONE end
+    if module.ns.__spec__ == nil then module.ns.__spec__ = NONE end
+  end
+  return modules
 end
 
 return M

@@ -43,8 +43,9 @@ def test_fuzz_python_vm(seed: int, tmp_path: Path) -> None:
     entry = _entry(tmp_path, seed)
     try:
         # Bound execution so a generated infinite loop cannot stall the suite.
-        assert_matches(run_diaspore_py(entry, max_steps=5_000_000),
-                       run_cpython(entry), "diaspore-py")
+        assert_matches(
+            run_diaspore_py(entry, max_steps=5_000_000), run_cpython(entry), "diaspore-py"
+        )
     except AssertionError as exc:
         _report(entry, seed, exc)
 
@@ -72,7 +73,9 @@ def test_fuzz_lua_vm(seed: int, lua_vm: list[str], tmp_path: Path) -> None:
     entry = _entry(tmp_path, seed)
     try:
         assert_matches(
-            run_diaspore_lua(entry, lua_vm, tmp_path), run_cpython(entry), "diaspore-lua",
+            run_diaspore_lua(entry, lua_vm, tmp_path),
+            run_cpython(entry),
+            "diaspore-lua",
         )
     except AssertionError as exc:
         _report(entry, seed, exc)

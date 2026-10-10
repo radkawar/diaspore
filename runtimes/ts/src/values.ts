@@ -2,12 +2,146 @@
  *
  * Diaspore values map to these concrete JS types:
  *   int      -> bigint        float -> number      bool -> boolean
- *   str      -> string (code-point semantics)      bytes -> Uint8Array
+ *   str      -> string | PyStr (code-point semantics) bytes -> Uint8Array
  *   NoneType -> NONE (PyNoneT singleton)           ...   -> ELLIPSIS
  *   list/tuple/dict/set/range/slice and the callable kinds -> classes below.
  */
 
 import type { Interp, Frame } from "./interp.ts";
+import { selectOSErrorClass, initializeOSError } from "./os-error-values.ts";
+
+/** Python text whose explicit surrogate boundaries cannot fit in a JS string. */
+export class PyStr {
+  readonly points: readonly string[];
+
+  constructor(points: Iterable<string>) {
+    this.points = Object.freeze(Array.from(points));
+  }
+
+  *[Symbol.iterator](): IterableIterator<string> {
+    yield* this.points;
+  }
+}
+
+/** Ordinary strings stay unboxed; PyStr preserves ambiguous UTF-16 boundaries. */
+export type PyString = string | PyStr;
+
+/** Test whether a value is Python text. */
+export function isPyString(value: unknown): value is PyString {
+  return typeof value === "string" || value instanceof PyStr;
+}
+
+/** Convert Python text to host UTF-16, losing explicit surrogate boundaries. */
+export function strText(value: PyString): string {
+  return typeof value === "string" ? value : value.points.join("");
+}
+
+/** Encode Python text as a reversible host-map key without surrogate collisions. */
+export function strKey(value: PyString): string {
+  if (typeof value === "string") return value.startsWith("\0") ? "\0" + value : value;
+  return "\0p" + value.points.map(point => point.codePointAt(0)!.toString(16)).join(",");
+}
+
+/** Recover a Python name from a key produced by strKey. */
+export function strFromKey(key: string): PyString {
+  if (key.startsWith("\0\0")) return key.slice(1);
+  if (!key.startsWith("\0p")) return key;
+  return strFromChars(key.slice(2).split(",").map(point => String.fromCodePoint(parseInt(point, 16))));
+}
+
+/** Construct text from individual Python code points without merging surrogates. */
+export function strFromChars(points: Iterable<string>): PyString {
+  const items = Array.isArray(points) ? points : Array.from(points);
+  let previousHigh = false;
+  for (const point of items) {
+    const code = point.charCodeAt(0);
+    if (previousHigh && point.length === 1 && code >= 0xdc00 && code <= 0xdfff) {
+      return new PyStr(items);
+    }
+    previousHigh = point.length === 1 && code >= 0xd800 && code <= 0xdbff;
+  }
+  return items.join("");
+}
+
+/** Concatenate Python strings without fusing adjacent surrogate code points. */
+export function strConcat(...parts: PyString[]): PyString {
+  return strJoin(parts);
+}
+
+/** Join Python text while preserving each input's code-point boundaries. */
+export function strJoin(parts: Iterable<PyString>, separator: PyString = ""): PyString {
+  let result = "";
+  let points: string[] | null = null;
+  let first = true;
+  const append = (part: PyString): void => {
+    if (points !== null) {
+      for (const point of part) points.push(point);
+    } else if (part instanceof PyStr) {
+      points = Array.from(result);
+      for (const point of part) points.push(point);
+    } else {
+      const last = result.charCodeAt(result.length - 1);
+      const next = part.charCodeAt(0);
+      if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+        points = Array.from(result);
+        for (const point of part) points.push(point);
+      } else {
+        result += part;
+      }
+    }
+  };
+  for (const part of parts) {
+    if (!first) append(separator);
+    append(part);
+    first = false;
+  }
+  return points === null ? result : strFromChars(points);
+}
+
+/** Slice Python text using code-point offsets. */
+export function strSlice(value: PyString, start?: number, end?: number): PyString {
+  if (!hasAstral(value)) return (value as string).slice(start, end);
+  return strFromChars(chars(value).slice(start, end));
+}
+
+/** Repeat Python text without fusing adjacent surrogate code points. */
+export function strRepeat(value: PyString, count: number): PyString {
+  if (count <= 0) return "";
+  if (count === 1) return value;
+  if (typeof value === "string") {
+    const first = value.charCodeAt(0), last = value.charCodeAt(value.length - 1);
+    if (!(last >= 0xd800 && last <= 0xdbff && first >= 0xdc00 && first <= 0xdfff)) return value.repeat(count);
+  }
+  return strJoin((function* () {
+    for (let index = 0; index < count; index++) yield value;
+  })());
+}
+
+/** Compare Python strings without equating a scalar and an explicit surrogate pair. */
+export function strEq(left: PyString, right: PyString): boolean {
+  if (left === right) return true;
+  if (typeof left === "string" && typeof right === "string") return false;
+  return strCmp(left, right) === 0;
+}
+
+/** Normalize scalar runs without joining explicit surrogate code points. */
+export function strNormalize(value: PyString, form: string): PyString {
+  if (typeof value === "string") return value.normalize(form);
+  const parts: PyString[] = [];
+  let run = "";
+  for (const point of value) {
+    const code = point.codePointAt(0)!;
+    if (code >= 0xd800 && code <= 0xdfff) {
+      if (run !== "") parts.push(run.normalize(form));
+      parts.push(point);
+      run = "";
+    } else {
+      run += point;
+    }
+  }
+  if (run !== "") parts.push(run.normalize(form));
+  return strJoin(parts);
+}
 
 /** A yielded sandbox value carried through the interpreter's generator chain. */
 export interface YieldMsg {
@@ -100,6 +234,7 @@ let collisionKey = 0;
 
 function keyRuntime(v: Value): Interp | null {
   if (v instanceof DiasporeInstance) return v.cls.runtime;
+  if (v instanceof NativeObject) return v.runtime;
   if (v instanceof DiasporeTuple || v instanceof DiasporeFrozenSet) {
     const items = v instanceof DiasporeTuple ? v.items : v.map.values();
     for (const item of items) {
@@ -115,6 +250,7 @@ function keyRuntime(v: Value): Interp | null {
 
 function needsKeyEquality(v: Value): boolean {
   if (v instanceof DiasporeInstance || v instanceof DiasporeFrozenSet) return true;
+  if (v instanceof NativeObject) return v.runtime !== null;
   if (v instanceof DiasporeTuple) return v.items.some(needsKeyEquality);
   if (v instanceof DiasporeSlice) {
     return needsKeyEquality(v.lower) || needsKeyEquality(v.upper) || needsKeyEquality(v.step);
@@ -265,6 +401,30 @@ export class DiasporeDict {
   }
 }
 
+/** A live string-keyed namespace backed by a Python dictionary. */
+export class DictionaryMap extends Map<string, Value> {
+  readonly dictionary: DiasporeDict;
+  constructor(dictionary: DiasporeDict) {
+    super();
+    this.dictionary = dictionary;
+  }
+  override get(key: string): Value | undefined { return this.dictionary.get(strFromKey(key)); }
+  override has(key: string): boolean { return this.dictionary.has(strFromKey(key)); }
+  override set(key: string, value: Value): this {
+    this.dictionary.set(strFromKey(key), value);
+    return this;
+  }
+  override delete(key: string): boolean { return this.dictionary.delete(strFromKey(key)) !== undefined; }
+  override clear(): void { this.dictionary.clear(); }
+  override get size(): number { return this.dictionary.size; }
+  override *entries(): MapIterator<[string, Value]> {
+    for (const { key, val } of this.dictionary.map.values()) if (isPyString(key)) yield [strKey(key), val];
+  }
+  override *keys(): MapIterator<string> { for (const [key] of this.entries()) yield key; }
+  override *values(): MapIterator<Value> { for (const [, value] of this.entries()) yield value; }
+  override [Symbol.iterator](): MapIterator<[string, Value]> { return this.entries(); }
+}
+
 /** A live projection of a dictionary's keys, values, or items. */
 export class DiasporeDictView {
   dict: DiasporeDict;
@@ -290,28 +450,64 @@ class NamespaceMap extends Map<string, DictEntry> {
     this.ns = ns;
   }
   override get size(): number {
-    return this.ns.size;
+    let count = 0;
+    for (const key of this.ns.keys()) if (!key.startsWith(".")) count++;
+    return count;
+  }
+  private name(hk: string): string | undefined {
+    if (hk.startsWith("S")) return "\0p" + hk.slice(1);
+    if (!hk.startsWith("s") || hk.startsWith("s.")) return undefined;
+    return strKey(hk.slice(1));
   }
   override get(hk: string): DictEntry | undefined {
-    if (!hk.startsWith("s")) return undefined;
-    const key = hk.slice(1);
-    const val = this.ns.get(key);
-    return val === undefined ? undefined : { key, val };
+    const name = this.name(hk);
+    if (name === undefined) return undefined;
+    const val = this.ns.get(name);
+    return val === undefined ? undefined : { key: strFromKey(name), val };
   }
   override has(hk: string): boolean {
-    return hk.startsWith("s") && this.ns.has(hk.slice(1));
+    const name = this.name(hk);
+    return name !== undefined && this.ns.has(name);
+  }
+  override set(_hk: string, entry: DictEntry): this {
+    if (!isPyString(entry.key)) throw diasporeErr("TypeError", "namespace keys must be strings");
+    this.ns.set(strKey(entry.key), entry.val);
+    return this;
+  }
+  override delete(hk: string): boolean {
+    const name = this.name(hk);
+    return name !== undefined && this.ns.delete(name);
+  }
+  override clear(): void {
+    this.ns.clear();
   }
   override *entries(): MapIterator<[string, DictEntry]> {
-    for (const [key, val] of this.ns) yield ["s" + key, { key, val }];
+    for (const [name, val] of this.ns) {
+      if (name.startsWith(".")) continue;
+      const key = strFromKey(name);
+      yield [hashKey(key), { key, val }];
+    }
   }
   override *keys(): MapIterator<string> {
-    for (const key of this.ns.keys()) yield "s" + key;
+    for (const name of this.ns.keys()) if (!name.startsWith(".")) yield hashKey(strFromKey(name));
   }
   override *values(): MapIterator<DictEntry> {
-    for (const [key, val] of this.ns) yield { key, val };
+    for (const [name, val] of this.ns) if (!name.startsWith(".")) yield { key: strFromKey(name), val };
   }
   override [Symbol.iterator](): MapIterator<[string, DictEntry]> {
     return this.entries();
+  }
+}
+
+/** A mutable dictionary backed by a live interpreter namespace. */
+export class DiasporeNamespace extends DiasporeDict {
+  constructor(ns: Map<string, Value>) {
+    super();
+    this.map = new NamespaceMap(ns);
+  }
+  override setHK(hk: string, key: Value, val: Value): void {
+    if (!isPyString(key)) throw diasporeErr("TypeError", "namespace keys must be strings");
+    this.map.set(hk, { key, val });
   }
 }
 
@@ -357,11 +553,24 @@ export class DiasporeSet {
   }
   discard(v: Value): boolean {
     if (v instanceof DiasporeSet && !(v instanceof DiasporeFrozenSet)) v = new DiasporeFrozenSet(v.copy().map);
-    const slot = resolveHashKey(this.map, hashKey(v), v, false);
+    return this.discardHK(hashKey(v), v);
+  }
+  /** Discard a key using its stored hash, retaining collision bookkeeping. */
+  discardHK(hk: string, v: Value): boolean {
+    const slot = resolveHashKey(this.map, hk, v, false);
     if (slot === undefined) return false;
     this.map.delete(slot);
     removeHashSlot(this.map, slot);
     return true;
+  }
+  /** Remove a stored entry without invoking its hash or equality methods again. */
+  pop(): Value {
+    const entry = this.map.entries().next();
+    if (entry.done) throw diasporeErr("KeyError", "pop from an empty set");
+    const [slot, value] = entry.value;
+    this.map.delete(slot);
+    removeHashSlot(this.map, slot);
+    return value;
   }
   elems(): Value[] {
     return [...this.map.values()];
@@ -393,6 +602,9 @@ export class DiasporeFrozenSet extends DiasporeSet {
   override discard(_v: Value): boolean {
     throw diasporeErr("AttributeError", "'frozenset' object has no attribute 'discard'");
   }
+  override pop(): Value {
+    throw diasporeErr("AttributeError", "'frozenset' object has no attribute 'pop'");
+  }
   override clear(): void {
     throw diasporeErr("AttributeError", "'frozenset' object has no attribute 'clear'");
   }
@@ -408,6 +620,7 @@ export class DiasporeClass {
   ns: Map<string, Value>;
   mro: DiasporeClass[];
   runtime: Interp | null = null;
+  metaclass: DiasporeClass | BuiltinType | null = null;
   /** The BuiltinType this class (transitively) subclasses, else null.
    * A builtin base (dict/list/...) is recorded here and dropped from `bases`;
    * instances carry an underlying primitive that unoverridden ops act on. */
@@ -480,17 +693,61 @@ function c3mro(cls: DiasporeClass): DiasporeClass[] {
 /** Sandbox instance with attributes and an optional primitive payload. */
 export class DiasporeInstance {
   cls: DiasporeClass;
-  d: Map<string, Value> = new Map();
+  private dictionary: Map<string, Value> | undefined;
+  private dictionaryView: Value | undefined;
+  private exceptionSlots: Map<string, Value> | undefined;
   /** Underlying primitive for a builtin-type subclass instance (else null). */
   prim: Value | null = null;
   constructor(cls: DiasporeClass) {
     this.cls = cls;
+  }
+  /** Builtin exception fields, separate from the Python instance dictionary. */
+  get exc(): Map<string, Value> {
+    return this.exceptionSlots ??= new Map();
+  }
+  get d(): Map<string, Value> {
+    return this.dictionary ??= new Map();
+  }
+  set d(value: Map<string, Value>) {
+    this.dictionary = value;
+    this.dictionaryView = value instanceof DictionaryMap ? value.dictionary : undefined;
+  }
+  /** Inspect existing attributes without allocating a dictionary for slotted instances. */
+  peekDict(): Map<string, Value> | undefined {
+    return this.dictionary;
+  }
+  /** Return the actual Python instance dictionary, allocating it only on demand. */
+  getDict(): Value {
+    if (this.dictionaryView !== undefined) return this.dictionaryView;
+    const dictionary = new DiasporeDict();
+    if (this.dictionary !== undefined) {
+      for (const [name, value] of this.dictionary) dictionary.set(strFromKey(name), value);
+    }
+    this.dictionary = new DictionaryMap(dictionary);
+    this.dictionaryView = dictionary;
+    return dictionary;
+  }
+  /** Replace the dictionary while preserving its identity and live attribute access. */
+  setDict(value: Value): void {
+    const dictionary = value instanceof DiasporeInstance ? value.prim : value;
+    if (!(dictionary instanceof DiasporeDict)) {
+      throw diasporeErr("TypeError", `__dict__ must be set to a dictionary, not a '${typeName(value)}'`);
+    }
+    if (this.dictionaryView === value) return;
+    this.dictionary = new DictionaryMap(dictionary);
+    this.dictionaryView = value;
+  }
+  /** Detach the instance dictionary without mutating references to its old contents. */
+  deleteDict(): void {
+    this.dictionary = undefined;
+    this.dictionaryView = undefined;
   }
 }
 
 /** Normalized positional and keyword parameter declarations. */
 export interface FuncParams {
   args: string[];
+  posonly: number;
   defaults: unknown[];
   vararg: string | null;
   kwonly: string[];
@@ -507,6 +764,8 @@ export class DiasporeFunction {
   gdecl: Set<string>;
   ndecl: Set<string>;
   gen: boolean;
+  coro: boolean;
+  asyncgen: boolean;
   closure: Frame | null;
   moduleName: string;
   defclass: DiasporeClass | null = null;
@@ -514,6 +773,7 @@ export class DiasporeFunction {
   kwdefaults: Map<string, Value> = new Map();
   /** User-assigned function attributes (f.x = ...). */
   attrs: Map<string, Value> = new Map();
+  metadata: Map<string, Value> = new Map();
   constructor(node: Record<string, unknown>, closure: Frame | null, moduleName: string) {
     this.node = node;
     this.name = node.name as string;
@@ -521,6 +781,7 @@ export class DiasporeFunction {
     const p = (node.params ?? {}) as Record<string, unknown>;
     this.params = {
       args: (p.args as string[]) ?? [],
+      posonly: (p.posonly as number) ?? 0,
       defaults: (p.defaults as unknown[]) ?? [],
       vararg: (p.vararg as string | null) ?? null,
       kwonly: (p.kwonly as string[]) ?? [],
@@ -531,6 +792,8 @@ export class DiasporeFunction {
     this.gdecl = new Set((node.gdecl as string[]) ?? []);
     this.ndecl = new Set((node.ndecl as string[]) ?? []);
     this.gen = (node.gen as boolean) ?? false;
+    this.coro = node.coro === true;
+    this.asyncgen = node.asyncgen === true;
     this.closure = closure;
     this.moduleName = moduleName;
   }
@@ -596,6 +859,9 @@ export class NativeModule {
 export class Builtin {
   name: string;
   fn: BuiltinFn;
+  kind = "builtin_function_or_method";
+  self?: Value;
+  objclass?: Value;
   constructor(name: string, fn: BuiltinFn) {
     this.name = name;
     this.fn = fn;
@@ -606,6 +872,7 @@ export class Builtin {
 export class BuiltinType {
   name: string;
   ctor: BuiltinFn;
+  namespace: Map<string, Value> | null = null;
   constructor(name: string, ctor: BuiltinFn) {
     this.name = name;
     this.ctor = ctor;
@@ -617,6 +884,8 @@ export class NativeObject {
   kind: string;
   methods: Map<string, Builtin>;
   props: Map<string, Value>;
+  /** Interpreter for opt-in native equality and hashing protocols. */
+  runtime: Interp | null = null;
   constructor(kind: string, methods: Map<string, Builtin>, props?: Map<string, Value>) {
     this.kind = kind;
     this.methods = methods;
@@ -635,16 +904,19 @@ export class Property {
   fset: Value | null;
   fdel: Value | null;
   doc: Value | null;
+  docFromGetter: boolean;
   constructor(
     fget: Value | null = null,
     fset: Value | null = null,
     fdel: Value | null = null,
     doc: Value | null = null,
+    docFromGetter = false,
   ) {
     this.fget = fget;
     this.fset = fset;
     this.fdel = fdel;
     this.doc = doc;
+    this.docFromGetter = docFromGetter;
   }
 }
 
@@ -653,6 +925,7 @@ export class CodeObject {
   nodes: unknown[];
   mode: string;
   filename: string;
+  attrs: Map<string, Value> = new Map();
   constructor(nodes: unknown[], mode: string, filename: string) {
     this.nodes = nodes;
     this.mode = mode;
@@ -705,6 +978,7 @@ export type Value =
   | number
   | boolean
   | string
+  | PyStr
   | Uint8Array
   | PyNoneT
   | PyEllipsisT
@@ -834,6 +1108,7 @@ const EXC_TREE: [string, string | null][] = [
   ["UnicodeError", "ValueError"],
   ["UnicodeDecodeError", "UnicodeError"],
   ["UnicodeEncodeError", "UnicodeError"],
+  ["UnicodeTranslateError", "UnicodeError"],
   ["BlockingIOError", "OSError"],
   ["ChildProcessError", "OSError"],
   ["ConnectionError", "OSError"],
@@ -848,10 +1123,25 @@ const EXC_TREE: [string, string | null][] = [
   ["NotADirectoryError", "OSError"],
   ["ProcessLookupError", "OSError"],
   ["TimeoutError", "OSError"],
+  ["Warning", "Exception"],
+  ["UserWarning", "Warning"],
+  ["DeprecationWarning", "Warning"],
+  ["PendingDeprecationWarning", "Warning"],
+  ["SyntaxWarning", "Warning"],
+  ["RuntimeWarning", "Warning"],
+  ["FutureWarning", "Warning"],
+  ["ImportWarning", "Warning"],
+  ["UnicodeWarning", "Warning"],
+  ["BytesWarning", "Warning"],
+  ["ResourceWarning", "Warning"],
+  ["EncodingWarning", "Warning"],
 ];
 
 /** The universal base class: every class's MRO ends with it. */
-export const OBJECT: DiasporeClass = new DiasporeClass("object", [], new Map());
+export const OBJECT: DiasporeClass = new DiasporeClass("object", [], new Map<string, Value>([
+  ["__module__", "builtins"],
+  ["__doc__", "The base class of the class hierarchy.\n\nWhen called, it accepts no arguments and returns a new featureless\ninstance that has no instance attributes and cannot be given any.\n"],
+]));
 objectBase = OBJECT;
 
 OBJECT.ns.set("__setattr__", new Builtin("__setattr__", function* (I, args): G<Value> {
@@ -859,8 +1149,8 @@ OBJECT.ns.set("__setattr__", new Builtin("__setattr__", function* (I, args): G<V
   if (!(args[0] instanceof DiasporeInstance)) {
     throw diasporeErr("TypeError", "object.__setattr__() requires an instance");
   }
-  if (typeof args[1] !== "string") throw diasporeErr("TypeError", "attribute name must be string");
-  yield* I.setAttrBase(args[0], args[1], args[2]);
+  if (!isPyString(args[1])) throw diasporeErr("TypeError", "attribute name must be string");
+  yield* I.setAttrBase(args[0], strKey(args[1]), args[2]);
   return NONE;
 }));
 OBJECT.ns.set("__delattr__", new Builtin("__delattr__", function* (I, args): G<Value> {
@@ -868,8 +1158,8 @@ OBJECT.ns.set("__delattr__", new Builtin("__delattr__", function* (I, args): G<V
   if (!(args[0] instanceof DiasporeInstance)) {
     throw diasporeErr("TypeError", "object.__delattr__() requires an instance");
   }
-  if (typeof args[1] !== "string") throw diasporeErr("TypeError", "attribute name must be string");
-  yield* I.delAttrBase(args[0], args[1]);
+  if (!isPyString(args[1])) throw diasporeErr("TypeError", "attribute name must be string");
+  yield* I.delAttrBase(args[0], strKey(args[1]));
   return NONE;
 }));
 OBJECT.ns.set("__hash__", new Builtin("__hash__", function* (_I, args): G<Value> {
@@ -878,13 +1168,27 @@ OBJECT.ns.set("__hash__", new Builtin("__hash__", function* (_I, args): G<Value>
   }
   return BigInt(objId(args[0]));
 }));
+for (const name of ["__eq__", "__ne__"]) {
+  const descriptor = new Builtin(name, function* (I, args, kw): G<Value> {
+    if (kw.size !== 0) throw diasporeErr("TypeError", `object.${name}() takes no keyword arguments`);
+    if (args.length !== 2) throw diasporeErr("TypeError", `object.${name}() takes exactly 2 arguments (${args.length} given)`);
+    const [self, other] = args;
+    if (name === "__eq__") return self === other ? true : NOT_IMPLEMENTED;
+    const equal = self instanceof DiasporeInstance
+      ? yield* I.callDunder(self, "__eq__", [other])
+      : yield* I.invoke(yield* I.getAttr(self, "__eq__"), [other], new Map());
+    return equal === NOT_IMPLEMENTED ? NOT_IMPLEMENTED : !(yield* I.truth(equal));
+  });
+  descriptor.kind = "wrapper_descriptor";
+  OBJECT.ns.set(name, descriptor);
+}
 
 /** Builtin exception classes indexed by Python name. */
 export const EXC_CLASSES: Map<string, DiasporeClass> = (() => {
   const m = new Map<string, DiasporeClass>();
   for (const [name, parent] of EXC_TREE) {
     const bases = parent !== null ? [m.get(parent) as DiasporeClass] : [];
-    m.set(name, new DiasporeClass(name, bases, new Map()));
+    m.set(name, new DiasporeClass(name, bases, new Map([["__module__", "builtins"]])));
   }
   // ExceptionGroup inherits from both BaseExceptionGroup and Exception (C3)
   m.set(
@@ -892,65 +1196,146 @@ export const EXC_CLASSES: Map<string, DiasporeClass> = (() => {
     new DiasporeClass(
       "ExceptionGroup",
       [m.get("BaseExceptionGroup") as DiasporeClass, m.get("Exception") as DiasporeClass],
-      new Map(),
+      new Map([["__module__", "builtins"]]),
     ),
   );
   (m.get("BaseException") as DiasporeClass).ns.set(
     "__init__",
     new Builtin("__init__", function* (_I, args): G<Value> {
       const self = args[0] as DiasporeInstance;
-      self.d.set("args", new DiasporeTuple(args.slice(1)));
+      self.exc.set("args", new DiasporeTuple(args.slice(1)));
       return NONE;
     }),
   );
-  (m.get("BaseExceptionGroup") as DiasporeClass).ns.set("__init__", new Builtin("__init__", groupInit));
+  (m.get("BaseException") as DiasporeClass).ns.set("__reduce__", new Builtin("__reduce__", function* (_I, args, kw): G<Value> {
+    if (kw.size !== 0) throw diasporeErr("TypeError", "__reduce__() takes no keyword arguments");
+    if (args.length !== 1) throw diasporeErr("TypeError", `expected 0 arguments, got ${args.length - 1}`);
+    const self = args[0];
+    if (!(self instanceof DiasporeInstance && self.cls.issub(m.get("BaseException")!))) {
+      throw diasporeErr("TypeError", "descriptor '__reduce__' requires a 'BaseException' object");
+    }
+    const result: Value[] = [self.cls, self.exc.get("args") ?? new DiasporeTuple([])];
+    if (self.peekDict() !== undefined) result.push(self.getDict());
+    return new DiasporeTuple(result);
+  }));
+  (m.get("BaseException") as DiasporeClass).ns.set("__setstate__", new Builtin("__setstate__", function* (I, args, kw): G<Value> {
+    if (kw.size !== 0) throw diasporeErr("TypeError", "__setstate__() takes no keyword arguments");
+    if (args.length !== 2) throw diasporeErr("TypeError", `__setstate__() takes exactly one argument (${args.length - 1} given)`);
+    const self = args[0];
+    if (!(self instanceof DiasporeInstance && self.cls.issub(m.get("BaseException")!))) {
+      throw diasporeErr("TypeError", "descriptor '__setstate__' requires a 'BaseException' object");
+    }
+    const state = args[1] instanceof DiasporeInstance ? args[1].prim : args[1];
+    if (state instanceof PyNoneT) return NONE;
+    if (!(state instanceof DiasporeDict)) throw diasporeErr("TypeError", "state is not a dictionary");
+    for (const [key, value] of state.entries()) {
+      const name = key instanceof DiasporeInstance ? key.prim : key;
+      if (!isPyString(name)) throw diasporeErr("TypeError", `attribute name must be string, not '${typeName(key)}'`);
+      yield* I.setAttr(self, strKey(name), value);
+    }
+    return NONE;
+  }));
+  (m.get("BaseExceptionGroup") as DiasporeClass).ns.set("__new__", new StaticMethodV(new Builtin("__new__", groupNew)));
+  (m.get("BaseExceptionGroup") as DiasporeClass).ns.set("__str__", new Builtin("__str__", function* (I, args, kw): G<Value> {
+    if (kw.size !== 0) throw diasporeErr("TypeError", "__str__() takes no keyword arguments");
+    if (args.length !== 1) throw diasporeErr("TypeError", `expected 0 arguments, got ${args.length - 1}`);
+    const self = args[0];
+    if (!(self instanceof DiasporeInstance && self.cls.issub(m.get("BaseExceptionGroup")!))) {
+      throw diasporeErr("TypeError", "descriptor '__str__' requires a 'BaseExceptionGroup' object");
+    }
+    const message = yield* I.str(self.exc.get("message")!);
+    const exceptions = self.exc.get("exceptions") as DiasporeTuple;
+    const count = exceptions.items.length;
+    return strConcat(message, ` (${count} sub-exception${count === 1 ? "" : "s"})`);
+  }));
+  (m.get("SyntaxError") as DiasporeClass).ns.set("__init__", new Builtin("__init__", function* (I, args, kw): G<Value> {
+    const self = args[0] as DiasporeInstance;
+    if (kw.size !== 0) throw diasporeErr("TypeError", `${self.cls.name}() takes no keyword arguments`);
+    const positional = args.slice(1);
+    self.exc.set("args", new DiasporeTuple(positional));
+    if (positional.length > 0) self.exc.set("msg", positional[0]);
+    if (positional.length === 2) {
+      const details = yield* I.types.get("tuple")!.ctor(I, [positional[1]], new Map());
+      setSyntaxErrorDetails(self, (details as DiasporeTuple).items);
+    }
+    return NONE;
+  }));
   return m;
 })();
 
-/** BaseExceptionGroup(message, exceptions) init (PEP 654). */
-function* groupInit(_I: Interp, args: Value[]): G<Value> {
-  const self = args[0] as DiasporeInstance;
-  const rest = args.slice(1);
-  if (rest.length !== 2) {
-    throw diasporeErr("TypeError", "BaseExceptionGroup() takes exactly 2 arguments");
+function setSyntaxErrorDetails(self: DiasporeInstance, details: Value[]): void {
+  self.exc.delete("end_lineno");
+  self.exc.delete("end_offset");
+  if (details.length < 4) {
+    throw diasporeErr("TypeError", `function takes at least 4 arguments (${details.length} given)`);
   }
-  const [message, excs] = rest;
-  if (typeof message !== "string") {
-    throw diasporeErr("TypeError", "argument 1 must be str, not " + typeName(message));
+  if (details.length > 6) {
+    throw diasporeErr("TypeError", `function takes at most 6 arguments (${details.length} given)`);
   }
-  let items: Value[];
-  if (excs instanceof DiasporeList || excs instanceof DiasporeTuple) {
-    items = [...excs.items];
-  } else {
-    throw diasporeErr("TypeError", "second argument (exceptions) must be a sequence");
+  const names = ["filename", "lineno", "offset", "text", "end_lineno", "end_offset"];
+  for (let i = 0; i < details.length; i++) self.exc.set(names[i], details[i]);
+  if (details.length === 5) {
+    throw diasporeErr("TypeError", "end_offset must be provided when end_lineno is provided");
   }
-  if (items.length === 0) {
-    throw diasporeErr("ValueError", "second argument (exceptions) must be a non-empty sequence");
-  }
-  for (const e of items) {
-    if (!(e instanceof DiasporeInstance && e.cls.issub(m_baseExc()))) {
-      throw diasporeErr("ValueError", "second argument (exceptions) must be a sequence of exceptions");
-    }
-  }
-  self.d.set("args", new DiasporeTuple([message, new DiasporeList(items)]));
-  self.d.set("message", message);
-  self.d.set("exceptions", new DiasporeTuple(items));
-  return NONE;
 }
 
-function m_baseExc(): DiasporeClass {
-  return EXC_CLASSES.get("BaseException") as DiasporeClass;
+/** Allocate validated exception groups, narrowing only the exact builtin base. */
+function* groupNew(I: Interp, args: Value[]): G<Value> {
+  const base = EXC_CLASSES.get("BaseExceptionGroup")!;
+  const exceptionGroup = EXC_CLASSES.get("ExceptionGroup")!;
+  const exception = EXC_CLASSES.get("Exception")!;
+  const requested = args[0];
+  if (!(requested instanceof DiasporeClass && requested.issub(base))) {
+    throw diasporeErr("TypeError", "BaseExceptionGroup.__new__ requires a BaseExceptionGroup subtype");
+  }
+  if (args.length !== 3) {
+    throw diasporeErr("TypeError", `BaseExceptionGroup.__new__() takes exactly 2 arguments (${args.length - 1} given)`);
+  }
+  const [, message, exceptions] = args;
+  const text = message instanceof DiasporeInstance ? message.prim : message;
+  if (!isPyString(text)) {
+    throw diasporeErr("TypeError", "argument 1 must be str, not " + typeName(message));
+  }
+  const sequence = exceptions instanceof DiasporeInstance ? exceptions.prim ?? exceptions : exceptions;
+  if (!(sequence instanceof DiasporeList || sequence instanceof DiasporeTuple ||
+        sequence instanceof DiasporeRange || sequence instanceof Uint8Array || isPyString(sequence) ||
+        (sequence instanceof DiasporeInstance && sequence.cls.lookup("__getitem__") !== undefined))) {
+    throw diasporeErr("TypeError", "second argument (exceptions) must be a sequence");
+  }
+  const items = (yield* I.types.get("tuple")!.ctor(I, [exceptions], new Map())) as DiasporeTuple;
+  if (items.items.length === 0) {
+    throw diasporeErr("ValueError", "second argument (exceptions) must be a non-empty sequence");
+  }
+  let nestedBase = false;
+  for (let i = 0; i < items.items.length; i++) {
+    const item = items.items[i];
+    if (!(item instanceof DiasporeInstance && item.cls.issub(BASE_EXC))) {
+      throw diasporeErr("ValueError", `Item ${i} of second argument (exceptions) is not an exception`);
+    }
+    if (!item.cls.issub(exception)) nestedBase = true;
+  }
+  if (nestedBase && requested.issub(exception)) {
+    throw diasporeErr("TypeError", requested === exceptionGroup
+      ? "Cannot nest BaseExceptions in an ExceptionGroup"
+      : `Cannot nest BaseExceptions in '${requested.name}'`);
+  }
+  const cls = requested === base && !nestedBase ? exceptionGroup : requested;
+  const self = new DiasporeInstance(cls);
+  self.exc.set("args", new DiasporeTuple(args.slice(1)));
+  self.exc.set("message", message);
+  self.exc.set("exceptions", items);
+  return self;
 }
 
 /** Build an (Base)ExceptionGroup instance directly (used by except* split). */
-export function makeGroup(message: string, excs: Value[], base = false): DiasporeInstance {
+export function makeGroup(message: PyString, excs: Value[], base = false): DiasporeInstance {
   const exceptionCls = EXC_CLASSES.get("Exception") as DiasporeClass;
   const anyBare = excs.some((e) => !(e instanceof DiasporeInstance && e.cls.issub(exceptionCls)));
   const name = base && anyBare ? "BaseExceptionGroup" : "ExceptionGroup";
   const inst = new DiasporeInstance(EXC_CLASSES.get(name) as DiasporeClass);
-  inst.d.set("args", new DiasporeTuple([message, new DiasporeList([...excs])]));
-  inst.d.set("message", message);
-  inst.d.set("exceptions", new DiasporeTuple([...excs]));
+  inst.exc.set("args", new DiasporeTuple([message, new DiasporeList([...excs])]));
+  inst.exc.set("message", message);
+  inst.exc.set("exceptions", new DiasporeTuple([...excs]));
   return inst;
 }
 
@@ -959,34 +1344,43 @@ export const BASE_EXC = EXC_CLASSES.get("BaseException") as DiasporeClass;
 
 /** Construct a builtin exception instance with positional arguments. */
 export function makeExc(name: string, ...args: Value[]): DiasporeInstance {
-  const cls = EXC_CLASSES.get(name) ?? (EXC_CLASSES.get("RuntimeError") as DiasporeClass);
+  let cls = EXC_CLASSES.get(name) ?? (EXC_CLASSES.get("RuntimeError") as DiasporeClass);
+  const osError = cls.issub(EXC_CLASSES.get("OSError")!);
+  if (osError) cls = selectOSErrorClass(cls, args);
   const inst = new DiasporeInstance(cls);
-  inst.d.set("args", new DiasporeTuple(args));
+  if (osError) initializeOSError(inst, args);
+  else inst.exc.set("args", new DiasporeTuple(args));
+  if (cls.issub(EXC_CLASSES.get("SyntaxError")!)) {
+    if (args.length > 0) inst.exc.set("msg", args[0]);
+    if (args.length === 2 && (args[1] instanceof DiasporeTuple || args[1] instanceof DiasporeList)) {
+      setSyntaxErrorDetails(inst, args[1].items);
+    }
+  }
   return inst;
 }
 
 /** Construct a catchable sandbox error with a message. */
-export function diasporeErr(name: string, msg: string): DiasporeError {
+export function diasporeErr(name: string, msg: PyString): DiasporeError {
   return new DiasporeError(makeExc(name, msg));
 }
 
 /** Construct a codec exception with Python's structured error attributes. */
 export function unicodeCodecError(
   kind: "UnicodeEncodeError" | "UnicodeDecodeError", encoding: string,
-  object: string | Uint8Array, start: number, end: number, reason: string,
+  object: PyString | Uint8Array, start: number, end: number, reason: string,
 ): DiasporeError {
   const value = makeExc(kind, encoding, object, BigInt(start), BigInt(end), reason);
-  value.d.set("encoding", encoding);
-  value.d.set("object", object);
-  value.d.set("start", BigInt(start));
-  value.d.set("end", BigInt(end));
-  value.d.set("reason", reason);
+  value.exc.set("encoding", encoding);
+  value.exc.set("object", object);
+  value.exc.set("start", BigInt(start));
+  value.exc.set("end", BigInt(end));
+  value.exc.set("reason", reason);
   return new DiasporeError(value);
 }
 
 /** Read the positional arguments stored on an exception instance. */
 export function excArgs(inst: DiasporeInstance): Value[] {
-  const a = inst.d.get("args");
+  const a = inst.exc.get("args");
   return a instanceof DiasporeTuple ? a.items : [];
 }
 
@@ -1011,6 +1405,7 @@ export function typeName(v: Value): string {
     case "string":
       return "str";
   }
+  if (v instanceof PyStr) return "str";
   if (v instanceof Uint8Array) return "bytes";
   if (v instanceof PyNoneT) return "NoneType";
   if (v instanceof PyEllipsisT) return "ellipsis";
@@ -1027,8 +1422,8 @@ export function typeName(v: Value): string {
   if (v instanceof DiasporeInstance) return v.cls.name;
   if (v instanceof DiasporeClass || v instanceof BuiltinType) return "type";
   if (v instanceof DiasporeFunction) return "function";
-  if (v instanceof BoundMethod) return "method";
-  if (v instanceof Builtin) return "builtin_function_or_method";
+  if (v instanceof BoundMethod) return v.fn instanceof Builtin && v.fn.kind === "wrapper_descriptor" ? "method-wrapper" : "method";
+  if (v instanceof Builtin) return v.kind;
   if (v instanceof DiasporeModule || v instanceof NativeModule) return "module";
   if (v instanceof DiasporeFile) return "file";
   if (v instanceof NativeObject) return v.kind;
@@ -1129,6 +1524,7 @@ export function hashKey(v: Value): string {
     case "string":
       return "s" + v;
   }
+  if (v instanceof PyStr) return "S" + v.points.map(point => point.codePointAt(0)!.toString(16)).join(",");
   if (needsKeyEquality(v)) {
     return "u" + hashValue(v);
   }
@@ -1187,17 +1583,47 @@ export function fnvHash(s: string): bigint {
 
 /** Python hash protocol, including user methods and compound keys. */
 export function hashValue(v: Value): bigint {
+  if (typeof v === "number" && !Number.isNaN(v)) {
+    if (!Number.isFinite(v)) return v > 0 ? 314159n : -314159n;
+    // Binary64 is an integer significand times a power of two. Modulo
+    // 2**61 - 1, multiplying by that power rotates the significand's bits.
+    f64buf.setFloat64(0, v);
+    const bits = f64buf.getBigUint64(0);
+    const exponent = Number((bits >> 52n) & 0x7ffn);
+    const significand = (bits & 0xfffffffffffffn) | (exponent === 0 ? 0n : 0x10000000000000n);
+    const shift = BigInt(((exponent === 0 ? -1074 : exponent - 1075) % 61 + 61) % 61);
+    let hash = ((significand << shift) & 0x1fffffffffffffffn) | (significand >> (61n - shift));
+    if (v < 0) hash = -hash;
+    return hash === -1n ? -2n : hash;
+  }
+  if (v instanceof Complex) {
+    const hash = BigInt.asIntN(64, hashValue(v.re) + 1000003n * hashValue(v.im));
+    return hash === -1n ? -2n : hash;
+  }
   if (v instanceof DiasporeInstance) {
     const hook = v.cls.lookup("__hash__");
     if (hook instanceof PyNoneT) {
       throw diasporeErr("TypeError", `unhashable type: '${v.cls.name}'`);
     }
     if (v.prim !== null && !v.cls.mro.some(c => c !== OBJECT && c.ns.has("__hash__"))) {
+      if (v.prim instanceof DiasporeList || v.prim instanceof DiasporeDict ||
+          (v.prim instanceof DiasporeSet && !(v.prim instanceof DiasporeFrozenSet))) {
+        throw diasporeErr("TypeError", `unhashable type: '${v.cls.name}'`);
+      }
       return hashValue(v.prim);
     }
     if (hook === undefined || hook === OBJECT.ns.get("__hash__")) return BigInt(objId(v));
     const runtime = v.cls.runtime as Interp;
     const result = runtime.drive(runtime.callDunder(v, "__hash__", []));
+    let n = asIndex(result);
+    if (n === null) throw diasporeErr("TypeError", "__hash__ method should return an integer");
+    if (n < -(1n << 63n) || n >= 1n << 63n) n %= (1n << 61n) - 1n;
+    return n === -1n ? -2n : n;
+  }
+  if (v instanceof NativeObject && v.runtime !== null) {
+    const hook = v.methods.get("__hash__");
+    if (hook === undefined) return fnvHash("p" + objId(v));
+    const result = v.runtime.drive(v.runtime.invoke(hook, [], new Map()));
     let n = asIndex(result);
     if (n === null) throw diasporeErr("TypeError", "__hash__ method should return an integer");
     if (n < -(1n << 63n) || n >= 1n << 63n) n %= (1n << 61n) - 1n;
@@ -1239,11 +1665,11 @@ export function hashValue(v: Value): bigint {
 // --------------------------------------------------------------------------
 // string code-point helpers
 
-let charsKey = "";
+let charsKey: PyString = "";
 let charsVal: string[] | null = null;
 
 /** Code points of s as an array (cached for the most recent string). */
-export function chars(s: string): string[] {
+export function chars(s: PyString): string[] {
   if (s === charsKey && charsVal !== null) return charsVal;
   const a = Array.from(s);
   charsKey = s;
@@ -1254,18 +1680,18 @@ export function chars(s: string): string[] {
 const ASTRAL_RE = /[\uD800-\uDFFF]/;
 
 /** Test whether a string contains code points outside the BMP. */
-export function hasAstral(s: string): boolean {
-  return ASTRAL_RE.test(s);
+export function hasAstral(s: PyString): boolean {
+  return s instanceof PyStr || ASTRAL_RE.test(s);
 }
 
 /** Count Unicode code points in a string. */
-export function strLen(s: string): number {
-  return hasAstral(s) ? chars(s).length : s.length;
+export function strLen(s: PyString): number {
+  return s instanceof PyStr ? s.points.length : hasAstral(s) ? chars(s).length : s.length;
 }
 
 /** Python-style string comparison: by code points. */
-export function strCmp(a: string, b: string): number {
-  if (!hasAstral(a) && !hasAstral(b)) {
+export function strCmp(a: PyString, b: PyString): number {
+  if (typeof a === "string" && typeof b === "string" && !hasAstral(a) && !hasAstral(b)) {
     return a < b ? -1 : a > b ? 1 : 0;
   }
   const ca = chars(a);

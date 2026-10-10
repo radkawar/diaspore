@@ -2,6 +2,7 @@
 local interp = require("diaspore.interp")
 local json = require("diaspore.json")
 local values = require("diaspore.values")
+local pcall = require("diaspore.protected").call
 
 local M = {}
 local VM = {}
@@ -71,13 +72,26 @@ function M.load(path)
   if data:sub(1, 2) == "\31\139" then
     error("gzip bundles are not supported by diaspore-lua; pass plain JSON", 0)
   end
-  if data:sub(1, 6) == "DSPB01" then
+  if data:sub(1, 6) == "DSPB01" or data:sub(1, 6) == "DSPB02" then
     error("DSPB bundles are not supported by diaspore-lua; pass plain JSON", 0)
   end
   return json.parse(data)
 end
 
+--- Compile source to a raw bundle linked to the shipped stdlib by default.
+-- opts accepts filename, search_paths, self_contained, compiler_bundle, stdlib_store.
+function M.compile(source, opts)
+  return require("diaspore.compiler").compile_source(source, opts or {})
+end
+
+--- Compile an entry file and its imports to a raw bundle.
+-- Set opts.self_contained to include reachable stdlib modules in the bundle.
+function M.compile_file(entry, opts)
+  return require("diaspore.compiler").compile_file(entry, opts or {})
+end
+
 --- Construct a VM with bindings, limits, capabilities, argv, and output callbacks.
+-- opts.stdlib_store supplies the compiled store used by a linked bundle.
 function M.new(bundle, opts)
   opts = opts or {}
   local I = interp.new(bundle, opts)
@@ -108,6 +122,11 @@ end
 --- Execute the main module and return its exit code.
 function VM:run()
   return self.interp:run()
+end
+
+--- Run imported shutdown and atexit hooks once after the final host call.
+function VM:close()
+  return self.interp:close()
 end
 
 --- Call a sandbox function with host values and return a host value.

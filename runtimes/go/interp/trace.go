@@ -119,7 +119,7 @@ func traceRepr(v Value, depth int) string {
 		}
 		return traceClip("{" + strings.Join(parts, ", ") + "}")
 	case *Instance:
-		return traceClip("<" + x.Class.Name + " " + traceRepr(x.D, depth+1) + ">")
+		return traceClip("<" + x.Class.Name + " " + traceRepr(x.dictionary, depth+1) + ">")
 	case *Function:
 		return traceClip("<function " + x.cf.name + ">")
 	}

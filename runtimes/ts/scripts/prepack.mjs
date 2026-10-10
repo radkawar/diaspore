@@ -1,6 +1,12 @@
 import { accessSync, constants, copyFileSync } from "node:fs";
 
-for (const file of ["../dspc.dsp.json.gz", "../stdlib/itertools.py"]) {
+for (const file of [
+  "../dspc.dsp.json.gz",
+  "../stdlib.json.gz",
+  "../cpython/LICENSE",
+  "../cpython/UNICODE_LICENSE",
+  "../cpython/stdlib_manifest.json",
+]) {
   try {
     accessSync(new URL(file, import.meta.url), constants.R_OK);
   } catch {

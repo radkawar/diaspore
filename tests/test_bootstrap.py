@@ -36,8 +36,12 @@ def bootstrap_bundle_path(bootstrap_bundle: dict, tmp_path_factory) -> Path:
 def bootstrap_case(request) -> tuple[str, Result]:
     case = request.param
     proc = subprocess.run(
-        [sys.executable, str(DRIVER), case], cwd=ROOT, input="",
-        capture_output=True, text=True, timeout=120,
+        [sys.executable, str(DRIVER), case],
+        cwd=ROOT,
+        input="",
+        capture_output=True,
+        text=True,
+        timeout=120,
         env=dict(os.environ, PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1"),
     )
     assert proc.returncode == 0, proc.stderr
@@ -45,11 +49,14 @@ def bootstrap_case(request) -> tuple[str, Result]:
 
 
 @pytest.mark.parametrize("runtime", ["py", "go", "ts", "lua"])
-def test_package_bootstrap(runtime, bootstrap_case, bootstrap_bundle,
-                           bootstrap_bundle_path, request, record_property):
+def test_package_bootstrap(
+    runtime, bootstrap_case, bootstrap_bundle, bootstrap_bundle_path, request, record_property
+):
     case, expected = bootstrap_case
-    if case == "generator.py" and runtime in ("ts", "lua"):
-        pytest.skip("inner generators run on tasks, which diaspore-ts and diaspore-lua lack")
+    if runtime == "lua":
+        pytest.skip("diaspore-lua cannot read file metadata")
+    if case == "generator.py" and runtime == "ts":
+        pytest.skip("inner generators run on tasks, which diaspore-ts lacks")
     capabilities = {"fs"}
     if case == "generator.py":
         capabilities.add("spawn")
@@ -57,11 +64,17 @@ def test_package_bootstrap(runtime, bootstrap_case, bootstrap_bundle,
         start = time.perf_counter()
         out, err = io.StringIO(), io.StringIO()
         machine = Machine(
-            bootstrap_bundle, argv=[str(DRIVER), case], caps=capabilities,
+            bootstrap_bundle,
+            argv=[str(DRIVER), case],
+            caps=capabilities,
             policy={"fs": {"read": [str(ROOT)], "write": []}},
-            stdout=out, stderr=err,
+            stdout=out,
+            stderr=err,
         )
-        code = machine.run()
+        try:
+            code = machine.run()
+        finally:
+            machine.close()
         actual = Result(out.getvalue(), code, err.getvalue())
     else:
         if runtime == "go":
@@ -73,8 +86,9 @@ def test_package_bootstrap(runtime, bootstrap_case, bootstrap_bundle,
             command.append("--allow-spawn")
         command += ["--", case]
         start = time.perf_counter()
-        proc = subprocess.run(command, cwd=ROOT, input="", capture_output=True,
-                              text=True, timeout=300)
+        proc = subprocess.run(
+            command, cwd=ROOT, input="", capture_output=True, text=True, timeout=300
+        )
         actual = Result(proc.stdout, proc.returncode, proc.stderr)
     elapsed = time.perf_counter() - start
     record_property("runtime_seconds", elapsed)

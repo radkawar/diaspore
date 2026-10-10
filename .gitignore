@@ -20,10 +20,14 @@ build/
 *.flow.json
 site/diaspore.wasm
 site/wasm_exec.js
-site/stdlib.json
 site/build.json
 site/ir.schema.json
 tests/fuzz_failures/
-runtimes/go/dspc/stdlib.json.gz
-runtimes/ts/stdlib/
+runtimes/go/interp/stdlib.json.gz
+runtimes/ts/stdlib.json.gz
+runtimes/ts/cpython/
 runtimes/ts/.stdlib-stamp
+runtimes/lua/stdlib.json
+runtimes/lua/cpython/
+runtimes/lua/.stdlib-stamp
+site/cpython/

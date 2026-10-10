@@ -2,6 +2,7 @@ package interp
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -18,13 +19,17 @@ func rawPrim(v Value) Value {
 // builtinMethodNames lists the reflected method surface per builtin type, so
 // unbound access (dict.keys, list.append) can be resolved.
 var builtinMethodNames = map[string]map[string]bool{
-	"dict":      setOfNames("get", "keys", "values", "items", "pop", "update", "setdefault", "clear", "copy"),
-	"list":      setOfNames("append", "extend", "insert", "pop", "remove", "clear", "index", "count", "reverse", "sort", "copy"),
-	"set":       setOfNames("add", "remove", "discard", "clear", "copy", "union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset"),
-	"frozenset": setOfNames("copy", "union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint"),
-	"str":       setOfNames("upper", "lower", "title", "capitalize", "casefold", "strip", "lstrip", "rstrip", "split", "rsplit", "splitlines", "join", "replace", "find", "rfind", "index", "count", "startswith", "endswith", "isdigit", "isalpha", "isalnum", "isspace", "islower", "isupper", "swapcase", "zfill", "ljust", "rjust", "center", "encode", "partition", "rpartition", "removeprefix", "removesuffix", "format"),
-	"tuple":     setOfNames("count", "index"),
-	"bytes":     setOfNames("decode", "find", "split", "strip", "lstrip", "rstrip", "replace", "startswith", "endswith", "upper", "lower"),
+	"range":              setOfNames("__getitem__", "__len__", "__bool__", "__contains__", "__iter__", "__reversed__", "__hash__", "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__repr__", "__str__", "__reduce__", "__reduce_ex__", "count", "index"),
+	"range_iterator":     setOfNames("__iter__", "__next__", "__length_hint__", "__reduce__", "__reduce_ex__", "__setstate__"),
+	"longrange_iterator": setOfNames("__iter__", "__next__", "__length_hint__", "__reduce__", "__reduce_ex__", "__setstate__"),
+	"dict":               setOfNames("__getitem__", "__setitem__", "__delitem__", "__len__", "__contains__", "__iter__", "get", "keys", "values", "items", "pop", "update", "setdefault", "clear", "copy"),
+	"list":               setOfNames("__getitem__", "__setitem__", "__delitem__", "__len__", "__contains__", "__iter__", "__reversed__", "append", "extend", "insert", "pop", "remove", "clear", "index", "count", "reverse", "sort", "copy"),
+	"set":                setOfNames("__len__", "__contains__", "__iter__", "add", "update", "remove", "discard", "pop", "clear", "copy", "union", "intersection", "difference", "difference_update", "symmetric_difference", "issubset", "issuperset"),
+	"frozenset":          setOfNames("__len__", "__contains__", "__iter__", "copy", "union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint"),
+	"str":                setOfNames("__getitem__", "__len__", "__contains__", "__iter__", "upper", "lower", "title", "capitalize", "casefold", "expandtabs", "strip", "lstrip", "rstrip", "split", "rsplit", "splitlines", "join", "replace", "translate", "find", "rfind", "index", "count", "startswith", "endswith", "isascii", "isdecimal", "isdigit", "isalpha", "isalnum", "isspace", "isidentifier", "isprintable", "islower", "isupper", "swapcase", "zfill", "ljust", "rjust", "center", "encode", "partition", "rpartition", "removeprefix", "removesuffix", "format", "format_map"),
+	"tuple":              setOfNames("__getitem__", "__len__", "__contains__", "__iter__", "count", "index"),
+	"bytes":              setOfNames("__getitem__", "__len__", "__contains__", "__iter__", "decode", "find", "rfind", "count", "split", "strip", "lstrip", "rstrip", "replace", "startswith", "endswith", "upper", "lower", "hex", "join", "translate", "ljust", "rjust", "center", "isascii"),
+	"bytearray":          setOfNames("__getitem__", "__setitem__", "__delitem__", "__len__", "__contains__", "__iter__", "append", "extend", "insert", "remove", "clear", "pop", "reverse", "copy", "decode", "find", "rfind", "count", "split", "strip", "lstrip", "rstrip", "replace", "startswith", "endswith", "upper", "lower", "hex", "join", "translate", "ljust", "rjust", "center", "isascii"),
 }
 
 func setOfNames(names ...string) map[string]bool {
@@ -40,6 +45,65 @@ func setOfNames(names ...string) map[string]bool {
 // so a builtin-subclass can call its base implementation.
 func (vm *VM) builtinUnbound(tname, method string) *Builtin {
 	switch method {
+	case "__repr__", "__str__":
+		return bi(method, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount(method, args, 1, 1); err != nil {
+				return nil, err
+			}
+			if err := noKw(method, kw); err != nil {
+				return nil, err
+			}
+			value := rawPrim(args[0])
+			if method == "__str__" {
+				return vm.str(value)
+			}
+			return vm.repr(value)
+		})
+	case "__abs__", "__hash__", "__neg__", "__pos__", "__invert__":
+		if tname == "int" || tname == "bool" || tname == "float" || tname == "complex" {
+			if method == "__invert__" && tname != "int" && tname != "bool" {
+				return nil
+			}
+			return bi(method, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+				if err := argCount(method, args, 1, 1); err != nil {
+					return nil, err
+				}
+				if err := noKw(method, kw); err != nil {
+					return nil, err
+				}
+				value := rawPrim(args[0])
+				valid := typeName(value) == tname || (tname == "int" && isIntKind(value))
+				if !valid {
+					return nil, newErrorf("TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", method, tname, typeName(args[0]))
+				}
+				if method == "__hash__" {
+					return hashValue(value)
+				}
+				if kind := unaryMethodKind(method); kind != "" {
+					return vm.unary(kind, value)
+				}
+				return biAbs(vm, []Value{value}, nil)
+			})
+		}
+	case "__index__", "__int__":
+		if tname == "int" || tname == "bool" {
+			return bi(method, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+				if err := argCount(method, args, 1, 1); err != nil {
+					return nil, err
+				}
+				if err := noKw(method, kw); err != nil {
+					return nil, err
+				}
+				value := rawPrim(args[0])
+				if n, ok := asInt(value); ok {
+					return n, nil
+				}
+				if isIntKind(value) {
+					return value, nil
+				}
+				return nil, newError("TypeError", "descriptor requires an int object")
+			})
+		}
 	case "__getitem__":
 		return bi(method, func(vm *VM, a []Value, kw []KwArg) (Value, error) {
 			if err := argCount(method, a, 2, 2); err != nil {
@@ -53,6 +117,19 @@ func (vm *VM) builtinUnbound(tname, method string) *Builtin {
 				return nil, err
 			}
 			if err := vm.setIndex(rawPrim(a[0]), a[1], a[2]); err != nil {
+				return nil, err
+			}
+			return None, nil
+		})
+	case "__delitem__":
+		return bi(method, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount(method, args, 2, 2); err != nil {
+				return nil, err
+			}
+			if err := noKw(method, kw); err != nil {
+				return nil, err
+			}
+			if err := vm.delIndex(rawPrim(args[0]), args[1]); err != nil {
 				return nil, err
 			}
 			return None, nil
@@ -100,13 +177,23 @@ func (vm *VM) builtinUnbound(tname, method string) *Builtin {
 func (vm *VM) builtinMethod(o Value, n string) (Value, error) {
 	var fn func(vm *VM, args []Value, kw []KwArg) (Value, error)
 	switch t := o.(type) {
+	case *Range:
+		return vm.rangeAttr(t, n)
+	case *rangeIter, *longRangeIter:
+		return vm.rangeIteratorAttr(t, n)
 	case string:
+		if n == "maketrans" {
+			return strMakeTransBuiltin, nil
+		}
 		fn = strMethod(t, n)
 	case *List:
 		fn = listMethod(t, n)
 	case *Dict:
 		fn = dictMethod(t, n)
 	case *classDict:
+		if t.mapping != nil && (n == "keys" || n == "values" || n == "items") {
+			return vm.builtinMethod(t.mapping, n)
+		}
 		switch n {
 		case "keys", "values", "items":
 			fn = func(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -129,7 +216,12 @@ func (vm *VM) builtinMethod(o Value, n string) (Value, error) {
 	case *Tuple:
 		fn = tupleMethod(t, n)
 	case []byte:
+		if n == "maketrans" {
+			return bytesMakeTransBuiltin, nil
+		}
 		fn = bytesMethod(t, n)
+	case *ByteArray, *MemoryView:
+		return vm.bufferAttr(t, n)
 	}
 	if fn == nil {
 		return nil, newErrorf("AttributeError", "'%s' object has no attribute '%s'",
@@ -181,13 +273,33 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 		}
 	}
 	switch n {
+	case "expandtabs":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			return strExpandTabs(vm, s, args, kw)
+		}
+	case "translate":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			return strTranslate(vm, s, args, kw)
+		}
+	case "format":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) { return strFormat(vm, s, args, kw, nil) }
+	case "format_map":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount(n, args, 1, 1); err != nil {
+				return nil, err
+			}
+			if err := noKw(n, kw); err != nil {
+				return nil, err
+			}
+			return strFormat(vm, s, nil, nil, args[0])
+		}
 	case "upper":
 		return simple(func(vm *VM, args []Value) (Value, error) {
 			return pyUpper(s), nil
 		})
 	case "lower":
 		return simple(func(vm *VM, args []Value) (Value, error) {
-			return strings.ToLower(s), nil
+			return pyLower(s), nil
 		})
 	case "title":
 		return simple(func(vm *VM, args []Value) (Value, error) {
@@ -195,24 +307,26 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 		})
 	case "capitalize":
 		return simple(func(vm *VM, args []Value) (Value, error) {
-			rs := []rune(s)
-			if len(rs) == 0 {
+			if len(s) == 0 {
 				return s, nil
 			}
 			var b strings.Builder
-			b.WriteRune(unicode.ToTitle(rs[0]))
-			b.WriteString(strings.ToLower(string(rs[1:])))
+			first, size := pyDecodeRuneInString(s)
+			pyWriteRune(&b, unicode.ToTitle(first))
+			b.WriteString(pyLower(s[size:]))
 			return b.String(), nil
 		})
 	case "casefold":
 		return simple(func(vm *VM, args []Value) (Value, error) {
 			var b strings.Builder
-			for _, r := range s {
+			for i := 0; i < len(s); {
+				r, size := pyDecodeRuneInString(s[i:])
+				i += size
 				switch r {
 				case 0x00DF, 0x1E9E:
 					b.WriteString("ss")
 				default:
-					b.WriteRune(unicode.ToLower(r))
+					pyWriteRune(&b, unicode.ToLower(r))
 				}
 			}
 			return b.String(), nil
@@ -230,48 +344,80 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 						return nil, err
 					}
 					set := map[rune]bool{}
-					for _, r := range chars {
+					for i := 0; i < len(chars); {
+						r, size := pyDecodeRuneInString(chars[i:])
+						i += size
 						set[r] = true
 					}
 					inSet = func(r rune) bool { return set[r] }
 				}
 			}
-			out := s
+			start, end := 0, len(s)
 			if n != "rstrip" {
-				out = strings.TrimLeftFunc(out, inSet)
+				for start < end {
+					r, size := pyDecodeRuneInString(s[start:])
+					if !inSet(r) {
+						break
+					}
+					start += size
+				}
 			}
 			if n != "lstrip" {
-				out = strings.TrimRightFunc(out, inSet)
+				last := start
+				for i := start; i < end; {
+					r, size := pyDecodeRuneInString(s[i:])
+					i += size
+					if !inSet(r) {
+						last = i
+					}
+				}
+				end = last
 			}
-			return out, nil
+			return s[start:end], nil
 		})
 	case "split", "rsplit":
-		return simple(func(vm *VM, args []Value) (Value, error) {
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			if err := needArgs(n, args, 0, 2); err != nil {
 				return nil, err
 			}
-			maxsplit := int64(-1)
-			if len(args) >= 2 {
-				m, err := wantInt("maxsplit", args[1])
-				if err != nil {
-					return nil, err
+			values := [2]Value{None, int64(-1)}
+			seen := [2]bool{}
+			for i, value := range args {
+				values[i], seen[i] = value, true
+			}
+			for _, keyword := range kw {
+				index := 0
+				switch keyword.Name {
+				case "sep":
+				case "maxsplit":
+					index = 1
+				default:
+					return nil, newErrorf("TypeError", "'%s' is an invalid keyword argument for %s()", keyword.Name, n)
 				}
-				maxsplit = m
+				if seen[index] {
+					return nil, newErrorf("TypeError", "%s() got multiple values for argument '%s'", n, keyword.Name)
+				}
+				values[index], seen[index] = keyword.Val, true
+			}
+			index, err := percentIndex(vm, values[1])
+			if err != nil {
+				return nil, err
+			}
+			maxsplit, err := wantInt("maxsplit", index)
+			if err != nil {
+				return nil, err
 			}
 			var sep string
 			hasSep := false
-			if len(args) >= 1 {
-				if _, isNone := args[0].(NoneType); !isNone {
-					sp, err := wantStr("sep", args[0])
-					if err != nil {
-						return nil, err
-					}
-					if sp == "" {
-						return nil, newError("ValueError", "empty separator")
-					}
-					sep = sp
-					hasSep = true
+			if _, isNone := values[0].(NoneType); !isNone {
+				sep, err = wantStr("sep", rawPrim(values[0]))
+				if err != nil {
+					return nil, err
 				}
+				if sep == "" {
+					return nil, newError("ValueError", "empty separator")
+				}
+				hasSep = true
 			}
 			var parts []string
 			if !hasSep {
@@ -291,7 +437,7 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 				}
 			}
 			return strListValue(parts), nil
-		})
+		}
 	case "splitlines":
 		return simple(func(vm *VM, args []Value) (Value, error) {
 			return strListValue(splitLines(s)), nil
@@ -348,6 +494,22 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 				}
 				count = int(c)
 			}
+			if old == "" && count != 0 {
+				var b strings.Builder
+				offset, inserted := 0, 0
+				for count < 0 || inserted < count {
+					b.WriteString(newS)
+					inserted++
+					if offset == len(s) {
+						break
+					}
+					_, size := pyDecodeRuneInString(s[offset:])
+					b.WriteString(s[offset : offset+size])
+					offset += size
+				}
+				b.WriteString(s[offset:])
+				return b.String(), nil
+			}
 			return strings.Replace(s, old, newS, count), nil
 		})
 	case "find", "rfind", "index", "count":
@@ -359,15 +521,15 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 			if err != nil {
 				return nil, err
 			}
-			rs := []rune(s)
+			rs := pyRunes(s)
 			start, end, err := strRegion(rs, args[1:])
 			if err != nil {
 				return nil, err
 			}
 			if n == "count" {
-				return int64(countRunes(rs[start:end], []rune(sub))), nil
+				return int64(countRunes(rs[start:end], pyRunes(sub))), nil
 			}
-			idx := findRunes(rs, []rune(sub), start, end, n == "rfind")
+			idx := findRunes(rs, pyRunes(sub), start, end, n == "rfind")
 			if n == "index" && idx < 0 {
 				return nil, newError("ValueError", "substring not found")
 			}
@@ -378,12 +540,12 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 			if err := needArgs(n, args, 1, 3); err != nil {
 				return nil, err
 			}
-			rs := []rune(s)
+			rs := pyRunes(s)
 			start, end, err := strRegion(rs, args[1:])
 			if err != nil {
 				return nil, err
 			}
-			region := string(rs[start:end])
+			region := pyString(rs[start:end])
 			var pats []Value
 			if tup, ok := args[0].(*Tuple); ok {
 				pats = tup.Items
@@ -405,14 +567,50 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 			}
 			return false, nil
 		})
-	case "isdigit", "isalpha", "isalnum", "isspace":
+	case "isascii":
 		return simple(func(vm *VM, args []Value) (Value, error) {
+			if err := needArgs(n, args, 0, 0); err != nil {
+				return nil, err
+			}
+			for i := range len(s) {
+				if s[i] >= utf8.RuneSelf {
+					return false, nil
+				}
+			}
+			return true, nil
+		})
+	case "isprintable":
+		return simple(func(vm *VM, args []Value) (Value, error) {
+			if err := needArgs(n, args, 0, 0); err != nil {
+				return nil, err
+			}
+			for offset := 0; offset < len(s); {
+				r, size := pyDecodeRuneInString(s[offset:])
+				if !unicode.IsPrint(r) {
+					return false, nil
+				}
+				offset += size
+			}
+			return true, nil
+		})
+	case "isidentifier":
+		return simple(func(vm *VM, args []Value) (Value, error) {
+			if err := needArgs(n, args, 0, 0); err != nil {
+				return nil, err
+			}
+			return pyIsIdentifier(s), nil
+		})
+	case "isdecimal", "isdigit", "isalpha", "isalnum", "isspace":
+		return simple(func(vm *VM, args []Value) (Value, error) {
+			if err := needArgs(n, args, 0, 0); err != nil {
+				return nil, err
+			}
 			if s == "" {
 				return false, nil
 			}
 			var pred func(rune) bool
 			switch n {
-			case "isdigit":
+			case "isdecimal", "isdigit":
 				pred = unicode.IsDigit
 			case "isalpha":
 				pred = unicode.IsLetter
@@ -423,7 +621,9 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 			case "isspace":
 				pred = unicode.IsSpace
 			}
-			for _, r := range s {
+			for i := 0; i < len(s); {
+				r, size := pyDecodeRuneInString(s[i:])
+				i += size
 				if !pred(r) {
 					return false, nil
 				}
@@ -439,15 +639,15 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 			if err != nil {
 				return nil, err
 			}
-			rs := []rune(s)
+			rs := pyRunes(s)
 			if int64(len(rs)) >= w {
 				return s, nil
 			}
 			sign := ""
 			body := s
 			if len(rs) > 0 && (rs[0] == '+' || rs[0] == '-') {
-				sign = string(rs[0])
-				body = string(rs[1:])
+				sign = pyRuneString(rs[0])
+				body = pyString(rs[1:])
 			}
 			return sign + strings.Repeat("0", int(w)-len(rs)) + body, nil
 		})
@@ -466,13 +666,13 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 				if err != nil {
 					return nil, err
 				}
-				if len([]rune(f)) != 1 {
+				if pyRuneCount(f) != 1 {
 					return nil, newError("TypeError",
 						"The fill character must be exactly one character long")
 				}
 				fill = f
 			}
-			pad := int(w) - len([]rune(s))
+			pad := int(w) - pyRuneCount(s)
 			if pad <= 0 {
 				return s, nil
 			}
@@ -482,20 +682,13 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 			return strings.Repeat(fill, pad) + s, nil
 		})
 	case "encode":
-		return simple(func(vm *VM, args []Value) (Value, error) {
-			if err := needArgs(n, args, 0, 1); err != nil {
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			encoding, errors, err := codecArguments(n, args, kw)
+			if err != nil {
 				return nil, err
 			}
-			enc := "utf-8"
-			if len(args) == 1 {
-				e, err := wantStr("encoding", args[0])
-				if err != nil {
-					return nil, err
-				}
-				enc = e
-			}
-			return encodeStr(s, enc)
-		})
+			return vm.encodeText(s, encoding, errors)
+		}
 	case "partition", "rpartition":
 		return simple(func(vm *VM, args []Value) (Value, error) {
 			if err := needArgs(n, args, 1, 1); err != nil {
@@ -562,14 +755,14 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 				if err != nil {
 					return nil, err
 				}
-				if len([]rune(f)) != 1 {
+				if pyRuneCount(f) != 1 {
 					return nil, newError("TypeError",
 						"The fill character must be exactly one character long")
 				}
 				fill = f
 			}
 			width := int(w)
-			marg := width - len([]rune(s))
+			marg := width - pyRuneCount(s)
 			if marg <= 0 {
 				return s, nil
 			}
@@ -579,7 +772,9 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 	case "islower", "isupper":
 		return simple(func(vm *VM, args []Value) (Value, error) {
 			hasCased := false
-			for _, r := range s {
+			for i := 0; i < len(s); {
+				r, size := pyDecodeRuneInString(s[i:])
+				i += size
 				if unicode.IsLower(r) || unicode.IsUpper(r) || unicode.IsTitle(r) {
 					hasCased = true
 					if n == "islower" && !unicode.IsLower(r) {
@@ -595,14 +790,16 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 	case "swapcase":
 		return simple(func(vm *VM, args []Value) (Value, error) {
 			var b strings.Builder
-			for _, r := range s {
+			for i := 0; i < len(s); {
+				r, size := pyDecodeRuneInString(s[i:])
+				i += size
 				switch {
 				case unicode.IsUpper(r) || unicode.IsTitle(r):
-					b.WriteRune(unicode.ToLower(r))
+					pyWriteRune(&b, unicode.ToLower(r))
 				case unicode.IsLower(r):
-					b.WriteRune(unicode.ToUpper(r))
+					pyWriteRune(&b, unicode.ToUpper(r))
 				default:
-					b.WriteRune(r)
+					pyWriteRune(&b, r)
 				}
 			}
 			return b.String(), nil
@@ -612,38 +809,48 @@ func strMethod(s string, n string) func(*VM, []Value, []KwArg) (Value, error) {
 }
 
 func encodeStr(s, enc string) (Value, error) {
-	switch strings.ToLower(enc) {
+	encoding := strings.ToLower(strings.ReplaceAll(enc, "_", "-"))
+	limit, reason := rune(0x10ffff), "surrogates not allowed"
+	switch encoding {
 	case "utf-8", "utf8":
-		return []byte(s), nil
-	case "ascii", "us-ascii", "us_ascii":
-		position, start, end := int64(0), int64(-1), int64(0)
-		for _, r := range s {
-			if r > 127 {
-				if start < 0 {
-					start = position
-				}
-				end = position + 1
-			} else if start >= 0 {
-				break
-			}
-			position++
-		}
-		if start >= 0 {
-			return nil, newUnicodeError("UnicodeEncodeError", "ascii", s, start, end, "ordinal not in range(128)")
-		}
-		return []byte(s), nil
+		encoding = "utf-8"
+	case "ascii", "us-ascii":
+		encoding, limit, reason = "ascii", 0x7f, "ordinal not in range(128)"
 	case "latin-1", "latin1", "iso-8859-1":
-		out := make([]byte, 0, len(s))
-		for _, r := range s {
-			if r > 0xFF {
-				return nil, newErrorf("ValueError",
-					"'latin-1' codec can't encode character %s", reprString(string(r)))
-			}
-			out = append(out, byte(r))
-		}
-		return out, nil
+		encoding, limit, reason = "latin-1", 0xff, "ordinal not in range(256)"
+	default:
+		return nil, newErrorf("LookupError", "unknown encoding: %s", enc)
 	}
-	return nil, newErrorf("ValueError", "unknown encoding: %s", enc)
+	position, start, end := int64(0), int64(-1), int64(0)
+	for offset := 0; offset < len(s); position++ {
+		r, size := pyDecodeRuneInString(s[offset:])
+		offset += size
+		invalid := r > limit
+		if encoding == "utf-8" {
+			invalid = r >= 0xd800 && r <= 0xdfff
+		}
+		if invalid {
+			if start < 0 {
+				start = position
+			}
+			end = position + 1
+		} else if start >= 0 {
+			break
+		}
+	}
+	if start >= 0 {
+		return nil, newUnicodeError("UnicodeEncodeError", encoding, s, start, end, reason)
+	}
+	if encoding != "latin-1" {
+		return []byte(s), nil
+	}
+	out := make([]byte, 0, len(s))
+	for offset := 0; offset < len(s); {
+		r, size := pyDecodeRuneInString(s[offset:])
+		offset += size
+		out = append(out, byte(r))
+	}
+	return out, nil
 }
 
 // upperExpansions holds the supported one-to-many uppercase
@@ -662,13 +869,26 @@ var upperExpansions = map[rune]string{
 	0x1E9A: "Aʾ",
 }
 
+func pyLower(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := pyDecodeRuneInString(s[i:])
+		i += size
+		pyWriteRune(&b, unicode.ToLower(r))
+	}
+	return b.String()
+}
+
 func pyUpper(s string) string {
 	var b strings.Builder
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		r, size := pyDecodeRuneInString(s[i:])
+		i += size
 		if exp, ok := upperExpansions[r]; ok {
 			b.WriteString(exp)
 		} else {
-			b.WriteRune(unicode.ToUpper(r))
+			pyWriteRune(&b, unicode.ToUpper(r))
 		}
 	}
 	return b.String()
@@ -677,16 +897,18 @@ func pyUpper(s string) string {
 func pyTitle(s string) string {
 	var b strings.Builder
 	prevCased := false
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		r, size := pyDecodeRuneInString(s[i:])
+		i += size
 		cased := unicode.IsLower(r) || unicode.IsUpper(r) || unicode.IsTitle(r)
 		if cased {
 			if prevCased {
-				b.WriteRune(unicode.ToLower(r))
+				pyWriteRune(&b, unicode.ToLower(r))
 			} else {
-				b.WriteRune(unicode.ToTitle(r))
+				pyWriteRune(&b, unicode.ToTitle(r))
 			}
 		} else {
-			b.WriteRune(r)
+			pyWriteRune(&b, r)
 		}
 		prevCased = cased
 	}
@@ -736,7 +958,7 @@ func splitWhitespace(s string, maxsplit int64, fromRight bool) []string {
 func splitLines(s string) []string {
 	var out []string
 	var cur strings.Builder
-	rs := []rune(s)
+	rs := pyRunes(s)
 	for i := 0; i < len(rs); i++ {
 		r := rs[i]
 		switch r {
@@ -750,7 +972,7 @@ func splitLines(s string) []string {
 			out = append(out, cur.String())
 			cur.Reset()
 		default:
-			cur.WriteRune(r)
+			pyWriteRune(&cur, r)
 		}
 	}
 	if cur.Len() > 0 {
@@ -862,6 +1084,16 @@ func countRunes(rs, sub []rune) int {
 
 func listMethod(l *List, n string) func(*VM, []Value, []KwArg) (Value, error) {
 	switch n {
+	case "__reversed__":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := needArgs(n, args, 0, 0); err != nil {
+				return nil, err
+			}
+			if err := noKw(n, kw); err != nil {
+				return nil, err
+			}
+			return reversedValue(vm, l)
+		}
 	case "append":
 		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			if err := needArgs(n, args, 1, 1); err != nil {
@@ -1175,41 +1407,55 @@ func dictMethod(d *Dict, n string) func(*VM, []Value, []KwArg) (Value, error) {
 }
 
 func dictUpdateFrom(vm *VM, d *Dict, src Value) error {
-	src = rawPrim(src)
-	if view, ok := src.(*classDict); ok {
-		src = view.snapshot()
-	}
-	if other, ok := src.(*Dict); ok {
-		for _, e := range other.entries {
-			if err := d.Set(e.key, e.val); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	pairs, err := vm.iterToSlice(src)
-	if err != nil {
-		return err
-	}
-	for i, p := range pairs {
-		kv, err := vm.iterToSlice(p)
-		if err != nil {
-			return err
-		}
-		if len(kv) != 2 {
-			return newErrorf("ValueError",
-				"dictionary update sequence element #%d has length %d; 2 is required",
-				i, len(kv))
-		}
-		if err := d.Set(kv[0], kv[1]); err != nil {
-			return err
-		}
-	}
-	return nil
+	return dictMergeFrom(vm, d, src)
 }
 
 func setMethod(s *Set, n string) func(*VM, []Value, []KwArg) (Value, error) {
 	switch n {
+	case "update":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noKw(n, kw); err != nil {
+				return nil, err
+			}
+			for _, source := range args {
+				if err := vm.setUpdate(s, source); err != nil {
+					return nil, err
+				}
+			}
+			return None, nil
+		}
+	case "difference_update":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noKw(n, kw); err != nil {
+				return nil, err
+			}
+			for _, source := range args {
+				if err := vm.setDifferenceUpdate(s, source); err != nil {
+					return nil, err
+				}
+			}
+			return None, nil
+		}
+	case "pop":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs("pop", args, kw); err != nil {
+				return nil, err
+			}
+			if len(s.entries) == 0 {
+				return nil, newErrorArgs("KeyError", "pop from an empty set")
+			}
+			// Any member may be removed. Taking the last stored entry avoids
+			// shifting entries and never calls guest __hash__ or __eq__ again.
+			last := len(s.entries) - 1
+			entry := s.entries[last]
+			s.entries[last] = dictEntry{}
+			s.entries = s.entries[:last]
+			delete(s.index, entry.hk)
+			if len(entry.hk) != 0 && entry.hk[0] == 'h' {
+				s.slowKeys--
+			}
+			return entry.key, nil
+		}
 	case "add":
 		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			if err := needArgs(n, args, 1, 1); err != nil {
@@ -1382,27 +1628,38 @@ func tupleMethod(t *Tuple, n string) func(*VM, []Value, []KwArg) (Value, error) 
 
 func bytesMethod(b []byte, n string) func(*VM, []Value, []KwArg) (Value, error) {
 	switch n {
-	case "decode":
+	case "count", "rfind":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) { return bytesSearch(vm, b, n, args, kw) }
+	case "isascii":
 		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			if err := needArgs(n, args, 0, 1); err != nil {
+			if err := noKw(n, kw); err != nil {
 				return nil, err
 			}
-			enc := "utf-8"
-			if len(args) == 1 {
-				e, err := wantStr("encoding", args[0])
-				if err != nil {
-					return nil, err
-				}
-				enc = e
+			if err := argCount(n, args, 0, 0); err != nil {
+				return nil, err
 			}
-			if v, ok := kwGet(kw, "encoding"); ok {
-				e, err := wantStr("encoding", v)
-				if err != nil {
-					return nil, err
+			for _, value := range b {
+				if value >= 128 {
+					return false, nil
 				}
-				enc = e
 			}
-			return decodeBytes(b, enc)
+			return true, nil
+		}
+	case "ljust", "rjust", "center":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) { return bytesPad(vm, b, n, args, kw) }
+	case "hex":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) { return bufferHex(vm, b, args, kw) }
+	case "join":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) { return bytesJoin(vm, b, args, kw) }
+	case "translate":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) { return bytesTranslate(vm, b, args, kw) }
+	case "decode":
+		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			encoding, errors, err := codecArguments(n, args, kw)
+			if err != nil {
+				return nil, err
+			}
+			return vm.decodeText(b, encoding, errors)
 		}
 	case "find":
 		return func(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -1548,11 +1805,16 @@ func bytesMethod(b []byte, n string) func(*VM, []Value, []KwArg) (Value, error) 
 }
 
 func decodeBytes(b []byte, enc string) (Value, error) {
-	switch strings.ToLower(enc) {
+	switch strings.ToLower(strings.ReplaceAll(enc, "_", "-")) {
 	case "utf-8", "utf8":
-		if !utf8.Valid(b) {
-			return nil, newError("ValueError",
-				"'utf-8' codec can't decode bytes: invalid data")
+		for i := 0; i < len(b); {
+			r, size := utf8.DecodeRune(b[i:])
+			if r != utf8.RuneError || size != 1 {
+				i += size
+				continue
+			}
+			end, reason := utf8ErrorSpan(b, i)
+			return nil, newUnicodeError("UnicodeDecodeError", "utf-8", b, int64(i), int64(end), reason)
 		}
 		return string(b), nil
 	case "ascii", "us-ascii", "us_ascii":
@@ -1567,7 +1829,273 @@ func decodeBytes(b []byte, enc string) (Value, error) {
 		for i, c := range b {
 			rs[i] = rune(c)
 		}
-		return string(rs), nil
+		return pyString(rs), nil
 	}
-	return nil, newErrorf("ValueError", "unknown encoding: %s", enc)
+	return nil, newErrorf("LookupError", "unknown encoding: %s", enc)
+}
+
+func utf8ErrorSpan(b []byte, start int) (int, string) {
+	width := 0
+	switch {
+	case b[start] >= 0xc2 && b[start] <= 0xdf:
+		width = 2
+	case b[start] >= 0xe0 && b[start] <= 0xef:
+		width = 3
+	case b[start] >= 0xf0 && b[start] <= 0xf4:
+		width = 4
+	}
+	if width == 0 {
+		return start + 1, "invalid start byte"
+	}
+	end := start + 1
+	for j := 1; j < width && start+j < len(b); j++ {
+		c := b[start+j]
+		valid := c >= 0x80 && c <= 0xbf
+		if j == 1 {
+			switch b[start] {
+			case 0xe0:
+				valid = c >= 0xa0 && c <= 0xbf
+			case 0xed:
+				valid = c >= 0x80 && c <= 0x9f
+			case 0xf0:
+				valid = c >= 0x90 && c <= 0xbf
+			case 0xf4:
+				valid = c >= 0x80 && c <= 0x8f
+			}
+		}
+		if !valid {
+			return end, "invalid continuation byte"
+		}
+		end++
+	}
+	return end, "unexpected end of data"
+}
+
+func codecArguments(name string, args []Value, kw []KwArg) (string, string, error) {
+	if err := needArgs(name, args, 0, 2); err != nil {
+		return "", "", err
+	}
+	values := [2]string{"utf-8", "strict"}
+	seen := [2]bool{}
+	for i, value := range args {
+		text, err := wantStr("argument", value)
+		if err != nil {
+			return "", "", err
+		}
+		values[i], seen[i] = text, true
+	}
+	for _, k := range kw {
+		i := 0
+		switch k.Name {
+		case "encoding":
+		case "errors":
+			i = 1
+		default:
+			return "", "", newErrorf("TypeError", "'%s' is an invalid keyword argument for %s()", k.Name, name)
+		}
+		if seen[i] {
+			return "", "", newErrorf("TypeError", "%s() got multiple values for argument '%s'", name, k.Name)
+		}
+		text, err := wantStr(k.Name, k.Val)
+		if err != nil {
+			return "", "", err
+		}
+		values[i], seen[i] = text, true
+	}
+	return values[0], values[1], nil
+}
+
+func nativeTextEncoding(name string) string {
+	name = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(name, "_", "-"), " ", "-"))
+	switch name {
+	case "utf-8", "utf8", "utf", "u8", "utf8-ucs2", "utf8-ucs4", "cp65001":
+		return "utf-8"
+	case "ascii", "us-ascii", "646", "ansi-x3.4-1968", "ansi-x3.4-1986", "ansi-x3-4-1968", "cp367", "csascii", "ibm367", "iso646-us", "iso-646.irv-1991", "iso-ir-6", "us":
+		return "ascii"
+	case "latin-1", "latin1", "latin", "l1", "iso-8859-1", "iso8859-1", "iso-8859-1:1987", "iso-ir-100", "cp819", "ibm819", "csisolatin1":
+		return "latin-1"
+	}
+	return ""
+}
+
+func (vm *VM) codecDispatch(operation string, value Value, encoding, errors string) (Value, error) {
+	if vm == nil || !vm.hasModule("codecs") {
+		if nativeTextEncoding(encoding) != "" {
+			return nil, newErrorf("LookupError", "unknown error handler name '%s'; import codecs to register or bundle the handler", errors)
+		}
+		name := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(encoding), "-", "_"), " ", "_")
+		return nil, newErrorf("LookupError", "unknown encoding: %s; import encodings.%s to bundle the codec", encoding, name)
+	}
+	module, err := vm.importModule("codecs")
+	if err != nil {
+		return nil, err
+	}
+	fn, err := vm.getAttr(module, operation)
+	if err != nil {
+		return nil, err
+	}
+	result, err := vm.call(fn, []Value{value, encoding, errors}, nil)
+	if err != nil {
+		if raised, ok := err.(*Raised); ok {
+			if inst, ok := raised.Exc.(*Instance); ok && inst.Class.Name == "LookupError" && strings.HasPrefix(plainExcStr(inst), "unknown encoding:") {
+				name := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(encoding), "-", "_"), " ", "_")
+				return nil, newErrorf("LookupError", "unknown encoding: %s; import encodings.%s to bundle the codec", encoding, name)
+			}
+		}
+		return nil, err
+	}
+	if operation == "encode" {
+		if _, ok := result.([]byte); !ok {
+			return nil, newErrorf("TypeError", "'%s' encoder returned '%s' instead of 'bytes'", encoding, typeName(result))
+		}
+	} else if _, ok := result.(string); !ok {
+		return nil, newErrorf("TypeError", "'%s' decoder returned '%s' instead of 'str'", encoding, typeName(result))
+	}
+	return result, nil
+}
+
+func (vm *VM) encodeText(s, encoding, errors string) (Value, error) {
+	enc := nativeTextEncoding(encoding)
+	if enc == "" {
+		return vm.codecDispatch("encode", s, encoding, errors)
+	}
+	switch errors {
+	case "strict":
+		return encodeStr(s, enc)
+	case "ignore", "replace", "backslashreplace", "surrogateescape", "surrogatepass":
+	default:
+		result, err := encodeStr(s, enc)
+		if err == nil {
+			return result, nil
+		}
+		return vm.codecDispatch("encode", s, encoding, errors)
+	}
+	limit, reason := rune(0x10ffff), "surrogates not allowed"
+	if enc == "ascii" {
+		limit, reason = 127, "ordinal not in range(128)"
+	}
+	if enc == "latin-1" {
+		limit, reason = 255, "ordinal not in range(256)"
+	}
+	invalid := func(r rune) bool {
+		if enc == "utf-8" {
+			return r >= 0xd800 && r <= 0xdfff
+		}
+		return r > limit
+	}
+	out := make([]byte, 0, len(s))
+	position := int64(0)
+	for offset := 0; offset < len(s); {
+		r, size := pyDecodeRuneInString(s[offset:])
+		if !invalid(r) {
+			if enc == "utf-8" {
+				out = append(out, s[offset:offset+size]...)
+			} else {
+				out = append(out, byte(r))
+			}
+			offset += size
+			position++
+			continue
+		}
+		start, end := offset, position
+		escapable := true
+		for offset < len(s) {
+			r, size = pyDecodeRuneInString(s[offset:])
+			if !invalid(r) {
+				break
+			}
+			if r < 0xdc80 || r > 0xdcff {
+				escapable = false
+			}
+			offset += size
+			end++
+		}
+		if errors == "surrogateescape" && !escapable || errors == "surrogatepass" && enc != "utf-8" {
+			return nil, newUnicodeError("UnicodeEncodeError", enc, s, position, end, reason)
+		}
+		for i := start; i < offset; {
+			r, size = pyDecodeRuneInString(s[i:])
+			i += size
+			switch errors {
+			case "replace":
+				out = append(out, '?')
+			case "backslashreplace":
+				switch {
+				case r <= 0xff:
+					out = fmt.Appendf(out, `\x%02x`, r)
+				case r <= 0xffff:
+					out = fmt.Appendf(out, `\u%04x`, r)
+				default:
+					out = fmt.Appendf(out, `\U%08x`, r)
+				}
+			case "surrogateescape":
+				out = append(out, byte(r-0xdc00))
+			case "surrogatepass":
+				out = append(out, s[i-size:i]...)
+			}
+		}
+		position = end
+	}
+	return out, nil
+}
+
+func (vm *VM) decodeText(b []byte, encoding, errors string) (Value, error) {
+	enc := nativeTextEncoding(encoding)
+	if enc == "" {
+		return vm.codecDispatch("decode", b, encoding, errors)
+	}
+	if enc == "latin-1" || errors == "strict" {
+		return decodeBytes(b, enc)
+	}
+	switch errors {
+	case "ignore", "replace", "backslashreplace", "surrogateescape", "surrogatepass":
+	default:
+		result, err := decodeBytes(b, enc)
+		if err == nil {
+			return result, nil
+		}
+		return vm.codecDispatch("decode", b, encoding, errors)
+	}
+	var out strings.Builder
+	out.Grow(len(b))
+	for i := 0; i < len(b); {
+		if b[i] < 128 {
+			out.WriteByte(b[i])
+			i++
+			continue
+		}
+		if enc == "utf-8" {
+			r, size := utf8.DecodeRune(b[i:])
+			if r != utf8.RuneError || size != 1 {
+				out.Write(b[i : i+size])
+				i += size
+				continue
+			}
+			if errors == "surrogatepass" && i+3 <= len(b) && b[i] == 0xed && b[i+1] >= 0xa0 && b[i+1] <= 0xbf && b[i+2]&0xc0 == 0x80 {
+				out.Write(b[i : i+3])
+				i += 3
+				continue
+			}
+		}
+		end, reason := i+1, "ordinal not in range(128)"
+		if enc == "utf-8" {
+			end, reason = utf8ErrorSpan(b, i)
+		}
+		switch errors {
+		case "surrogatepass":
+			return nil, newUnicodeError("UnicodeDecodeError", enc, b, int64(i), int64(end), reason)
+		case "replace":
+			pyWriteRune(&out, utf8.RuneError)
+		case "backslashreplace":
+			for _, c := range b[i:end] {
+				fmt.Fprintf(&out, `\x%02x`, c)
+			}
+		case "surrogateescape":
+			for _, c := range b[i:end] {
+				pyWriteRune(&out, 0xdc00+rune(c))
+			}
+		}
+		i = end
+	}
+	return out.String(), nil
 }

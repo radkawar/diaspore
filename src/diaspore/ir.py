@@ -8,11 +8,25 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_serializer, model_validator
 
-BinKind = Literal["add", "sub", "mul", "div", "floordiv", "mod", "pow",
-                  "lshift", "rshift", "bitand", "bitor", "bitxor", "matmul"]
+BinKind = Literal[
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "floordiv",
+    "mod",
+    "pow",
+    "lshift",
+    "rshift",
+    "bitand",
+    "bitor",
+    "bitxor",
+    "matmul",
+]
 CmpKind = Literal["eq", "ne", "lt", "le", "gt", "ge", "in", "notin", "is", "isnot"]
+CodePoint = Annotated[int, Field(strict=True, ge=0, le=0x10FFFF)]
 
 
 class _M(BaseModel):
@@ -31,6 +45,13 @@ class Const(_N):
     v: str | bool | None = None
     re: str | None = None
     im: str | None = None
+    codepoints: list[CodePoint] = []
+
+    @model_validator(mode="after")
+    def _check_codepoints(self):
+        if "codepoints" in self.model_fields_set and (self.t != "str" or not isinstance(self.v, str)):
+            raise ValueError("codepoints requires a string constant")
+        return self
 
 
 class NameExpr(_N):
@@ -170,6 +191,7 @@ class FStrText(_M):
     """A literal segment of a formatted string."""
 
     s: str
+    codepoints: list[CodePoint] = []
 
 
 class FStrValue(_M):
@@ -191,11 +213,18 @@ class Params(_M):
     """Function parameters and their default expressions."""
 
     args: list[str] = []
+    posonly: int = Field(default=0, ge=0, strict=True)
     defaults: list[Node] = []
     vararg: str | None = None
     kwonly: list[str] = []
     kwdefaults: list[Node | None] = []
     kwarg: str | None = None
+
+    @model_validator(mode="after")
+    def _posonly_within_args(self) -> Params:
+        if self.posonly > len(self.args):
+            raise ValueError("posonly exceeds positional parameter count")
+        return self
 
 
 class Func(_N):
@@ -205,6 +234,8 @@ class Func(_N):
     name: str
     gen: bool = False
     coro: bool = False
+    asyncgen: bool = False
+    annotation_scope: bool = False
     params: Params
     locals: list[str] = []
     gdecl: list[str] = []
@@ -316,6 +347,11 @@ class ClassDef(_N):
 
     op: Literal["class"]
     name: str
+    binding: str = Field(
+        default=None,
+        strict=True,
+        json_schema_extra=lambda schema: schema.pop("default", None),
+    )
     bases: list[Node] = []
     body: list[Node]
     kwargs: list[KwArg] = []
@@ -395,7 +431,44 @@ class Del(_N):
 
 
 Node = Annotated[
-    Const | NameExpr | Attr | Index | SliceLit | Starred | Call | BinOp | Unary | BoolOp | Compare | CondExpr | ListExpr | TupleExpr | SetExpr | DictExpr | FString | Func | Yield | YieldFrom | NamedExpr | ExprStmt | Assign | AugAssign | If | While | For | Break | Continue | Pass | Return | ClassDef | Raise | Try | With | Import | ImportFrom | Del,
+    Const
+    | NameExpr
+    | Attr
+    | Index
+    | SliceLit
+    | Starred
+    | Call
+    | BinOp
+    | Unary
+    | BoolOp
+    | Compare
+    | CondExpr
+    | ListExpr
+    | TupleExpr
+    | SetExpr
+    | DictExpr
+    | FString
+    | Func
+    | Yield
+    | YieldFrom
+    | NamedExpr
+    | ExprStmt
+    | Assign
+    | AugAssign
+    | If
+    | While
+    | For
+    | Break
+    | Continue
+    | Pass
+    | Return
+    | ClassDef
+    | Raise
+    | Try
+    | With
+    | Import
+    | ImportFrom
+    | Del,
     Field(discriminator="op"),
 ]
 
@@ -415,6 +488,22 @@ class Bundle(_M):
     diaspore: Literal[1]
     main: str
     modules: dict[str, Module]
+    # An omitted reference is standalone; an explicit null is not a reference.
+    stdlib: str = Field(
+        default=None,
+        strict=True,
+        min_length=71,
+        max_length=71,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+        json_schema_extra=lambda schema: schema.pop("default", None),
+    )
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.stdlib is None:
+            data.pop("stdlib", None)
+        return data
 
     @model_validator(mode="after")
     def _main_exists(self) -> Bundle:
@@ -424,8 +513,7 @@ class Bundle(_M):
 
 
 for _model in list(globals().values()):
-    if (isinstance(_model, type) and issubclass(_model, BaseModel)
-            and _model.__module__ == __name__):
+    if isinstance(_model, type) and issubclass(_model, BaseModel) and _model.__module__ == __name__:
         _model.model_rebuild()
 
 _bundle_adapter: TypeAdapter[Bundle] = TypeAdapter(Bundle)

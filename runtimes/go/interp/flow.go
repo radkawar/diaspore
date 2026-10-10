@@ -139,11 +139,14 @@ func (vm *VM) journaled(mod, fname string, b *Builtin) *Builtin {
 		return b
 	}
 	inner := b.Fn
-	return bi(fname, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+	wrapped := bi(fname, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 		return vm.effect(mod, fname, func() (Value, error) {
 			return inner(vm, args, kw)
 		})
 	})
+	wrapped.NoBind = b.NoBind
+	wrapped.doc = b.doc
+	return wrapped
 }
 
 // BundleDigest is the canonical SHA-256 of a bundle (spec 14): UTF-8,
@@ -208,11 +211,13 @@ func canonicalJSON(b *strings.Builder, v any) {
 	}
 }
 
-// canonicalEscape matches Python json.dumps(ensure_ascii=False): only the
-// quote, backslash, and control characters are escaped.
+// canonicalEscape leaves Unicode unescaped except lone surrogates, which have
+// no strict UTF-8 encoding and use their JSON escape in portable digests.
 func canonicalEscape(b *strings.Builder, s string) {
 	b.WriteByte('"')
-	for _, r := range s {
+	for offset := 0; offset < len(s); {
+		r, size := pyDecodeRuneInString(s[offset:])
+		offset += size
 		switch r {
 		case '"':
 			b.WriteString(`\"`)
@@ -229,7 +234,7 @@ func canonicalEscape(b *strings.Builder, s string) {
 		case '\f':
 			b.WriteString(`\f`)
 		default:
-			if r < 0x20 {
+			if r < 0x20 || (r >= 0xd800 && r <= 0xdfff) {
 				fmt.Fprintf(b, `\u%04x`, r)
 			} else {
 				b.WriteRune(r)
@@ -286,6 +291,17 @@ func (vm *VM) Resume(snapshot []byte, send Value) (*FlowOutcome, error) {
 	}
 	if v, _ := snap.GetStr("diaspore_flow"); v != int64(1) {
 		return nil, fmt.Errorf("not a diaspore flow snapshot")
+	}
+	snapshotStdlib := ""
+	if value, present := snap.GetStr("stdlib"); present {
+		id, valid := value.(string)
+		if !valid || !validStdlibID(id) {
+			return nil, fmt.Errorf("bad snapshot stdlib: expected sha256: followed by 64 lowercase hexadecimal digits")
+		}
+		snapshotStdlib = id
+	}
+	if snapshotStdlib != vm.stdlibID {
+		return nil, fmt.Errorf("snapshot stdlib mismatch (snapshot %q, this bundle %q)", snapshotStdlib, vm.stdlibID)
 	}
 	if expect, ok := snap.GetStr("bundle_sha256"); ok {
 		if es, ok := expect.(string); ok && es != "" {
@@ -349,11 +365,13 @@ func (vm *VM) driveDurable() *FlowOutcome {
 	defer vm.flushOut()
 	vm.gil.Lock()
 	defer vm.gil.Unlock()
+	vm.suspended = false
 	_, err := vm.importModule(vm.main)
 	if err == nil {
 		return &FlowOutcome{Code: 0}
 	}
 	if s, ok := err.(*Suspend); ok {
+		vm.suspended = true
 		return &FlowOutcome{
 			Suspended: true,
 			Payload:   s.Payload,
@@ -369,6 +387,10 @@ func (vm *VM) buildSnapshot() []byte {
 	var b strings.Builder
 	b.WriteString(`{"diaspore_flow": 1, "bundle_sha256": `)
 	canonicalEscape(&b, BundleDigest(vm.bundle))
+	if vm.stdlibID != "" {
+		b.WriteString(`, "stdlib": `)
+		canonicalEscape(&b, vm.stdlibID)
+	}
 	b.WriteString(`, "argv": `)
 	argvItems := make([]Value, len(vm.argv))
 	for i, a := range vm.argv {

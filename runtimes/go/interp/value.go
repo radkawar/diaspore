@@ -63,7 +63,8 @@ type Tuple struct {
 	Items []Value
 }
 
-// Range is a Diaspore range object.
+// Range is a Diaspore range object. Inline bounds cover ordinary int64 ranges;
+// Bounds returns the exact values when arbitrary-precision storage is needed.
 type Range struct {
 	// Start is the inclusive lower bound.
 	Start int64
@@ -71,20 +72,7 @@ type Range struct {
 	Stop int64
 	// Step is the nonzero increment between elements.
 	Step int64
-}
-
-// Len returns the number of elements in the range.
-func (r *Range) Len() int64 {
-	if r.Step > 0 {
-		if r.Stop <= r.Start {
-			return 0
-		}
-		return (r.Stop - r.Start + r.Step - 1) / r.Step
-	}
-	if r.Stop >= r.Start {
-		return 0
-	}
-	return (r.Start - r.Stop + (-r.Step) - 1) / (-r.Step)
+	big  *bigRange
 }
 
 // Slice is a slice object produced by `o[a:b:c]` subscripts. Absent bounds
@@ -261,6 +249,10 @@ func (d *Dict) Delete(k Value) (Value, bool, error) {
 	if !ok {
 		return nil, false, nil
 	}
+	return d.deleteAt(i), true, nil
+}
+
+func (d *Dict) deleteAt(i int) Value {
 	entry := d.entries[i]
 	if entry.str {
 		delete(d.strIndex, entry.hk)
@@ -279,7 +271,7 @@ func (d *Dict) Delete(k Value) (Value, bool, error) {
 			d.index[d.entries[j].hk] = j
 		}
 	}
-	return v, true, nil
+	return v
 }
 
 // Keys returns the keys in insertion order.
@@ -374,6 +366,11 @@ func (s *Set) Discard(k Value) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	return s.discardHK(hk, k)
+}
+
+func (s *Set) discardHK(hk string, k Value) (bool, error) {
+	var err error
 	i, ok := s.index[hk]
 	if s.slowKeys != 0 || (len(hk) != 0 && hk[0] == 'h') {
 		i, ok, err = findHashed(s.entries, k, hk)
@@ -388,7 +385,10 @@ func (s *Set) Discard(k Value) (bool, error) {
 	if len(hk) != 0 && hk[0] == 'h' {
 		s.slowKeys--
 	}
-	s.entries = append(s.entries[:i], s.entries[i+1:]...)
+	last := len(s.entries) - 1
+	copy(s.entries[i:], s.entries[i+1:])
+	s.entries[last] = dictEntry{}
+	s.entries = s.entries[:last]
 	delete(s.index, hk)
 	for j := i; j < len(s.entries); j++ {
 		s.index[s.entries[j].hk] = j
@@ -427,6 +427,8 @@ func (s *Set) Clear() {
 type Class struct {
 	// Name is the class's __name__.
 	Name string
+	// Meta is the user-defined metaclass, or nil for builtin type.
+	Meta *Class
 	// Bases holds the direct base classes in declaration order.
 	Bases []*Class
 	// NS holds attributes defined on this class.
@@ -443,6 +445,19 @@ type Class struct {
 	vm              *VM
 	directPrim      *BuiltinType
 	primIndex       int
+	abcFlags        int64
+	layout          *instanceLayout
+	nativeImmutable bool
+	nativeFinal     bool
+}
+
+func (cls *Class) diagnosticName() string {
+	if cls.nativeImmutable {
+		if module, ok := cls.NS["__module__"].(string); ok && module != "" && module != "builtins" {
+			return module + "." + cls.Name
+		}
+	}
+	return cls.Name
 }
 
 func baseValues(bases []*Class, prim *BuiltinType, primIndex int) []Value {
@@ -496,10 +511,14 @@ func (c *Class) invalidateAttributeHooks() {
 }
 
 type classDict struct {
-	cls *Class
+	cls     *Class
+	mapping *Dict
 }
 
 func (d *classDict) snapshot() *Dict {
+	if d.mapping != nil {
+		return d.mapping
+	}
 	out := NewDict()
 	for _, k := range d.cls.dictOrder {
 		if v, ok := d.cls.NS[k]; ok {
@@ -533,21 +552,23 @@ func (c *Class) IsSub(other *Class) bool {
 type Instance struct {
 	// Class supplies the instance's type and method resolution order.
 	Class *Class
-	// D holds instance attributes.
-	D map[string]Value
 	// Prim holds the underlying value for a builtin-subclass instance.
-	Prim Value
+	Prim       Value
+	dictionary Value
+	slotValues []Value
 }
 
 // Function is a user-defined (diaspore) function: a compiled body plus the
 // definition-site state (closure frame, defaults, defining class).
 type Function struct {
 	cf         *compiledFunc
+	metadata   *functionMetadata
 	closure    *frame
 	defclass   *Class
 	defaults   []Value
 	kwdefaults map[string]Value
-	name       string           // overridable via f.__name__
+	name       string // overridable via f.__name__
+	doc        Value
 	attrs      map[string]Value // user-assigned function attributes
 }
 
@@ -561,6 +582,7 @@ type paramSpec struct {
 	kwarg     string // "" = none
 	kwargIdx  int    // -1 = none
 	ndefault  int
+	posonly   int
 }
 
 // BoundMethod pairs a callable with a receiver (self or cls).
@@ -575,14 +597,16 @@ type BoundMethod struct {
 // not bind it.
 type StaticMethod struct {
 	// Fn is returned without binding a receiver.
-	Fn Value
+	Fn    Value
+	attrs *Dict
 }
 
 // ClassMethod wraps a function stored on a class so attribute access binds
 // the class instead of the instance.
 type ClassMethod struct {
 	// Fn is bound to the class during attribute lookup.
-	Fn Value
+	Fn    Value
+	attrs *Dict
 }
 
 // Super is the object returned by super() / super(C, obj).
@@ -614,6 +638,10 @@ type Builtin struct {
 	Name string
 	// Fn implements the call using positional and keyword arguments.
 	Fn func(vm *VM, args []Value, kw []KwArg) (Value, error)
+	// NoBind identifies native functions that do not bind an instance receiver.
+	NoBind bool
+	owner  Value
+	doc    Value
 }
 
 // KwArg is one keyword argument in a call (insertion-ordered).
@@ -657,6 +685,8 @@ type NativeObject struct {
 	// Kind is the Python type name exposed by this object.
 	Kind    string
 	methods map[string]*Builtin
+	attrs   map[string]Value
+	payload any
 	iterFn  func() Iterator // non-nil for iterable natives (channels)
 }
 
@@ -669,12 +699,14 @@ type Property struct {
 	// Fdel is the deleter callable, or nil if absent.
 	Fdel Value
 	// Doc is the descriptor's __doc__ value.
-	Doc Value
+	Doc       Value
+	getterDoc bool
+	propName  Value
 }
 
 func subclassablePrim(name string) bool {
 	switch name {
-	case "int", "float", "str", "bytes", "tuple", "list", "dict", "set", "frozenset", "bool":
+	case "int", "float", "str", "bytes", "tuple", "list", "dict", "set", "frozenset", "bool", "type", "bytearray", "GenericAlias", "property", "classmethod", "staticmethod":
 		return true
 	}
 	return false
@@ -752,6 +784,14 @@ func FromGo(v any) (Value, error) {
 
 func typeName(v Value) string {
 	switch t := v.(type) {
+	case *jsonScanner:
+		return "Scanner"
+	case *jsonEncoder:
+		return "Encoder"
+	case *GenericAlias:
+		return "GenericAlias"
+	case *UnionType:
+		return "UnionType"
 	case nil:
 		return "NoneType"
 	case NoneType:
@@ -772,6 +812,10 @@ func typeName(v Value) string {
 		return "str"
 	case []byte:
 		return "bytes"
+	case *ByteArray:
+		return "bytearray"
+	case *MemoryView:
+		return "memoryview"
 	case *List:
 		return "list"
 	case *Tuple:
@@ -793,7 +837,7 @@ func typeName(v Value) string {
 	case *Property:
 		return "property"
 	case *Instance:
-		return t.Class.Name
+		return t.Class.diagnosticName()
 	case *Class, *BuiltinType:
 		return "type"
 	case *Function:
@@ -803,6 +847,12 @@ func typeName(v Value) string {
 	case *Builtin:
 		return "builtin_function_or_method"
 	case *Generator:
+		if t.fn.cf.metadata.source["asyncgen"] == true {
+			return "async_generator"
+		}
+		if t.fn.cf.metadata.source["coro"] == true {
+			return "coroutine"
+		}
 		return "generator"
 	case *Module, *NativeModule:
 		return "module"
@@ -823,6 +873,9 @@ func typeName(v Value) string {
 	case Iterator:
 		return t.KindName()
 	}
+	if name := metadataTypeName(v); name != "" {
+		return name
+	}
 	return fmt.Sprintf("%T", v)
 }
 
@@ -831,6 +884,9 @@ func typeName(v Value) string {
 // values yield a TypeError.
 func hashKey(v Value) (string, error) {
 	switch t := v.(type) {
+	case *GenericAlias, *UnionType:
+		hash, err := genericHash(t)
+		return "h" + strconv.FormatInt(hash, 10), err
 	case NoneType:
 		return "N", nil
 	case EllipsisType:
@@ -869,13 +925,20 @@ func hashKey(v Value) (string, error) {
 		return "s" + t, nil
 	case []byte:
 		return "b" + string(t), nil
+	case *MemoryView:
+		data, err := memoryViewHashBytes(t)
+		if err != nil {
+			return "", err
+		}
+		return "b" + string(data), nil
 	case *FrozenSet:
 		return "h" + strconv.FormatInt(frozenHash(t), 10), nil
 	case *Tuple:
 		h, err := compoundHash(t.Items)
 		return "h" + strconv.FormatInt(h, 10), err
 	case *Range:
-		return fmt.Sprintf("r%d,%d,%d", t.Start, t.Stop, t.Step), nil
+		hash, err := rangeHash(t)
+		return "h" + strconv.FormatInt(hash, 10), err
 	case *Slice:
 		h, err := compoundHash([]Value{t.Lower, t.Upper, t.Step})
 		return "h" + strconv.FormatInt(h, 10), err
@@ -886,6 +949,10 @@ func hashKey(v Value) (string, error) {
 	case *Instance:
 		h, err := instanceHash(t)
 		return "h" + strconv.FormatInt(h, 10), err
+	case *metadataDescriptor:
+		if t.receiver == nil {
+			return fmt.Sprintf("p%p", t), nil
+		}
 	case *Class, *BuiltinType, *Function, *BoundMethod, *Builtin,
 		*Module, *NativeModule, *Generator, *StaticMethod, *ClassMethod:
 		return fmt.Sprintf("p%p", v), nil

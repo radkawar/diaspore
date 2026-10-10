@@ -123,7 +123,9 @@ func jsonWriteArray(b *strings.Builder, items []Value, indent int, hasIndent boo
 
 func jsonEscapeString(b *strings.Builder, s string) {
 	b.WriteByte('"')
-	for _, r := range s {
+	for len(s) > 0 {
+		r, width := pyDecodeRuneInString(s)
+		s = s[width:]
 		switch r {
 		case '"':
 			b.WriteString(`\"`)
@@ -143,7 +145,7 @@ func jsonEscapeString(b *strings.Builder, s string) {
 			switch {
 			case r < 0x20:
 				fmt.Fprintf(b, `\u%04x`, r)
-			case r < 0x80:
+			case r < 0x7F:
 				b.WriteRune(r)
 			case r > 0xFFFF:
 				// surrogate pair
@@ -158,12 +160,26 @@ func jsonEscapeString(b *strings.Builder, s string) {
 }
 
 type jsonParser struct {
-	s []byte
-	i int
+	s     string
+	i     int
+	depth int
+	host  bool
+}
+
+// DecodeJSON parses JSON into Go maps, slices, strings, float64 numbers, bools,
+// and nil. Unlike encoding/json, it preserves lone surrogate escapes in strings
+// as WTF-8. Adjacent high/low surrogate escapes decode to one Unicode scalar.
+func DecodeJSON(data []byte) (any, error) {
+	p := &jsonParser{s: string(data), host: true}
+	return p.document()
 }
 
 func jsonLoads(s string) (Value, error) {
-	p := &jsonParser{s: []byte(s)}
+	p := &jsonParser{s: s}
+	return p.document()
+}
+
+func (p *jsonParser) document() (Value, error) {
 	p.skipWS()
 	v, err := p.value()
 	if err != nil {
@@ -195,6 +211,13 @@ func (p *jsonParser) value() (Value, error) {
 	if p.i >= len(p.s) {
 		return nil, p.fail("Expecting value")
 	}
+	if p.s[p.i] == '{' || p.s[p.i] == '[' {
+		if p.depth >= 10000 {
+			return nil, p.fail("maximum nesting depth exceeded")
+		}
+		p.depth++
+		defer func() { p.depth-- }()
+	}
 	switch c := p.s[p.i]; {
 	case c == '{':
 		return p.object()
@@ -212,14 +235,17 @@ func (p *jsonParser) value() (Value, error) {
 		}
 	case c == 'n':
 		if p.lit("null") {
+			if p.host {
+				return nil, nil
+			}
 			return None, nil
 		}
 	case c == 'N':
-		if p.lit("NaN") {
+		if !p.host && p.lit("NaN") {
 			return math.NaN(), nil
 		}
 	case c == 'I':
-		if p.lit("Infinity") {
+		if !p.host && p.lit("Infinity") {
 			return math.Inf(1), nil
 		}
 	case c == '-' || (c >= '0' && c <= '9'):
@@ -229,7 +255,7 @@ func (p *jsonParser) value() (Value, error) {
 }
 
 func (p *jsonParser) lit(word string) bool {
-	if strings.HasPrefix(string(p.s[p.i:]), word) {
+	if strings.HasPrefix(p.s[p.i:], word) {
 		p.i += len(word)
 		return true
 	}
@@ -238,64 +264,95 @@ func (p *jsonParser) lit(word string) bool {
 
 func (p *jsonParser) number() (Value, error) {
 	start := p.i
-	if p.i < len(p.s) && p.s[p.i] == '-' {
+	if p.s[p.i] == '-' {
 		p.i++
-		if p.lit("Infinity") {
+		if !p.host && p.lit("Infinity") {
 			return math.Inf(-1), nil
 		}
 	}
+	if p.i >= len(p.s) {
+		return nil, p.fail("Expecting value")
+	}
+	if p.s[p.i] == '0' {
+		p.i++
+	} else if p.s[p.i] >= '1' && p.s[p.i] <= '9' {
+		p.digits()
+	} else {
+		return nil, p.fail("Expecting value")
+	}
 	isFloat := false
-	for p.i < len(p.s) {
-		c := p.s[p.i]
-		if c >= '0' && c <= '9' {
-			p.i++
-		} else if c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-' {
-			isFloat = isFloat || c == '.' || c == 'e' || c == 'E'
-			p.i++
-		} else {
-			break
+	if p.i < len(p.s) && p.s[p.i] == '.' {
+		isFloat = true
+		p.i++
+		if !p.digits() {
+			return nil, p.fail("Expecting digit after decimal point")
 		}
 	}
-	text := string(p.s[start:p.i])
-	if !isFloat {
+	if p.i < len(p.s) && (p.s[p.i] == 'e' || p.s[p.i] == 'E') {
+		isFloat = true
+		p.i++
+		if p.i < len(p.s) && (p.s[p.i] == '+' || p.s[p.i] == '-') {
+			p.i++
+		}
+		if !p.digits() {
+			return nil, p.fail("Expecting exponent digits")
+		}
+	}
+	text := p.s[start:p.i]
+	if !isFloat && !p.host {
 		if n, err := strconv.ParseInt(text, 10, 64); err == nil {
 			return n, nil
 		}
 		if z, ok := new(big.Int).SetString(text, 10); ok {
 			return normBig(z), nil
 		}
+		return nil, p.fail("Invalid integer")
 	}
 	f, err := strconv.ParseFloat(text, 64)
 	if err != nil {
-		return nil, p.fail("Expecting value")
+		// Python accepts an overflowing JSON float as infinity. Host decoding
+		// keeps encoding/json's rejection of numbers outside float64 range.
+		if numErr, ok := err.(*strconv.NumError); !ok || numErr.Err != strconv.ErrRange || p.host {
+			return nil, p.fail("Number out of range")
+		}
 	}
 	return f, nil
 }
 
+func (p *jsonParser) digits() bool {
+	start := p.i
+	for p.i < len(p.s) && p.s[p.i] >= '0' && p.s[p.i] <= '9' {
+		p.i++
+	}
+	return p.i != start
+}
+
 func (p *jsonParser) string() (string, error) {
 	p.i++ // opening quote
+	start := p.i
+	escaped := false
 	var b strings.Builder
-	for {
-		if p.i >= len(p.s) {
-			return "", p.fail("Unterminated string starting at")
-		}
+	for p.i < len(p.s) {
 		c := p.s[p.i]
-		if c == '"' {
+		switch {
+		case c == '"':
+			text := p.s[start:p.i]
 			p.i++
+			if !escaped {
+				return text, nil
+			}
+			b.WriteString(text)
 			return b.String(), nil
-		}
-		if c == '\\' {
+		case c == '\\':
+			escaped = true
+			b.WriteString(p.s[start:p.i])
 			p.i++
 			if p.i >= len(p.s) {
 				return "", p.fail("Unterminated string starting at")
 			}
 			switch p.s[p.i] {
-			case '"':
-				b.WriteByte('"')
-			case '\\':
-				b.WriteByte('\\')
-			case '/':
-				b.WriteByte('/')
+			case '"', '\\', '/':
+				b.WriteByte(p.s[p.i])
 			case 'b':
 				b.WriteByte('\b')
 			case 'f':
@@ -311,7 +368,7 @@ func (p *jsonParser) string() (string, error) {
 				if err != nil {
 					return "", err
 				}
-				if r >= 0xD800 && r <= 0xDBFF && p.i+6 <= len(p.s) &&
+				if r >= 0xD800 && r <= 0xDBFF && p.i+6 < len(p.s) &&
 					p.s[p.i+1] == '\\' && p.s[p.i+2] == 'u' {
 					save := p.i
 					p.i += 2
@@ -325,16 +382,25 @@ func (p *jsonParser) string() (string, error) {
 						p.i = save
 					}
 				}
-				b.WriteRune(r)
+				b.WriteString(pyRuneString(r))
 			default:
 				return "", p.fail("Invalid \\escape")
 			}
 			p.i++
-			continue
+			start = p.i
+		case c < 0x20:
+			return "", p.fail("Invalid control character")
+		case c < 0x80:
+			p.i++
+		default:
+			r, width := pyDecodeRuneInString(p.s[p.i:])
+			if r == '\uFFFD' && width == 1 {
+				return "", p.fail("Invalid UTF-8 in string")
+			}
+			p.i += width
 		}
-		b.WriteByte(c)
-		p.i++
 	}
+	return "", p.fail("Unterminated string starting at")
 }
 
 // uEscape parses the 4 hex digits after \u; on entry p.i is at 'u'.
@@ -342,21 +408,37 @@ func (p *jsonParser) uEscape() (rune, error) {
 	if p.i+4 >= len(p.s) {
 		return 0, p.fail("Invalid \\uXXXX escape")
 	}
-	n, err := strconv.ParseUint(string(p.s[p.i+1:p.i+5]), 16, 32)
-	if err != nil {
-		return 0, p.fail("Invalid \\uXXXX escape")
+	var n rune
+	for _, c := range p.s[p.i+1 : p.i+5] {
+		n <<= 4
+		switch {
+		case c >= '0' && c <= '9':
+			n |= c - '0'
+		case c >= 'a' && c <= 'f':
+			n |= c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			n |= c - 'A' + 10
+		default:
+			return 0, p.fail("Invalid \\uXXXX escape")
+		}
 	}
 	p.i += 4
-	return rune(n), nil
+	return n, nil
 }
 
 func (p *jsonParser) array() (Value, error) {
 	p.i++ // '['
-	out := &List{}
+	var items []Value
+	if p.host {
+		items = make([]Value, 0)
+	}
 	p.skipWS()
 	if p.i < len(p.s) && p.s[p.i] == ']' {
 		p.i++
-		return out, nil
+		if p.host {
+			return items, nil
+		}
+		return &List{Items: items}, nil
 	}
 	for {
 		p.skipWS()
@@ -364,7 +446,7 @@ func (p *jsonParser) array() (Value, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.Items = append(out.Items, v)
+		items = append(items, v)
 		p.skipWS()
 		if p.i >= len(p.s) {
 			return nil, p.fail("Expecting ',' delimiter")
@@ -374,7 +456,10 @@ func (p *jsonParser) array() (Value, error) {
 			p.i++
 		case ']':
 			p.i++
-			return out, nil
+			if p.host {
+				return items, nil
+			}
+			return &List{Items: items}, nil
 		default:
 			return nil, p.fail("Expecting ',' delimiter")
 		}
@@ -383,10 +468,19 @@ func (p *jsonParser) array() (Value, error) {
 
 func (p *jsonParser) object() (Value, error) {
 	p.i++ // '{'
-	out := NewDict()
+	var out *Dict
+	var object map[string]any
+	if p.host {
+		object = make(map[string]any)
+	} else {
+		out = NewDict()
+	}
 	p.skipWS()
 	if p.i < len(p.s) && p.s[p.i] == '}' {
 		p.i++
+		if p.host {
+			return object, nil
+		}
 		return out, nil
 	}
 	for {
@@ -408,7 +502,11 @@ func (p *jsonParser) object() (Value, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.SetStr(k, v)
+		if p.host {
+			object[k] = v
+		} else {
+			out.SetStr(k, v)
+		}
 		p.skipWS()
 		if p.i >= len(p.s) {
 			return nil, p.fail("Expecting ',' delimiter")
@@ -418,6 +516,9 @@ func (p *jsonParser) object() (Value, error) {
 			p.i++
 		case '}':
 			p.i++
+			if p.host {
+				return object, nil
+			}
 			return out, nil
 		default:
 			return nil, p.fail("Expecting ',' delimiter")

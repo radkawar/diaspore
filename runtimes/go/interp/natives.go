@@ -5,13 +5,12 @@ import (
 	"io"
 	"math"
 	"math/big"
-	"math/rand"
 	"net"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // File is a diaspore file object created by open() (capability "fs").
@@ -121,7 +120,7 @@ func (f *File) method(n string) (Value, error) {
 			if _, err := f.f.WriteString(s); err != nil {
 				return nil, newError("OSError", err.Error())
 			}
-			return int64(utf8.RuneCountInString(s)), nil
+			return int64(pyRuneCount(s)), nil
 		}), nil
 	case "close":
 		return bi("close", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
@@ -220,18 +219,36 @@ func biOpen(vm *VM, args []Value, kw []KwArg) (Value, error) {
 }
 
 func (vm *VM) makeNativeModules() map[string]*NativeModule {
-	return map[string]*NativeModule{
-		"time":   vm.makeTimeModule(),
-		"math":   vm.makeMathModule(),
-		"json":   vm.makeJSONModule(),
-		"random": vm.makeRandomModule(),
-		"sys":    vm.makeSysModule(),
-		"net":    vm.makeNetModule(),
-		"re":     vm.makeReModule(),
-		"tasks":  vm.makeTasksModule(),
-		"flow":   vm.makeFlowModule(),
-		"_os":    vm.makeOSModule(),
+	modules := map[string]*NativeModule{
+		"time":             vm.makeTimeModule(),
+		"math":             vm.makeMathModule(),
+		"sys":              vm.makeSysModule(),
+		"net":              vm.makeNetModule(),
+		"re":               vm.makeReModule(),
+		"tasks":            vm.makeTasksModule(),
+		"flow":             vm.makeFlowModule(),
+		"_os":              vm.makeOSModule(),
+		"_json":            vm.makeJSONAcceleratorModule(),
+		"_abc":             vm.makeABCModule(),
+		"_operator":        vm.makeOperatorModule(),
+		"_diaspore_stdlib": vm.makeStdlibModule(),
+		"_diaspore_hash":   vm.makeHashModule(),
+		"builtins":         {Name: "builtins", NS: vm.builtins},
 	}
+	for name, module := range modules {
+		module.NS["__name__"] = name
+		module.NS["__doc__"] = None
+		docs := nativeFunctionDocumentation[name]
+		for _, value := range module.NS {
+			if function, ok := value.(*Builtin); ok {
+				function.NoBind = true
+				if doc, declared := docs[function.Name]; declared {
+					function.doc = doc
+				}
+			}
+		}
+	}
+	return modules
 }
 
 // round6 mirrors diaspore-py's round(x, 6) on the deterministic logical clock.
@@ -286,10 +303,20 @@ func (vm *VM) makeTimeModule() *NativeModule {
 			return None, nil
 		})
 	}
+	perfFn := bi("perf_counter", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		if err := noKw("time.perf_counter", kw); err != nil {
+			return nil, err
+		}
+		if len(args) != 0 {
+			return nil, newErrorf("TypeError", "time.perf_counter() takes no arguments (%d given)", len(args))
+		}
+		return monoFn.Fn(vm, nil, nil)
+	})
 	return &NativeModule{Name: "time", NS: map[string]Value{
-		"time":      vm.journaled("time", "time", timeFn),
-		"monotonic": vm.journaled("time", "monotonic", monoFn),
-		"sleep":     vm.journaled("time", "sleep", sleepFn),
+		"time":         vm.journaled("time", "time", timeFn),
+		"monotonic":    vm.journaled("time", "monotonic", monoFn),
+		"perf_counter": vm.journaled("time", "perf_counter", perfFn),
+		"sleep":        vm.journaled("time", "sleep", sleepFn),
 	}}
 }
 
@@ -297,15 +324,18 @@ var startTime = time.Now()
 
 func mathFn(name string, arity int, f func(xs []float64) (float64, error)) *Builtin {
 	return bi(name, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		if err := noKw(name, kw); err != nil {
+			return nil, err
+		}
 		if err := argCount(name, args, arity, arity); err != nil {
 			return nil, err
 		}
-		xs := make([]float64, len(args))
+		var values [2]float64
+		xs := values[:arity]
 		for i, a := range args {
-			x, ok := asFloat(a)
-			if !ok {
-				return nil, newErrorf("TypeError",
-					"must be real number, not %s", typeName(a))
+			x, err := mathFloat(vm, a)
+			if err != nil {
+				return nil, err
 			}
 			xs[i] = x
 		}
@@ -351,12 +381,105 @@ func (vm *VM) makeMathModule() *NativeModule {
 		})
 	}
 	return &NativeModule{Name: "math", NS: map[string]Value{
-		"pi":    math.Pi,
-		"e":     math.E,
+		"pi":        math.Pi,
+		"e":         math.E,
+		"tau":       2 * math.Pi,
+		"asin":      mathUnary("asin", math.Asin, false),
+		"atan":      mathUnary("atan", math.Atan, false),
+		"atan2":     mathBinary("atan2", math.Atan2),
+		"gamma":     mathUnary("gamma", math.Gamma, true),
+		"expm1":     mathUnary("expm1", math.Expm1, true),
+		"log1p":     mathUnary("log1p", math.Log1p, true),
+		"trunc":     bi("trunc", biMathTrunc),
+		"degrees":   mathUnary("degrees", func(x float64) float64 { return x * (180 / math.Pi) }, false),
+		"radians":   mathUnary("radians", func(x float64) float64 { return x * (math.Pi / 180) }, false),
+		"factorial": bi("factorial", biMathFactorial),
+		"gcd":       bi("gcd", biMathGCD),
+		"lcm":       bi("lcm", biMathLCM),
+		"comb":      bi("comb", biMathComb),
+		"perm":      bi("perm", biMathPerm),
+		"prod":      bi("prod", biMathProd),
+		"fsum":      bi("fsum", biMathFsum),
+		"remainder": mathBinary("remainder", math.Remainder),
+		"ulp":       bi("ulp", biMathULP),
+		"nextafter": bi("nextafter", biMathNextafter),
+		"isclose":   bi("isclose", biMathIsclose),
+		"dist":      bi("dist", biMathDist),
+		"acos": mathFn("acos", 1, func(xs []float64) (float64, error) {
+			if xs[0] < -1 || xs[0] > 1 {
+				return 0, newError("ValueError", "math domain error")
+			}
+			return math.Acos(xs[0]), nil
+		}),
+		"lgamma": mathFn("lgamma", 1, func(xs []float64) (float64, error) {
+			x := xs[0]
+			if x <= 0 && x == math.Trunc(x) && !math.IsInf(x, 0) {
+				return 0, newError("ValueError", "math domain error")
+			}
+			value, _ := math.Lgamma(x)
+			return value, nil
+		}),
+		"isfinite": bi("isfinite", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount("isfinite", args, 1, 1); err != nil {
+				return nil, err
+			}
+			if err := noKw("isfinite", kw); err != nil {
+				return nil, err
+			}
+			x, ok := asFloat(args[0])
+			if !ok {
+				return nil, newErrorf("TypeError", "must be real number, not %s", typeName(args[0]))
+			}
+			return !math.IsNaN(x) && !math.IsInf(x, 0), nil
+		}),
 		"inf":   math.Inf(1),
 		"nan":   math.NaN(),
 		"floor": intRound("floor", math.Floor),
-		"ceil":  intRound("ceil", math.Ceil),
+		"copysign": mathFn("copysign", 2, func(xs []float64) (float64, error) {
+			return math.Copysign(xs[0], xs[1]), nil
+		}),
+		"frexp": bi("frexp", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount("frexp", args, 1, 1); err != nil {
+				return nil, err
+			}
+			if err := noKw("frexp", kw); err != nil {
+				return nil, err
+			}
+			x, ok := asFloat(args[0])
+			if !ok {
+				return nil, newErrorf("TypeError", "must be real number, not %s", typeName(args[0]))
+			}
+			mantissa, exponent := math.Frexp(x)
+			return &Tuple{Items: []Value{mantissa, int64(exponent)}}, nil
+		}),
+		"ldexp": bi("ldexp", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount("ldexp", args, 2, 2); err != nil {
+				return nil, err
+			}
+			if err := noKw("ldexp", kw); err != nil {
+				return nil, err
+			}
+			x, ok := asFloat(args[0])
+			if !ok {
+				return nil, newErrorf("TypeError", "must be real number, not %s", typeName(args[0]))
+			}
+			exponent, err := wantInt("exponent", args[1])
+			if err != nil {
+				return nil, err
+			}
+			if exponent > 100000 {
+				exponent = 100000
+			}
+			if exponent < -100000 {
+				exponent = -100000
+			}
+			y := math.Ldexp(x, int(exponent))
+			if math.IsInf(y, 0) && !math.IsInf(x, 0) {
+				return nil, newError("OverflowError", "math range error")
+			}
+			return y, nil
+		}),
+		"ceil": intRound("ceil", math.Ceil),
 		"sqrt": mathFn("sqrt", 1, func(xs []float64) (float64, error) {
 			if xs[0] < 0 {
 				return 0, newError("ValueError", "math domain error")
@@ -440,189 +563,160 @@ func (vm *VM) makeMathModule() *NativeModule {
 	}}
 }
 
-func (vm *VM) makeJSONModule() *NativeModule {
-	return &NativeModule{Name: "json", NS: map[string]Value{
-		"dumps": bi("dumps", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			if err := argCount("dumps", args, 1, 2); err != nil {
-				return nil, err
-			}
-			var indent Value = None
-			if len(args) == 2 {
-				indent = args[1]
-			}
-			if v, ok := kwGet(kw, "indent"); ok {
-				indent = v
-			}
-			return vm.jsonDumps(args[0], indent)
-		}),
-		"loads": bi("loads", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-			if err := argCount("loads", args, 1, 1); err != nil {
-				return nil, err
-			}
-			s, err := wantStr("loads arg", args[0])
-			if err != nil {
-				return nil, err
-			}
-			return jsonLoads(s)
-		}),
-	}}
-}
-
-func (vm *VM) randomMethods(effectName string) map[string]*Builtin {
-	var rng *rand.Rand
-	if vm.determin {
-		rng = rand.New(rand.NewSource(0))
-	} else {
-		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
-	}
-	seedFn := bi("seed", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := argCount("seed", args, 0, 1); err != nil {
-			return nil, err
-		}
-		if err := noKw("seed", kw); err != nil {
-			return nil, err
-		}
-		n := int64(0)
-		if !vm.determin {
-			n = time.Now().UnixNano()
-		}
-		if len(args) != 0 {
-			if _, none := args[0].(NoneType); !none {
-				var ok bool
-				n, ok = asInt(args[0])
-				if !ok {
-					return nil, newError("TypeError", "seed must be an integer in diaspore")
-				}
-			}
-		}
-		rng = rand.New(rand.NewSource(n))
-		return None, nil
-	})
-	randomFn := bi("random", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := argCount("random", args, 0, 0); err != nil {
-			return nil, err
-		}
-		return rng.Float64(), nil
-	})
-	randintFn := bi("randint", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := argCount("randint", args, 2, 2); err != nil {
-			return nil, err
-		}
-		a, aok := asInt(args[0])
-		b, bok := asInt(args[1])
-		if !aok || !bok {
-			return nil, newError("TypeError", "randint requires integers")
-		}
-		if b < a {
-			return nil, newError("ValueError", "empty range for randint()")
-		}
-		width := uint64(b) - uint64(a) + 1
-		if width != 0 && width <= math.MaxInt64 {
-			return a + rng.Int63n(int64(width)), nil
-		}
-		if width == 0 {
-			return int64(uint64(a) + rng.Uint64()), nil
-		}
-		threshold := -width % width
-		for {
-			value := rng.Uint64()
-			if value >= threshold {
-				return int64(uint64(a) + value%width), nil
-			}
-		}
-	})
-	choiceFn := bi("choice", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := argCount("choice", args, 1, 1); err != nil {
-			return nil, err
-		}
-		length, err := vm.diasporeLen(args[0])
-		if err != nil {
-			return nil, err
-		}
-		if length == 0 {
-			return nil, newError("IndexError", "Cannot choose from an empty sequence")
-		}
-		return vm.getIndex(args[0], int64(rng.Intn(int(length))))
-	})
-	// shuffle journals the resulting order so replay reproduces the mutation.
-	shuffleFn := bi("shuffle", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := argCount("shuffle", args, 1, 1); err != nil {
-			return nil, err
-		}
-		l, ok := args[0].(*List)
-		if !ok {
-			return nil, newError("TypeError", "shuffle requires a list")
-		}
-		shuffle := func() {
-			rng.Shuffle(len(l.Items), func(i, j int) {
-				l.Items[i], l.Items[j] = l.Items[j], l.Items[i]
-			})
-		}
-		if !vm.durable {
-			shuffle()
-			return None, nil
-		}
-		order, err := vm.effect(effectName, "shuffle", func() (Value, error) {
-			shuffle()
-			return &List{Items: append([]Value{}, l.Items...)}, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		ol, ok := order.(*List)
-		if !ok {
-			return nil, newError("TypeError", "shuffle journal entry is not a list")
-		}
-		l.Items = append(l.Items[:0], ol.Items...)
-		return None, nil
-	})
-	return map[string]*Builtin{
-		"seed":    vm.journaled(effectName, "seed", seedFn),
-		"random":  vm.journaled(effectName, "random", randomFn),
-		"randint": vm.journaled(effectName, "randint", randintFn),
-		"choice":  vm.journaled(effectName, "choice", choiceFn),
-		"shuffle": shuffleFn,
-	}
-}
-
-func (vm *VM) makeRandomModule() *NativeModule {
-	ns := map[string]Value{}
-	for name, method := range vm.randomMethods("random") {
-		ns[name] = method
-	}
-	randomType := &BuiltinType{Name: "Random", ctor: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
-		if err := argCount("Random", args, 0, 1); err != nil {
-			return nil, err
-		}
-		if err := noKw("Random", kw); err != nil {
-			return nil, err
-		}
-		methods := vm.randomMethods("random.Random")
-		if len(args) != 0 {
-			if _, err := methods["seed"].Fn(vm, args, nil); err != nil {
-				return nil, err
-			}
-		}
-		return &NativeObject{Kind: "Random", methods: methods}, nil
-	}}
-	ns["Random"] = randomType
-	vm.types["Random"] = randomType
-	return &NativeModule{Name: "random", NS: ns}
-}
-
 func (vm *VM) makeSysModule() *NativeModule {
+	// The bundled library is installed in this logical namespace, not in a
+	// host Python prefix. Native and pure modules share the same installation.
+	const installationPrefix = "<stdlib>"
 	argv := make([]Value, len(vm.argv))
 	for i, a := range vm.argv {
 		argv[i] = a
 	}
+	implementation := &Class{Name: "SimpleNamespace", NS: map[string]Value{}, Bases: []*Class{objectClass}}
+	implementation.MRO = []*Class{implementation, objectClass}
+	implementation.NS["__init__"] = bi("__init__", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+		if err := argCount("SimpleNamespace", args, 1, 1); err != nil {
+			return nil, err
+		}
+		self := args[0].(*Instance)
+		for _, k := range kw {
+			self.dictSet(k.Name, k.Val)
+		}
+		return None, nil
+	})
+	versionItems := &Tuple{Items: []Value{int64(3), int64(12), int64(12), "final", int64(0)}}
+	versionClass := &Class{Name: "version_info", NS: map[string]Value{}, Prim: vm.types["tuple"], directPrim: vm.types["tuple"], Bases: []*Class{objectClass}}
+	versionClass.MRO = []*Class{versionClass, objectClass}
+	for index, name := range []string{"major", "minor", "micro", "releaselevel", "serial"} {
+		versionClass.NS[name] = &Property{Fget: bi(name, func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount(name, args, 1, 1); err != nil {
+				return nil, err
+			}
+			return args[0].(*Instance).Prim.(*Tuple).Items[index], nil
+		})}
+	}
+	version := newInstance(versionClass, versionItems)
+	flagClass := &Class{Name: "flags", NS: map[string]Value{}, Bases: []*Class{objectClass}}
+	flagClass.MRO = []*Class{flagClass, objectClass}
+	flags := newInstance(flagClass, nil)
+	for _, name := range []string{"debug", "inspect", "interactive", "optimize", "dont_write_bytecode", "no_user_site", "no_site", "ignore_environment", "verbose", "bytes_warning", "quiet", "hash_randomization", "isolated", "dev_mode", "utf8_mode", "warn_default_encoding", "safe_path", "int_max_str_digits"} {
+		flags.dictSet(name, int64(0))
+	}
+	implementationValue := newInstance(implementation, nil)
+	implementationValue.dictSet("name", "diaspore")
+	implementationValue.dictSet("cache_tag", None)
+	implementationValue.dictSet("version", version)
+	implementationValue.dictSet("hexversion", int64(0x030c0cf0))
+	excepthook := bi("excepthook", biExceptHook)
+	unraisablehook := bi("unraisablehook", biUnraisableHook)
 	return &NativeModule{Name: "sys", NS: map[string]Value{
-		"argv":              &List{Items: argv},
-		"platform":          "diaspore-go",
-		"stdout":            vm.makeTextStream("stdout"),
-		"stderr":            vm.makeTextStream("stderr"),
-		"stdin":             vm.makeTextStream("stdin"),
-		"getrecursionlimit": bi("getrecursionlimit", biGetRecursionLimit),
-		"setrecursionlimit": bi("setrecursionlimit", biSetRecursionLimit),
+		"audit":        bi("audit", biAudit),
+		"addaudithook": bi("addaudithook", biAddAuditHook),
+		"getfilesystemencoding": bi("getfilesystemencoding", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs("getfilesystemencoding", args, kw); err != nil {
+				return nil, err
+			}
+			return "utf-8", nil
+		}),
+		"getfilesystemencodeerrors": bi("getfilesystemencodeerrors", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs("getfilesystemencodeerrors", args, kw); err != nil {
+				return nil, err
+			}
+			if runtime.GOOS == "windows" {
+				return "surrogatepass", nil
+			}
+			return "surrogateescape", nil
+		}),
+		"argv":                 &List{Items: argv},
+		"platform":             "diaspore-go",
+		"prefix":               installationPrefix,
+		"exec_prefix":          installationPrefix,
+		"base_prefix":          installationPrefix,
+		"base_exec_prefix":     installationPrefix,
+		"byteorder":            "little",
+		"maxsize":              int64(math.MaxInt64),
+		"maxunicode":           int64(0x10ffff),
+		"float_info":           vm.makeFloatInfo(),
+		"int_info":             vm.makeIntInfo(),
+		"hash_info":            vm.makeHashInfo(),
+		"version_info":         version,
+		"version":              "3.12.12 (Diaspore)",
+		"implementation":       implementationValue,
+		"flags":                flags,
+		"warnoptions":          &List{},
+		"modules":              vm.moduleDict,
+		"builtin_module_names": &Tuple{Items: []Value{"builtins", "sys", "math", "time", "posix", "_os", "tasks", "re", "_json", "_abc", "_operator", "_diaspore_stdlib", "_diaspore_hash"}},
+		"_getframe": bi("_getframe", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount("_getframe", args, 0, 1); err != nil {
+				return nil, err
+			}
+			if err := noKw("_getframe", kw); err != nil {
+				return nil, err
+			}
+			depth := int64(0)
+			if len(args) != 0 {
+				var err error
+				depth, err = wantInt("depth", args[0])
+				if err != nil {
+					return nil, err
+				}
+			}
+			fr := vm.metadata.active
+			for ; depth > 0 && fr != nil; depth-- {
+				fr = fr.metadata.back
+			}
+			if fr == nil {
+				return nil, newError("ValueError", "call stack is not deep enough")
+			}
+			return vm.exposeMetadataFrame(fr), nil
+		}),
+		"intern": bi("intern", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount("intern", args, 1, 1); err != nil {
+				return nil, err
+			}
+			if err := noKw("intern", kw); err != nil {
+				return nil, err
+			}
+			return wantStr("intern", args[0])
+		}),
+		"exception": bi("exception", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount("exception", args, 0, 0); err != nil {
+				return nil, err
+			}
+			if err := noKw("exception", kw); err != nil {
+				return nil, err
+			}
+			if len(vm.excStack) == 0 {
+				return None, nil
+			}
+			return vm.excStack[len(vm.excStack)-1], nil
+		}),
+		"exc_info": bi("exc_info", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs("exc_info", args, kw); err != nil {
+				return nil, err
+			}
+			if len(vm.excStack) == 0 {
+				return &Tuple{Items: []Value{None, None, None}}, nil
+			}
+			exception := vm.excStack[len(vm.excStack)-1]
+			cls, err := ctorType(vm, []Value{exception}, nil)
+			if err != nil {
+				return nil, err
+			}
+			traceback, err := vm.getAttr(exception, "__traceback__")
+			if err != nil {
+				return nil, err
+			}
+			return &Tuple{Items: []Value{cls, exception, traceback}}, nil
+		}),
+		"excepthook":         excepthook,
+		"__excepthook__":     excepthook,
+		"unraisablehook":     unraisablehook,
+		"__unraisablehook__": unraisablehook,
+		"stdout":             vm.makeTextStream("stdout"),
+		"stderr":             vm.makeTextStream("stderr"),
+		"stdin":              vm.makeTextStream("stdin"),
+		"getrecursionlimit":  bi("getrecursionlimit", biGetRecursionLimit),
+		"setrecursionlimit":  bi("setrecursionlimit", biSetRecursionLimit),
 		"exit": bi("exit", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			return biExit(vm, args, kw)
 		}),
@@ -646,6 +740,7 @@ type netState struct {
 	nextID    int64
 	listeners map[int64]net.Listener
 	conns     map[int64]net.Conn
+	selectors map[*netSelectWatch]struct{}
 }
 
 func (vm *VM) makeNetModule() *NativeModule {
@@ -659,6 +754,7 @@ func (vm *VM) makeNetModule() *NativeModule {
 		})
 	}
 	return &NativeModule{Name: "net", NS: map[string]Value{
+		"select": gate("select", st.selectCall),
 		"listen": bi("listen", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			if err := argCount("listen", args, 2, 2); err != nil {
 				return nil, err
@@ -674,7 +770,11 @@ func (vm *VM) makeNetModule() *NativeModule {
 			if err := vm.requireNet("listen", host, port); err != nil {
 				return nil, err
 			}
-			ln, lerr := net.Listen("tcp", net.JoinHostPort(host, strconv.FormatInt(port, 10)))
+			network := "tcp"
+			if address := net.ParseIP(host); address != nil && address.To4() != nil {
+				network = "tcp4"
+			}
+			ln, lerr := net.Listen(network, net.JoinHostPort(host, strconv.FormatInt(port, 10)))
 			if lerr != nil {
 				return nil, newError("OSError", lerr.Error())
 			}
@@ -791,11 +891,17 @@ func (vm *VM) makeNetModule() *NativeModule {
 				return nil, newError("TypeError", "socket id must be an integer")
 			}
 			if ln, exists := st.listeners[id]; exists {
+				if err := st.notifySocketClose(id); err != nil {
+					return nil, err
+				}
 				ln.Close()
 				delete(st.listeners, id)
 				return None, nil
 			}
 			if conn, exists := st.conns[id]; exists {
+				if err := st.notifySocketClose(id); err != nil {
+					return nil, err
+				}
 				conn.Close()
 				delete(st.conns, id)
 				return None, nil

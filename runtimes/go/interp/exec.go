@@ -107,12 +107,16 @@ func (vm *VM) execEval(caller *frame, code Value, glob, loc Value, mode string) 
 			cells = caller.cells
 		}
 	} else {
-		d, ok := nsDict.(*Dict)
-		if !ok {
-			return nil, newError("TypeError", "exec()/eval() globals must be a dict")
+		if namespace, ok := nsDict.(*metadataNamespace); ok && namespace.cells != nil {
+			cells = namespace.cells
+		} else {
+			d, ok := nsDict.(*Dict)
+			if !ok {
+				return nil, newError("TypeError", "exec()/eval() globals must be a dict")
+			}
+			cells = dictToCells(d)
+			writeBack = d
 		}
-		cells = dictToCells(d)
-		writeBack = d
 	}
 
 	name := fmt.Sprintf("<exec#%d>", vm.execSeq)
@@ -130,6 +134,8 @@ func (vm *VM) execEval(caller *frame, code Value, glob, loc Value, mode string) 
 			return nil, newError("SyntaxError", cerr.Error())
 		}
 		fr := &frame{cells: cells, globals: cells, moduleName: name, fname: "<eval>"}
+		vm.enterMetadataFrame(fr)
+		defer vm.leaveMetadataFrame(fr)
 		v, rerr := evalFn(fr)
 		delete(vm.modCells, name)
 		if writeBack != nil {
@@ -144,8 +150,11 @@ func (vm *VM) execEval(caller *frame, code Value, glob, loc Value, mode string) 
 		return nil, newError("SyntaxError", cerr.Error())
 	}
 	fr := &frame{cells: cells, globals: cells, moduleName: name, fname: "<exec>"}
+	vm.enterMetadataFrame(fr)
+	defer vm.leaveMetadataFrame(fr)
 	rerr := execFn(fr)
 	if raised, ok := rerr.(*Raised); ok {
+		vm.recordMetadataTraceback(raised, fr)
 		raised.TB = append(raised.TB, tbEntry{module: name, fname: "<module>", line: fr.line})
 	}
 	if writeBack != nil {
@@ -159,38 +168,28 @@ func (vm *VM) execEval(caller *frame, code Value, glob, loc Value, mode string) 
 
 // globalsDict returns the caller module's namespace as a dict.
 func (vm *VM) globalsDict(fr *frame) Value {
-	cells := fr.globals
-	if cells == nil {
-		cells = fr.cells
-	}
-	d := NewDict()
-	for k, c := range cells {
-		if c.v != nil {
-			d.SetStr(k, c.v)
-		}
-	}
-	return d
+	return vm.globalNamespace(fr)
 }
 
 // localsDict returns the caller's locals as a dict.
 func (vm *VM) localsDict(fr *frame) Value {
-	d := NewDict()
+	if fr.namespace != nil {
+		return fr.namespace
+	}
 	if fr.cells != nil {
-		for k, c := range fr.cells {
-			if c.v != nil {
-				d.SetStr(k, c.v)
+		return vm.frameNamespace(fr)
+	}
+	d := NewDict()
+	if fr.vars != nil {
+		for k, v := range fr.vars {
+			if !strings.HasPrefix(k, ".") {
+				d.SetStr(k, v)
 			}
 		}
 		return d
 	}
-	if fr.vars != nil {
-		for k, v := range fr.vars {
-			d.SetStr(k, v)
-		}
-		return d
-	}
 	for name, idx := range fr.layout {
-		if idx < len(fr.slots) && fr.slots[idx] != nil {
+		if !strings.HasPrefix(name, ".") && idx < len(fr.slots) && fr.slots[idx] != nil {
 			d.SetStr(name, fr.slots[idx])
 		}
 	}

@@ -2,8 +2,12 @@
 -- CPython-parity semantics mirroring diaspore-py (reference), diaspore-go, diaspore-ts.
 
 local values = require("diaspore.values")
+local bigint = require("diaspore.bigint")
 local format = require("diaspore.format")
 local iter = require("diaspore.iter")
+local buffer = require("diaspore.buffer")
+local typeexpr = require("diaspore.typeexpr")
+local pcall = require("diaspore.protected").call
 
 local M = {}
 
@@ -103,62 +107,27 @@ end
 -- ---------------------------------------------------------------------------
 -- int / float arithmetic
 
--- Python ** for non-negative int exponent: exponentiation by squaring.
--- int64 overflow wraps (diaspore-lua limitation).
-local function int_pow(a, b)
-  local result = 1
-  local base = a
-  while b > 0 do
-    if b & 1 == 1 then result = result * base end
-    base = base * base
-    b = b >> 1
-  end
-  return result
-end
-
 local function int_binop(I, kind, a, b)
-  if kind == "add" then return a + b end
-  if kind == "sub" then return a - b end
-  if kind == "mul" then return a * b end
-  if kind == "div" then
-    if b == 0 then throw("ZeroDivisionError", "division by zero") end
-    return (a + 0.0) / (b + 0.0)
-  end
-  if kind == "floordiv" then
-    if b == 0 then throw("ZeroDivisionError", "integer division or modulo by zero") end
-    return a // b
-  end
-  if kind == "mod" then
-    if b == 0 then throw("ZeroDivisionError", "integer modulo by zero") end
-    return a % b
-  end
+  if kind == "add" then return bigint.add(a, b) end
+  if kind == "sub" then return bigint.sub(a, b) end
+  if kind == "mul" then return bigint.mul(a, b) end
+  if kind == "div" then return bigint.truediv(a, b) end
+  if kind == "floordiv" then return bigint.floordiv(a, b) end
+  if kind == "mod" then return bigint.mod(a, b) end
   if kind == "pow" then
-    if b >= 0 then
-      local cost = b // 8
-      if cost > 1 then I:fuel_n(cost) end
-      return int_pow(a, b)
+    if bigint.cmp(b, 0) >= 0 then
+      local cost = bigint.floordiv(b, 8)
+      if bigint.cmp(cost, 1) > 0 then
+        I:fuel_n(bigint.is_bigint(cost) and math.maxinteger or cost)
+      end
     end
-    if a == 0 then
-      throw("ZeroDivisionError", "0.0 cannot be raised to a negative power")
-    end
-    return (a + 0.0) ^ (b + 0.0)
+    return bigint.pow(a, b)
   end
-  if kind == "lshift" then
-    if b < 0 then throw("ValueError", "negative shift count") end
-    if b >= 64 then return 0 end
-    return a << b
-  end
-  if kind == "rshift" then
-    if b < 0 then throw("ValueError", "negative shift count") end
-    if b >= 63 then
-      if a < 0 then return -1 end
-      return 0
-    end
-    return a // (1 << b) -- arithmetic (sign-preserving floor) shift
-  end
-  if kind == "bitand" then return a & b end
-  if kind == "bitor" then return a | b end
-  if kind == "bitxor" then return a ~ b end
+  if kind == "lshift" then return bigint.lshift(a, b) end
+  if kind == "rshift" then return bigint.rshift(a, b) end
+  if kind == "bitand" then return bigint.band(a, b) end
+  if kind == "bitor" then return bigint.bor(a, b) end
+  if kind == "bitxor" then return bigint.bxor(a, b) end
   throw("TypeError", "unknown int op " .. kind)
 end
 
@@ -172,12 +141,21 @@ local function float_binop(kind, a, b)
   end
   if kind == "floordiv" then
     if b == 0.0 then throw("ZeroDivisionError", "float floor division by zero") end
-    return a // b
+    local remainder = math.fmod(a, b)
+    local quotient = (a - remainder) / b
+    if remainder ~= 0.0 and (remainder < 0) ~= (b < 0) then quotient = quotient - 1.0 end
+    if quotient == 0.0 then
+      return (a / b < 0.0 or 1.0 / (a / b) < 0.0) and -0.0 or 0.0
+    end
+    local floored = math.floor(quotient) * 1.0
+    if quotient - floored > 0.5 then floored = floored + 1.0 end
+    return floored
   end
   if kind == "mod" then
     if b == 0.0 then throw("ZeroDivisionError", "float modulo") end
     local m = math.fmod(a, b)
     if m ~= 0.0 and (m < 0) ~= (b < 0) then m = m + b end
+    if m == 0.0 then return (b < 0.0 or 1.0 / b < 0.0) and -0.0 or 0.0 end
     return m
   end
   if kind == "pow" then
@@ -206,6 +184,7 @@ local function seq_repeat(seq, count, inplace)
     return nil
   end
   if not is_seq then return nil end
+  if bigint.is_bigint(n) then throw("OverflowError", "cannot fit 'int' into an index-sized integer") end
   if n < 0 then n = 0 end
   if type(seq) == "string" then return seq:rep(n) end
   if sk == "bytes" then return values.bytes(seq.b:rep(n)) end
@@ -347,6 +326,13 @@ end
 
 --- Compare complex operands by their real and imaginary parts.
 function M.complex_eq(l, r)
+  if kindof(l) == "complex" and is_number(r) then
+    if l.im ~= 0.0 then return false end
+    local n = as_index(r)
+    if n ~= nil then return bigint.cmp_float(n, l.re) == 0 end
+    return l.re == r
+  end
+  if kindof(r) == "complex" and is_number(l) then return M.complex_eq(r, l) end
   local ar, ai = as_complex(l)
   local br, bi = as_complex(r)
   if ar == nil or br == nil then return false end
@@ -367,9 +353,30 @@ local function primitive(v)
   return v
 end
 
+--- Apply a native dict union slot without invoking reflected user operators.
+function M.dict_union(I, left, right, inplace)
+  local a, b = primitive(left), primitive(right)
+  if kindof(a) ~= "dict" or (not inplace and kindof(b) ~= "dict") then
+    return NOT_IMPLEMENTED
+  end
+  local update = require("diaspore.helpers").dict_update_from
+  if inplace then
+    update(I, a, right)
+    return left
+  end
+  local result = values.new_dict()
+  update(I, result, left)
+  update(I, result, right)
+  return result
+end
+
 local function binary_slot(I, kind, obj, other, name, reflected, inplace)
   if is_inst(obj) and class_lookup(obj.cls, name) ~= nil then
     return I:call_dunder(obj, name, { other })
+  end
+  if kind == "bitor" and kindof(primitive(obj)) == "dict" then
+    if reflected then return M.dict_union(I, other, obj, false) end
+    return M.dict_union(I, obj, other, false)
   end
   if is_set_view(obj) then
     if reflected then return view_binop(I, kind, other, obj) end
@@ -377,6 +384,10 @@ local function binary_slot(I, kind, obj, other, name, reflected, inplace)
   end
   local a, b = primitive(obj), primitive(other)
   if is_inst(a) or is_inst(b) or kind == "matmul" then return NOT_IMPLEMENTED end
+  if kind == "bitor" and typeexpr.is_type(a, I) and typeexpr.is_type(b, I) then
+    if reflected then return typeexpr.union(b, a, I) end
+    return typeexpr.union(a, b, I)
+  end
   local ak, bk = kindof(a), kindof(b)
   local supported = false
   if as_index(a) ~= nil then
@@ -398,13 +409,61 @@ local function binary_slot(I, kind, obj, other, name, reflected, inplace)
   end
   if not supported then return NOT_IMPLEMENTED end
   if reflected then return M.binop(I, kind, b, a, false) end
-  return M.binop(I, kind, a, b, inplace)
+  local result = M.binop(I, kind, a, b, inplace)
+  if inplace and is_inst(obj) and result == a
+      and (ak == "list" or ak == "bytearray" or ak == "dict" or ak == "set") then return obj end
+  return result
 end
 
 --- Apply a binary operator, including user-defined methods.
 function M.binop(I, kind, l, r, inplace)
-  if kind == "mod" and (type(l) == "string" or kindof(l) == "bytes") then
-    throw("TypeError", "diaspore does not support %-formatting; use f-strings")
+  if math.type(l) == "integer" and math.type(r) == "integer" then
+    if kind == "add" then
+      local result = l + r
+      if ((l ~ result) & (r ~ result)) >= 0 then return result end
+      return bigint.add(l, r)
+    end
+    if kind == "sub" then
+      local result = l - r
+      if ((l ~ r) & (l ~ result)) >= 0 then return result end
+      return bigint.sub(l, r)
+    end
+    if kind == "mul" then
+      if r == 0 then return 0 end
+      local result = l * r
+      if not (result == math.mininteger and r == -1) and result // r == l then return result end
+      return bigint.mul(l, r)
+    end
+    if kind == "matmul" then binop_type_error(kind, l, r) end
+    return int_binop(I, kind, l, r)
+  end
+  if kind == "bitor" and not is_inst(l) and not is_inst(r)
+      and typeexpr.is_type(l, I) and typeexpr.is_type(r, I) then
+    return typeexpr.union(l, r, I)
+  end
+  if kind == "mod" and (type(l) == "string" or kindof(l) == "bytes" or kindof(l) == "bytearray") then
+    return require("diaspore.interpolation").percent(I, l, r, M)
+  end
+  if kindof(l) == "bytearray" then
+    if kind == "add" and buffer.is_buffer(r) then
+      return buffer.concat(I, l, r, inplace)
+    end
+    if kind == "mul" and as_index(r) ~= nil then
+      local count = as_index(r)
+      if bigint.is_bigint(count) then throw("OverflowError", "cannot fit 'int' into an index-sized integer") end
+      if count < 0 then count = 0 end
+      if inplace and count == 1 then return l end
+      local length = buffer.length(l)
+      if length > 0 and count > math.maxinteger // length then throw("OverflowError", "repeated bytearray is too long") end
+      local size = length * count
+      I:fuel_n(size // 16 + 1)
+      if inplace then buffer.resize(l, size) end
+      local data = size == 0 and "" or l.b:rep(count)
+      if inplace then l.b = data; return l end
+      return buffer.bytearray(data)
+    end
+  elseif kind == "mul" and as_index(l) ~= nil and kindof(r) == "bytearray" then
+    return M.binop(I, kind, r, l, false)
   end
   if kind == "mul" then
     -- meter allocation bombs: "x" * n, [0] * n, ...
@@ -413,7 +472,7 @@ function M.binop(I, kind, l, r, inplace)
       seq, n = r, l
     end
     local count = as_index(n)
-    if count ~= nil and count > 0 then
+    if count ~= nil and bigint.cmp(count, 0) > 0 then
       local size = -1
       if type(seq) == "string" then
         size = #seq
@@ -425,8 +484,16 @@ function M.binop(I, kind, l, r, inplace)
           size = #seq.items
         end
       end
-      if size >= 0 then I:fuel_n(size * count // 16 + 1) end
+      if size >= 0 then
+        if bigint.is_bigint(count) or (size > 0 and count > math.maxinteger // size) then
+          throw("OverflowError", "cannot fit 'int' into an index-sized integer")
+        end
+        I:fuel_n(size * count // 16 + 1)
+      end
     end
+  end
+  if kind == "bitor" and inplace and kindof(l) == "dict" then
+    return M.dict_union(I, l, r, true)
   end
   local l_inst = is_inst(l)
   local r_inst = is_inst(r)
@@ -439,6 +506,8 @@ function M.binop(I, kind, l, r, inplace)
           local result = I:call_dunder(l, iname, { r })
           if result ~= NOT_IMPLEMENTED then return result end
           inplace = false
+        elseif kind == "bitor" and kindof(l.prim) == "dict" then
+          return M.dict_union(I, l, r, true)
         end
       end
       local right = r_inst and class_lookup(r.cls, names[2]) or nil
@@ -470,6 +539,11 @@ function M.binop(I, kind, l, r, inplace)
   end
 
   -- int op int (bool counts as int)
+  if type(l) == "boolean" and type(r) == "boolean" then
+    if kind == "bitand" then return l and r end
+    if kind == "bitor" then return l or r end
+    if kind == "bitxor" then return l ~= r end
+  end
   local li = as_index(l)
   if li ~= nil then
     local ri = as_index(r)
@@ -487,7 +561,7 @@ function M.binop(I, kind, l, r, inplace)
       throw("TypeError", 'can only concatenate str (not "' .. type_name(r) .. '") to str')
     end
     if lk == "bytes" then
-      if kindof(r) == "bytes" then return values.bytes(l.b .. r.b) end
+      if buffer.is_buffer(r) then return values.bytes(l.b .. buffer.data(r)) end
       throw("TypeError", 'can only concatenate bytes (not "' .. type_name(r) .. '") to bytes')
     end
     if lk == "list" then
@@ -529,25 +603,29 @@ function M.binop(I, kind, l, r, inplace)
     res = seq_repeat(r, l, false)
     if res ~= nil then return res end
   elseif kind == "bitor" or kind == "bitand" or kind == "bitxor" or kind == "sub" then
+    if kind == "bitor" and lk == "dict" and kindof(r) == "dict" then
+      return M.dict_union(I, l, r, false)
+    end
     if lk == "set" and kindof(r) == "set" then return M.set_op(kind, l, r) end
   end
   binop_type_error(kind, l, r)
 end
 
 local UNARY_SYM = { neg = "-", pos = "+", invert = "~" }
+local UNARY_DUNDER = { neg = "__neg__", pos = "__pos__", invert = "__invert__" }
 
 --- Apply a unary operator, including user-defined methods.
 function M.unary(I, kind, v)
   if is_inst(v) then
-    if kind == "neg" and class_lookup(v.cls, "__neg__") ~= nil then
-      return I:call_dunder(v, "__neg__", {})
-    end
+    local name = UNARY_DUNDER[kind]
+    if class_lookup(v.cls, name) ~= nil then return I:call_dunder(v, name, {}) end
+    if v.prim ~= nil then return M.unary(I, kind, v.prim) end
     throw("TypeError", "bad operand type for unary " .. UNARY_SYM[kind]
       .. ": '" .. v.cls.name .. "'")
   end
   local n = as_index(v)
   if kind == "neg" then
-    if n ~= nil then return -n end
+    if n ~= nil then return bigint.neg(n) end
     if math.type(v) == "float" then return -v end
     if kindof(v) == "complex" then return values.complex(-v.re, -v.im) end
   elseif kind == "pos" then
@@ -555,7 +633,7 @@ function M.unary(I, kind, v)
     if math.type(v) == "float" then return v end
     if kindof(v) == "complex" then return v end
   elseif kind == "invert" then
-    if n ~= nil then return ~n end
+    if n ~= nil then return bigint.bnot(n) end
   end
   throw("TypeError", "bad operand type for unary " .. UNARY_SYM[kind]
     .. ": '" .. type_name(v) .. "'")
@@ -616,10 +694,23 @@ local function order_type_error(kind, l, r)
     .. type_name(l) .. "' and '" .. type_name(r) .. "'")
 end
 
--- Orders two non-NaN numbers exactly (Lua mixed comparisons are exact).
+-- Compare integers and floats without rounding the integer.
 local function num_cmp(l, r)
   local a = type(l) == "boolean" and (l and 1 or 0) or l
   local b = type(r) == "boolean" and (r and 1 or 0) or r
+  if type(a) == "number" and type(b) == "number" then
+    if a < b then return -1 end
+    if a > b then return 1 end
+    return 0
+  end
+  if bigint.is_int(a) then
+    if bigint.is_int(b) then return bigint.cmp(a, b) end
+    return bigint.cmp_float(a, b)
+  end
+  if bigint.is_int(b) then
+    local c = bigint.cmp_float(b, a)
+    return c and -c
+  end
   if a < b then return -1 end
   if a > b then return 1 end
   return 0
@@ -675,6 +766,11 @@ cmp3 = function(I, l, r, kind)
     return values.str_cmp(l, r), true
   end
   local lk, rk = kindof(l), kindof(r)
+  if (lk == "bytearray" or lk == "bytes") and (rk == "bytearray" or rk == "bytes") then
+    if l.b < r.b then return -1, true end
+    if l.b > r.b then return 1, true end
+    return 0, true
+  end
   if lk == "bytes" and rk == "bytes" then
     if l.b < r.b then return -1, true end
     if l.b > r.b then return 1, true end
@@ -695,6 +791,14 @@ end
 
 --- Apply a comparison or membership operator.
 function M.compare(I, kind, l, r)
+  if type(l) == "number" and type(r) == "number" then
+    if kind == "lt" then return l < r end
+    if kind == "le" then return l <= r end
+    if kind == "gt" then return l > r end
+    if kind == "ge" then return l >= r end
+    if kind == "eq" then return l == r end
+    if kind == "ne" then return l ~= r end
+  end
   if kind == "is" then return M.is_identical(l, r) end
   if kind == "isnot" then return not M.is_identical(l, r) end
   if kind == "in" then return M.contains(I, r, l) end
@@ -728,8 +832,11 @@ end
 --- Compare sandbox values for equality.
 function M.eq(I, l, r)
   if is_inst(l) or is_inst(r) then return I:truth(M.compare(I, "eq", l, r)) end
-  if kindof(l) == "mappingproxy" then l = values.namespace_dict(l.cls) end
-  if kindof(r) == "mappingproxy" then r = values.namespace_dict(r.cls) end
+  if kindof(l) == "GenericAlias" or kindof(l) == "UnionType" then
+    return typeexpr.equal(I, l, r, M) or false
+  end
+  if kindof(l) == "mappingproxy" then l = values.proxy_dict(l) end
+  if kindof(r) == "mappingproxy" then r = values.proxy_dict(r) end
   if is_set_view(l) or is_set_view(r) then
     if not is_setlike(l) or not is_setlike(r) then return false end
     return M.diaspore_len(I, l) == M.diaspore_len(I, r) and setlike_subset(I, l, r)
@@ -749,7 +856,17 @@ function M.eq(I, l, r)
   end
   if type(l) == "string" then return type(r) == "string" and l == r end
   local lk = kindof(l)
-  if lk == "bytes" then return kindof(r) == "bytes" and l.b == r.b end
+  if buffer.is_buffer(l) then
+    if not buffer.is_buffer(r) then return false end
+    if lk == "memoryview" and l.released or kindof(r) == "memoryview" and r.released then return l == r end
+    if buffer.length(l) ~= buffer.length(r) then return false end
+    for i = 0, buffer.length(l) - 1 do
+      local a = lk == "memoryview" and buffer.get(l, i) or l.b:byte(i + 1)
+      local b = kindof(r) == "memoryview" and buffer.get(r, i) or r.b:byte(i + 1)
+      if not M.eq_elem(I, a, b) then return false end
+    end
+    return true
+  end
   if lk == "none" then return kindof(r) == "none" end
   if lk == "list" then
     if kindof(r) == "list" then return eq_seq(I, l.items, r.items) end
@@ -775,10 +892,10 @@ function M.eq(I, l, r)
   if lk == "range" then
     if kindof(r) ~= "range" then return false end
     local la = values.range_len(l)
-    if la ~= values.range_len(r) then return false end
+    if bigint.cmp(la, values.range_len(r)) ~= 0 then return false end
     if la == 0 then return true end
-    if l.start ~= r.start then return false end
-    return la == 1 or l.step == r.step
+    if bigint.cmp(l.start, r.start) ~= 0 then return false end
+    return la == 1 or bigint.cmp(l.step, r.step) == 0
   end
   return M.is_identical(l, r)
 end
@@ -831,13 +948,20 @@ function M.contains(I, container, item)
     end
     return container:find(item, 1, true) ~= nil
   end
-  if ck == "bytes" then
-    if kindof(item) == "bytes" then
-      return container.b:find(item.b, 1, true) ~= nil or #item.b == 0
+  if ck == "memoryview" then
+    for i = 0, buffer.length(container) - 1 do
+      if M.eq_elem(I, buffer.get(container, i), item) then return true end
+    end
+    return false
+  end
+  if ck == "bytes" or ck == "bytearray" then
+    if buffer.is_buffer(item) then
+      local data = buffer.data(item)
+      return container.b:find(data, 1, true) ~= nil or #data == 0
     end
     local n = as_index(item)
     if n ~= nil then
-      if n < 0 or n > 255 then throw("ValueError", "byte must be in range(0, 256)") end
+      if bigint.cmp(n, 0) < 0 or bigint.cmp(n, 255) > 0 then throw("ValueError", "byte must be in range(0, 256)") end
       return container.b:find(string.char(n), 1, true) ~= nil
     end
     throw("TypeError", "a bytes-like object is required, not '" .. type_name(item) .. "'")
@@ -850,6 +974,7 @@ function M.contains(I, container, item)
   end
   if ck == "dict" then return values.dict_has(container, item) end
   if ck == "mappingproxy" then
+    if container.mapping then return values.dict_has(container.mapping, item) end
     hash_key(item)
     return type(item) == "string" and container.cls.ns[item] ~= nil
   end
@@ -858,17 +983,19 @@ function M.contains(I, container, item)
     local n = as_index(item)
     if n == nil then
       if math.type(item) == "float" then
-        n = math.tointeger(item)
-        if n == nil then return false end
+        if item ~= item or item == math.huge or item == -math.huge or item ~= math.floor(item) then return false end
+        n = bigint.from_float(item)
       else
         return false
       end
     end
     local r = container
-    if r.step > 0 then
-      return n >= r.start and n < r.stop and (n - r.start) % r.step == 0
+    if bigint.cmp(r.step, 0) > 0 then
+      return bigint.cmp(n, r.start) >= 0 and bigint.cmp(n, r.stop) < 0
+        and bigint.mod(bigint.sub(n, r.start), r.step) == 0
     end
-    return n <= r.start and n > r.stop and (r.start - n) % -r.step == 0
+    return bigint.cmp(n, r.start) <= 0 and bigint.cmp(n, r.stop) > 0
+      and bigint.mod(bigint.sub(n, r.start), r.step) == 0
   end
   if ck == "iter" then return iter_contains(I, container, item) end
   throw("TypeError", "argument of type '" .. type_name(container) .. "' is not iterable")
@@ -885,12 +1012,12 @@ function M.truth(I, v)
   if t == "string" then return v ~= "" end
   local k = v.kind
   if k == "none" then return false end
-  if k == "bytes" then return #v.b > 0 end
+  if buffer.is_buffer(v) then return buffer.length(v) > 0 end
   if k == "list" or k == "tuple" then return #v.items > 0 end
   if k == "dict" or k == "set" then return v.size > 0 end
   if k == "dictview" then return M.diaspore_len(I, v.source) > 0 end
-  if k == "mappingproxy" then return next(v.cls.ns) ~= nil end
-  if k == "range" then return values.range_len(v) > 0 end
+  if k == "mappingproxy" then return v.mapping and v.mapping.size > 0 or v.cls ~= nil and next(v.cls.ns) ~= nil end
+  if k == "range" then return values.range_len(v) ~= 0 end
   if k == "instance" then
     if class_lookup(v.cls, "__bool__") == nil and class_lookup(v.cls, "__len__") == nil
         and v.prim ~= nil then
@@ -916,23 +1043,33 @@ end
 function M.diaspore_len(I, v)
   if type(v) == "string" then return values.str_len(v) end
   local k = kindof(v)
-  if k == "bytes" then return #v.b end
+  if buffer.is_buffer(v) then return buffer.length(v) end
   if k == "list" or k == "tuple" then return #v.items end
   if k == "dict" or k == "set" then return v.size end
   if k == "dictview" then return M.diaspore_len(I, v.source) end
   if k == "mappingproxy" then
+    if v.mapping then return v.mapping.size end
     local count = 0
     for _ in pairs(v.cls.ns) do count = count + 1 end
     return count
   end
-  if k == "range" then return values.range_len(v) end
+  if k == "range" then
+    local n = values.range_len(v)
+    if bigint.is_bigint(n) then throw("OverflowError", "Python int too large to convert to C ssize_t") end
+    return n
+  end
   if k == "instance" then
     if class_lookup(v.cls, "__len__") == nil and v.prim ~= nil then
       return M.diaspore_len(I, v.prim)
     end
     local r = I:call_dunder_or_err(v, "__len__", {},
       "object of type '" .. v.cls.name .. "' has no len()")
-    if math.type(r) == "integer" and type(r) ~= "boolean" then return r end
+    local n = as_index(r)
+    if n ~= nil then
+      if bigint.cmp(n, 0) < 0 then throw("ValueError", "__len__() should return >= 0") end
+      if bigint.is_bigint(n) then throw("OverflowError", "cannot fit 'int' into an index-sized integer") end
+      return n
+    end
     throw("TypeError", "__len__ should return an int")
   end
   throw("TypeError", "object of type '" .. type_name(v) .. "' has no len()")
@@ -943,8 +1080,13 @@ end
 
 local function seq_index_check(n, idx, kind_msg)
   local i = idx
-  if i < 0 then i = i + n end
-  if i < 0 or i >= n then throw("IndexError", kind_msg) end
+  if type(i) == "number" and type(n) == "number" then
+    if i < 0 then i = i + n end
+    if i < 0 or i >= n then throw("IndexError", kind_msg) end
+    return i
+  end
+  if bigint.cmp(i, 0) < 0 then i = bigint.add(i, n) end
+  if bigint.cmp(i, 0) < 0 or bigint.cmp(i, n) >= 0 then throw("IndexError", kind_msg) end
   return i
 end
 
@@ -966,21 +1108,21 @@ function M.slice_indices(sl, n)
     step = step_v
   end
   local function clamp(v)
-    if v < 0 then
-      v = v + n
-      if v < 0 then return step < 0 and -1 or 0 end
-    elseif v >= n then
-      return step < 0 and n - 1 or n
+    if bigint.cmp(v, 0) < 0 then
+      v = bigint.add(v, n)
+      if bigint.cmp(v, 0) < 0 then return bigint.cmp(step, 0) < 0 and -1 or 0 end
+    elseif bigint.cmp(v, n) >= 0 then
+      return bigint.cmp(step, 0) < 0 and bigint.sub(n, 1) or n
     end
     return v
   end
   local low_v = get_int(sl.lower)
   local up_v = get_int(sl.upper)
   local start, stop
-  if step > 0 then
+  if bigint.cmp(step, 0) > 0 then
     start, stop = 0, n
   else
-    start, stop = n - 1, -1
+    start, stop = bigint.sub(n, 1), -1
   end
   if low_v ~= nil then start = clamp(low_v) end
   if up_v ~= nil then stop = clamp(up_v) end
@@ -989,10 +1131,17 @@ end
 
 --- Visit zero-based indices in a normalized slice.
 function M.for_slice(start, stop, step, fn)
-  if step > 0 then
-    for i = start, stop - 1, step do fn(i) end
+  local i = start
+  if bigint.cmp(step, 0) > 0 then
+    while bigint.cmp(i, stop) < 0 do
+      fn(i)
+      i = bigint.add(i, step)
+    end
   else
-    for i = start, stop + 1, step do fn(i) end
+    while bigint.cmp(i, stop) > 0 do
+      fn(i)
+      i = bigint.add(i, step)
+    end
   end
 end
 
@@ -1008,18 +1157,35 @@ end
 local function slice_range(r, sl)
   local n = values.range_len(r)
   local start, stop, step = M.slice_indices(sl, n)
-  local count = 0
-  M.for_slice(start, stop, step, function() count = count + 1 end)
-  local new_start = r.start + start * r.step
-  local new_step = r.step * step
-  local new_stop = new_start + count * new_step
+  local new_start = bigint.add(r.start, bigint.mul(start, r.step))
+  local new_step = bigint.mul(r.step, step)
+  local new_stop = bigint.add(r.start, bigint.mul(stop, r.step))
   return values.range(new_start, new_stop, new_step)
 end
 
 --- Read an indexed item or slice.
 function M.get_index(I, o, k)
   local ok_ = kindof(o)
+  if ok_ == "GenericAlias" or ok_ == "UnionType" then return typeexpr.getitem(I, o, k) end
+  if ok_ == "nativeobject" and o.methods and o.methods.__getitem__ then
+    return I:call(o.methods.__getitem__, { k }, {})
+  end
+  if ok_ == "class" then
+    local meta = o.metaclass
+    local hook = kindof(meta) == "class" and class_lookup(meta, "__getitem__")
+    if hook then return I:call(I:bind_attr(hook, o, meta), { k }, {}) end
+    hook = class_lookup(o, "__class_getitem__")
+    if hook then
+      if kindof(hook) == "classmethod" then hook = hook.fn end
+      return I:call(hook, { o, k }, {})
+    end
+  elseif ok_ == "btype" then
+    if o.name == "list" or o.name == "dict" or o.name == "tuple" or o.name == "set"
+        or o.name == "frozenset" or o.name == "type" then return typeexpr.alias(o, k, I) end
+  end
+  if ok_ == "bytearray" or ok_ == "memoryview" then return buffer.get(o, k, M) end
   if ok_ == "mappingproxy" then
+    if o.mapping then return M.get_index(I, o.mapping, k) end
     hash_key(k)
     local v
     if type(k) == "string" then v = o.cls.ns[k] end
@@ -1113,7 +1279,7 @@ function M.get_index(I, o, k)
       throw("TypeError", "range indices must be integers or slices, not " .. type_name(k))
     end
     local i = seq_index_check(values.range_len(o), n, "range object index out of range")
-    return o.start + i * o.step
+    return bigint.add(o.start, bigint.mul(i, o.step))
   end
   throw("TypeError", "'" .. type_name(o) .. "' object is not subscriptable")
 end
@@ -1142,6 +1308,7 @@ end
 --- Assign an indexed item or slice.
 function M.set_index(I, o, k, v)
   local ok_ = kindof(o)
+  if ok_ == "bytearray" or ok_ == "memoryview" then return buffer.set(I, o, k, v, M) end
   if ok_ == "instance" then
     if class_lookup(o.cls, "__setitem__") == nil and o.prim ~= nil then
       M.set_index(I, o.prim, k, v)
@@ -1174,6 +1341,7 @@ end
 --- Delete an indexed item or slice.
 function M.del_index(I, o, k)
   local ok_ = kindof(o)
+  if ok_ == "bytearray" then return buffer.delete(o, k, M) end
   if ok_ == "instance" then
     if class_lookup(o.cls, "__delitem__") == nil and o.prim ~= nil then
       M.del_index(I, o.prim, k)
@@ -1220,6 +1388,28 @@ local function repr_join(I, items)
   return table.concat(parts, ", ")
 end
 
+--- Render object.__repr__ without invoking an overriding representation.
+function M.object_repr(I, value)
+  local cls = I:call(I.types.type, { value }, {})
+  local name = cls.ns and cls.ns.__qualname__ or cls.name
+  local module = cls.ns and cls.ns.__module__ or cls.module or "builtins"
+  if type(module) == "string" and module ~= "builtins" then name = module .. "." .. name end
+  return "<" .. name .. " object at 0x" .. string.format("%x", values.obj_id(value)) .. ">"
+end
+
+--- Render type.__repr__ without re-entering a metaclass representation override.
+function M.type_repr(value)
+  local kind = kindof(value)
+  if kind ~= "class" and kind ~= "btype" then
+    throw("TypeError", "descriptor '__repr__' requires a 'type' object but received a '"
+      .. type_name(value) .. "'")
+  end
+  local name = value.ns and value.ns.__qualname__ or value.name
+  local module = value.ns and value.ns.__module__ or value.module or "builtins"
+  if type(module) == "string" and module ~= "builtins" then name = module .. "." .. name end
+  return "<class '" .. name .. "'>"
+end
+
 --- Render a value using the sandbox repr protocol.
 function M.repr(I, v)
   local t = type(v)
@@ -1229,6 +1419,7 @@ function M.repr(I, v)
   end
   if t == "boolean" then return v and "True" or "False" end
   if t == "string" then return format.repr_string(v) end
+  if bigint.is_bigint(v) then return bigint.tostring(v) end
   local k = v.kind
   if k == "dictview" then
     local name = type_name(v)
@@ -1274,10 +1465,13 @@ function M.repr(I, v)
   if k == "none" then return "None" end
   if k == "ellipsis" then return "Ellipsis" end
   if k == "notimplemented" then return "NotImplemented" end
+  if k == "GenericAlias" or k == "UnionType" then return typeexpr.repr(I, v, M) end
   if k == "mappingproxy" then
-    return "mappingproxy(" .. M.repr(I, values.namespace_dict(v.cls)) .. ")"
+    return "mappingproxy(" .. M.repr(I, values.proxy_dict(v)) .. ")"
   end
   if k == "bytes" then return format.repr_bytes(v) end
+  if k == "bytearray" then return "bytearray(" .. format.repr_bytes(values.bytes(v.b)) .. ")" end
+  if k == "memoryview" then return "<memory at 0x" .. string.format("%x", values.obj_id(v)) .. ">" end
   if k == "range" then return format.repr_range(v) end
   if k == "set" then
     if v.size == 0 then return v.frozen and "frozenset()" or "set()" end
@@ -1290,23 +1484,36 @@ function M.repr(I, v)
   end
   if k == "complex" then return M.complex_repr(v) end
   if k == "instance" then
+    local method = class_lookup(v.cls, "__repr__")
+    local default = method == nil or method == values.OBJECT.ns.__repr__
     if values.issub(v.cls, values.BASE_EXC)
-        and class_lookup(v.cls, "__repr__") == nil then
+        and default then
       return v.cls.name .. "(" .. repr_join(I, values.exc_args(v)) .. ")"
     end
-    if class_lookup(v.cls, "__repr__") == nil and v.prim ~= nil then
+    if default and v.prim ~= nil then
       return M.repr(I, v.prim) -- builtin subclass uses builtin repr
     end
-    if class_lookup(v.cls, "__repr__") ~= nil then
+    if not default then
       local r = I:call_dunder(v, "__repr__", {})
       if type(r) ~= "string" then
         throw("TypeError", "__repr__ returned non-string")
       end
       return r
     end
-    return "<" .. v.cls.name .. " object>"
+    return M.object_repr(I, v)
   end
-  if k == "class" or k == "btype" then return "<class '" .. v.name .. "'>" end
+  if k == "class" or k == "btype" then
+    local metaclass = v.metaclass
+    if metaclass and metaclass.kind == "class" then
+      local method = I:lookup_type_attr(metaclass, "__repr__")
+      if method ~= nil then
+        local result = I:call(I:bind_attr(method, v, metaclass), {}, {})
+        if type(result) ~= "string" then throw("TypeError", "__repr__ returned non-string") end
+        return result
+      end
+    end
+    return M.type_repr(v)
+  end
   if k == "function" then return "<function " .. v.name .. ">" end
   if k == "boundmethod" then return "<bound method " .. M.callable_name(v.fn) .. ">" end
   if k == "module" or k == "nativemodule" then return "<module '" .. v.name .. "'>" end
@@ -1332,8 +1539,33 @@ end
 
 --- str(e) for an exception instance without a user __str__.
 function M.exc_str(I, inst)
-  if class_lookup(inst.cls, "__str__") ~= nil then return M.str(I, inst) end
+  local method = class_lookup(inst.cls, "__str__")
+  if method ~= nil and method ~= values.OBJECT.ns.__str__ then return M.str(I, inst) end
   local args = values.exc_args(inst)
+  if values.issub(inst.cls, values.EXC_CLASSES.BaseExceptionGroup) then
+    local count = #inst.d.exceptions.items
+    return inst.d.message .. " (" .. count .. " sub-exception" .. (count == 1 and "" or "s") .. ")"
+  end
+  if values.issub(inst.cls, values.EXC_CLASSES.SyntaxError) then
+    local message = inst.d.msg
+    if message == nil then message = NONE end
+    local text = M.str(I, message)
+    local filename = inst.d.filename
+    if filename ~= nil then filename = I:raw(filename) end
+    if type(filename) ~= "string" then filename = nil
+    else filename = filename:match("([^/]*)$") end
+    local lineno = inst.d.lineno
+    if not bigint.is_int(lineno) then lineno = nil
+    elseif bigint.cmp(lineno, math.mininteger) < 0 or bigint.cmp(lineno, math.maxinteger) > 0 then lineno = -1 end
+    if filename ~= nil and lineno ~= nil then return text .. " (" .. filename .. ", line " .. lineno .. ")" end
+    if filename ~= nil then return text .. " (" .. filename .. ")" end
+    if lineno ~= nil then return text .. " (line " .. lineno .. ")" end
+    return text
+  end
+  if values.issub(inst.cls, values.EXC_CLASSES.OSError) and inst.d.errno ~= nil
+      and inst.d.errno ~= NONE and inst.d.strerror ~= nil then
+    return "[Errno " .. tostring(inst.d.errno) .. "] " .. M.str(I, inst.d.strerror)
+  end
   if values.issub(inst.cls, values.EXC_CLASSES.KeyError) and #args == 1 then
     return M.repr(I, args[1])
   end
@@ -1371,10 +1603,17 @@ end
 --- Render a value using the sandbox string protocol.
 function M.str(I, v)
   if type(v) == "string" then return v end
+  if kindof(v) == "mappingproxy" then return M.str(I, values.proxy_dict(v)) end
   if is_inst(v) then
+    local str_method = class_lookup(v.cls, "__str__")
     if values.issub(v.cls, values.BASE_EXC)
-        and class_lookup(v.cls, "__str__") == nil then
+        and (str_method == nil or str_method == values.OBJECT.ns.__str__) then
       return M.exc_str(I, v)
+    end
+    if v.prim ~= nil and (str_method == nil or str_method == values.OBJECT.ns.__str__) then
+      if type(v.prim) == "string" then return v.prim end
+      if kindof(v.prim) == "bytes" then return M.str(I, v.prim) end
+      return M.repr(I, v)
     end
     for _, name in ipairs({ "__str__", "__repr__" }) do
       if class_lookup(v.cls, name) ~= nil then

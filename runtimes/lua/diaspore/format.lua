@@ -4,6 +4,7 @@
 -- correctly rounded with ties-to-even, exactly like CPython's dtoa).
 
 local values = require("diaspore.values")
+local integers = require("diaspore.bigint")
 
 local M = {}
 
@@ -62,6 +63,7 @@ end
 
 -- ---------------------------------------------------------------------------
 -- str / bytes reprs
+local unicode -- Load Unicode category tables only for non-ASCII representations.
 
 --- Quote a UTF-8 string using Python repr conventions.
 function M.repr_string(s)
@@ -84,7 +86,21 @@ function M.repr_string(s)
     elseif cp < 0x20 or cp == 0x7F then
       b[#b + 1] = string.format("\\x%02x", cp)
     else
-      b[#b + 1] = utf8.char(cp)
+      local character = utf8.char(cp)
+      if cp < 0x7F then
+        b[#b + 1] = character
+      else
+        unicode = unicode or require("diaspore.identifier")
+        if unicode.isprintable(character) then
+          b[#b + 1] = character
+        elseif cp <= 0xFF then
+          b[#b + 1] = string.format("\\x%02x", cp)
+        elseif cp <= 0xFFFF then
+          b[#b + 1] = string.format("\\u%04x", cp)
+        else
+          b[#b + 1] = string.format("\\U%08x", cp)
+        end
+      end
     end
   end
   b[#b + 1] = q
@@ -124,32 +140,82 @@ end
 --- Render a range constructor expression.
 function M.repr_range(r)
   if r.step == 1 then
-    return "range(" .. r.start .. ", " .. r.stop .. ")"
+    return "range(" .. integers.tostring(r.start) .. ", " .. integers.tostring(r.stop) .. ")"
   end
-  return "range(" .. r.start .. ", " .. r.stop .. ", " .. r.step .. ")"
+  return "range(" .. integers.tostring(r.start) .. ", " .. integers.tostring(r.stop) .. ", " .. integers.tostring(r.step) .. ")"
 end
 
 -- ---------------------------------------------------------------------------
 -- fixed / scientific / general formatting of |f| (af >= 0 or nan)
 
+local function exact_decimal(f)
+  if f == 0 then return "0", 0 end
+  local mantissa, exponent = math.frexp(f)
+  local coefficient = integers.from_float(mantissa * 2.0 ^ 53)
+  exponent = exponent - 53
+  if exponent >= 0 then
+    return integers.tostring(integers.mul(coefficient, integers.pow(2, exponent))), 0
+  end
+  return integers.tostring(integers.mul(coefficient, integers.pow(5, -exponent))), -exponent
+end
+
+local function rounded_digits(digits, keep)
+  if keep >= #digits then return digits .. string.rep("0", keep - #digits) end
+  if keep < 0 then return "0" end
+  local result = digits:sub(1, keep)
+  local next_digit = digits:byte(keep + 1) - 48
+  local odd = keep > 0 and (digits:byte(keep) - 48) % 2 == 1
+  if next_digit > 5 or next_digit == 5 and (odd or digits:sub(keep + 2):find("[1-9]")) then
+    local i = #result
+    while i > 0 and result:sub(i, i) == "9" do i = i - 1 end
+    if i == 0 then return "1" .. string.rep("0", #result) end
+    result = result:sub(1, i - 1) .. string.char(result:byte(i) + 1) .. string.rep("0", #result - i)
+  end
+  return result == "" and "0" or result
+end
+
+--- Format decimal floating-point digits without Lua's printf precision limit.
+function M.float_digits(f, precision, conversion, alternate)
+  if f ~= f then return "nan" end
+  if f == math.huge then return "inf" end
+  if precision <= 99 then
+    return string.format("%" .. (alternate and "#" or "") .. "." .. precision .. conversion, f)
+  end
+  local digits, scale = exact_decimal(f)
+  local exponent = #digits - scale - 1
+  if conversion == "f" then
+    local rounded = rounded_digits(digits, #digits - scale + precision)
+    if #rounded <= precision then rounded = string.rep("0", precision + 1 - #rounded) .. rounded end
+    return rounded:sub(1, #rounded - precision) .. "." .. rounded:sub(#rounded - precision + 1)
+  end
+  local significant = conversion == "e" and precision + 1 or precision
+  local rounded = rounded_digits(digits, significant)
+  if #rounded > significant then exponent = exponent + 1; rounded = rounded:sub(1, significant) end
+  if conversion == "e" or exponent < -4 or exponent >= significant then
+    local fraction = rounded:sub(2)
+    if conversion == "g" and not alternate then fraction = fraction:gsub("0+$", "") end
+    return rounded:sub(1, 1) .. ((fraction ~= "" or alternate) and "." .. fraction or "") .. "e" .. exp_string(exponent)
+  end
+  local result
+  if exponent < 0 then result = "0." .. string.rep("0", -exponent - 1) .. rounded
+  elseif exponent + 1 >= #rounded then result = rounded .. string.rep("0", exponent + 1 - #rounded) .. (alternate and "." or "")
+  else result = rounded:sub(1, exponent + 1) .. "." .. rounded:sub(exponent + 2) end
+  if not alternate and result:find(".", 1, true) then result = result:gsub("0+$", ""):gsub("%.$", "") end
+  return result
+end
+
 --- Fixed-point with exactly prec fraction digits (correct rounding, half-even).
 function M.fixed_str(af, prec)
   if af ~= af then return "nan" end
   if af == math.huge then return "inf" end
-  if prec > 99 then
-    values.throw("ValueError", "precision too large for diaspore-lua")
-  end
-  return string.format("%." .. prec .. "f", af)
+  return M.float_digits(af, prec, "f", false)
 end
 
 --- Scientific with prec digits after the point.
 function M.exp_str(af, prec)
   if af ~= af then return "nan" end
   if af == math.huge then return "inf" end
-  if prec > 99 then
-    values.throw("ValueError", "precision too large for diaspore-lua")
-  end
-  local s = string.format("%." .. prec .. "e", af)
+  local s = M.float_digits(af, prec, "e", false)
   -- normalize exponent to Python style (>= 2 digits; C already does this)
   local mant, exp = s:match("^(.-)e([%+%-]%d+)$")
   return mant .. "e" .. exp_string(tonumber(exp))
@@ -161,11 +227,8 @@ function M.g_str(af, prec)
   if af ~= af then return "nan" end
   if af == math.huge then return "inf" end
   if prec < 1 then prec = 1 end
-  if prec > 99 then
-    values.throw("ValueError", "precision too large for diaspore-lua")
-  end
   if af == 0.0 then return "0" end
-  local s = string.format("%." .. prec .. "g", af)
+  local s = M.float_digits(af, prec, "g", false)
   local mant, exp = s:match("^(.-)e([%+%-]%d+)$")
   if mant then return mant .. "e" .. exp_string(tonumber(exp)) end
   return s
@@ -188,20 +251,16 @@ function M.round_float_to_int(f)
   else
     r = (fl % 2 == 0) and fl or fl + 1
   end
-  local iv = math.tointeger(r)
-  if iv == nil then
-    values.throw("OverflowError", "diaspore-lua: integer overflow (int64 limit)")
-  end
-  if neg then return -iv end
-  return iv
+  return integers.from_float(neg and -r or r)
 end
 
 --- round(f, nd) with correct decimal rounding (ties to even). Returns float.
 function M.round_float_digits(f, nd)
   if f ~= f or f == math.huge or f == -math.huge then return f end
   if nd >= 0 then
-    if nd > 99 then return f end
-    return tonumber(string.format("%." .. nd .. "f", f)) + 0.0
+    if nd > 1074 then return f end
+    local result = tonumber(M.float_digits(math.abs(f), nd, "f", false)) + 0.0
+    return (f < 0 or f == 0 and 1.0 / f < 0) and -result or result
   end
   if f == 0.0 then return f end
   -- negative ndigits: round at 10^-nd via significant-digit formatting
@@ -209,8 +268,11 @@ function M.round_float_digits(f, nd)
   local e10 = tonumber(es:match("e([%+%-]%d+)$"))
   local sig = e10 + nd + 1
   if sig <= 0 then
-    if f < 0 or 1.0 / f < 0 then return -0.0 end
-    return 0.0
+    if sig == 0 and nd >= -308 then
+      local scale = 10.0 ^ -nd
+      if math.abs(f) > scale / 2 then return f < 0 and -scale or scale end
+    end
+    return f < 0 and -0.0 or 0.0
   end
   if sig > 17 then return f end
   return tonumber(string.format("%." .. (sig - 1) .. "e", f)) + 0.0
@@ -224,55 +286,17 @@ end
 -- ---------------------------------------------------------------------------
 -- integer digit strings (sign-magnitude, min-int safe)
 
-local MININT_STR = {
-  [2] = "1" .. string.rep("0", 63),
-  [8] = "1000000000000000000000",
-  [10] = "9223372036854775808",
-  [16] = "8000000000000000",
-}
 
 --- |n| rendered in base (2, 8, 10, 16 lower, 17 => 16 upper).
 function M.int_mag_str(n, base)
-  local upper = false
-  if base == 17 then
-    base = 16
-    upper = true
-  end
-  local s
-  if n == math.mininteger then
-    s = MININT_STR[base]
-  else
-    local mag = n < 0 and -n or n
-    if base == 10 then
-      s = tostring(mag)
-    elseif base == 16 then
-      s = string.format("%x", mag)
-    elseif base == 8 then
-      s = string.format("%o", mag)
-    else -- base 2
-      if mag == 0 then
-        s = "0"
-      else
-        local bits = {}
-        while mag > 0 do
-          bits[#bits + 1] = tostring(mag & 1)
-          mag = mag >> 1
-        end
-        local rev = {}
-        for i = #bits, 1, -1 do rev[#rev + 1] = bits[i] end
-        s = table.concat(rev)
-      end
-    end
-  end
-  if upper then s = s:upper() end
-  return s
+  local s = integers.tostring(n, base == 17 and 16 or base)
+  if s:sub(1, 1) == "-" then s = s:sub(2) end
+  return base == 17 and s:upper() or s
 end
 
 -- ---------------------------------------------------------------------------
 -- format-spec mini-language (spec section 10)
 
-local TYPE_CODES = { d = true, b = true, o = true, x = true, X = true,
-                     f = true, e = true, g = true, ["%"] = true, s = true }
 
 --- Parse the Python format-spec mini-language.
 function M.parse_fmt_spec(spec)
@@ -298,20 +322,20 @@ function M.parse_fmt_spec(spec)
     fs.sign = rs[i]
     i = i + 1
   end
+  if i <= n and rs[i] == "z" then fs.coerce_zero = true; i = i + 1 end
+  if i <= n and rs[i] == "#" then fs.alternate = true; i = i + 1 end
   if i <= n and rs[i] == "0" then
     fs.zero = true
-    if fs.align == "" then
-      fs.align = "="
-      fs.fill = "0"
-    end
+    if fs.align == "" then fs.align = "="; fs.implicit_align = true end
+    if not (n >= 2 and is_align(rs[2])) then fs.fill = "0" end
     i = i + 1
   end
   while i <= n and rs[i] >= "0" and rs[i] <= "9" do
     fs.width = fs.width * 10 + (rs[i]:byte() - 48)
     i = i + 1
   end
-  if i <= n and rs[i] == "," then
-    fs.comma = true
+  if i <= n and (rs[i] == "," or rs[i] == "_") then
+    fs.comma = rs[i]
     i = i + 1
   end
   if i <= n and rs[i] == "." then
@@ -332,9 +356,7 @@ function M.parse_fmt_spec(spec)
   if i <= n then
     values.throw("ValueError", "Invalid format specifier " .. M.repr_string(spec))
   end
-  if fs.typ ~= "" and not TYPE_CODES[fs.typ] then
-    values.throw("ValueError", "Unknown format code '" .. fs.typ .. "'")
-  end
+  fs.original = spec
   return fs
 end
 
@@ -365,20 +387,23 @@ local function pad_number(body, neg, fs)
   if align == "=" then
     local n = fs.width - #sign - values.str_len(body)
     if n < 0 then n = 0 end
-    return sign .. string.rep(fs.fill, n) .. body
+    local prefix = body:match("^0[bBoOxX]") or ""
+    return sign .. prefix .. string.rep(fs.fill, n) .. body:sub(#prefix + 1)
   end
   local s = sign .. body
   return pad(s, values.str_len(s), align, fs.fill, fs.width)
 end
 
-local function group_digits(s)
-  if #s <= 3 then return s end
+local function group_digits(s, separator, size)
+  size = size or 3
+  separator = separator or ","
+  if #s <= size then return s end
   local b = {}
-  local lead = #s % 3
+  local lead = #s % size
   if lead > 0 then b[#b + 1] = s:sub(1, lead) end
-  for i = lead + 1, #s, 3 do
-    if #b > 0 then b[#b + 1] = "," end
-    b[#b + 1] = s:sub(i, i + 2)
+  for i = lead + 1, #s, size do
+    if #b > 0 then b[#b + 1] = separator end
+    b[#b + 1] = s:sub(i, i + size - 1)
   end
   return table.concat(b)
 end
@@ -386,19 +411,23 @@ end
 -- Under zero padding the padding zeros take part in the thousands grouping,
 -- CPython-style (format(-42, "08,d") == "-000,042").
 local function group_with_zero_fill(digits, rest, neg, fs)
-  local grouped = group_digits(digits)
+  local grouped = group_digits(digits, fs.comma, fs.group_size)
   if fs.align == "=" and fs.fill == "0" then
     local sign_len = (neg or fs.sign == "+" or fs.sign == " ") and 1 or 0
     local room = fs.width - sign_len - values.str_len(rest)
     while #grouped < room do
       digits = "0" .. digits
-      grouped = group_digits(digits)
+      grouped = group_digits(digits, fs.comma, fs.group_size)
     end
   end
   return grouped .. rest
 end
 
 local function format_str_spec(s, fs)
+  if fs.implicit_align then fs.align = "<" end
+  if fs.alternate then values.throw("ValueError", "Alternate form (#) not allowed in string format specifier") end
+  if fs.coerce_zero then values.throw("ValueError", "Negative zero coercion (z) not allowed in string format specifier") end
+  if fs.comma then values.throw("ValueError", "Cannot specify '" .. fs.comma .. "' with 's'.") end
   if fs.typ ~= "" and fs.typ ~= "s" then
     values.throw("ValueError",
       "Unknown format code '" .. fs.typ .. "' for object of type 'str'")
@@ -424,28 +453,33 @@ end
 local format_float_spec -- forward
 
 local function format_int_spec(n, fs)
-  if fs.typ == "f" or fs.typ == "e" or fs.typ == "g" or fs.typ == "%" then
-    return format_float_spec(n + 0.0, fs)
-  end
-  if fs.has_prec then
-    values.throw("ValueError", "Precision not allowed in integer format specifier")
-  end
-  local neg = n < 0
-  local body
   local t = fs.typ
-  if t == "" or t == "d" then
-    body = M.int_mag_str(n, 10)
-    if fs.comma then body = group_with_zero_fill(body, "", neg, fs) end
-  elseif t == "b" then
-    body = M.int_mag_str(n, 2)
-  elseif t == "o" then
-    body = M.int_mag_str(n, 8)
-  elseif t == "x" then
-    body = M.int_mag_str(n, 16)
-  else -- X
-    body = M.int_mag_str(n, 17)
+  if t:match("^[fFeEgG%%]$") then return format_float_spec(integers.to_float(n), fs) end
+  if fs.coerce_zero then values.throw("ValueError", "Negative zero coercion (z) not allowed in integer format specifier") end
+  if fs.has_prec then values.throw("ValueError", "Precision not allowed in integer format specifier") end
+  if t == "c" then
+    if fs.sign ~= "" then values.throw("ValueError", "Sign not allowed with integer format specifier 'c'") end
+    if fs.alternate then values.throw("ValueError", "Alternate form (#) not allowed with integer format specifier 'c'") end
+    if integers.cmp(n, 0) < 0 or integers.cmp(n, 0x10ffff) > 0 then values.throw("OverflowError", "%c arg not in range(0x110000)") end
+    return pad_number(utf8.char(n), false, fs)
   end
-  return pad_number(body, neg, fs)
+  if not (t == "" or t == "d" or t == "n" or t == "b" or t == "o" or t == "x" or t == "X") then
+    values.throw("ValueError", "Unknown format code '" .. t .. "' for object of type 'int'")
+  end
+  local neg = integers.cmp(n, 0) < 0
+  local base = t == "b" and 2 or t == "o" and 8 or t == "x" and 16 or t == "X" and 17 or 10
+  if fs.comma and (t == "n" or fs.comma == "," and base ~= 10) then
+    values.throw("ValueError", "Cannot specify '" .. fs.comma .. "' with '" .. t .. "'.")
+  end
+  local body = M.int_mag_str(n, base)
+  local prefix = fs.alternate and (t == "b" and "0b" or t == "o" and "0o" or t == "x" and "0x" or t == "X" and "0X") or ""
+  if fs.comma then
+    fs.group_size = base == 10 and 3 or 4
+    fs.width = fs.width - #prefix
+    body = group_with_zero_fill(body, "", neg, fs)
+    fs.width = fs.width + #prefix
+  end
+  return pad_number(prefix .. body, neg, fs)
 end
 
 format_float_spec = function(f, fs)
@@ -453,32 +487,34 @@ format_float_spec = function(f, fs)
   local av = math.abs(f)
   local prec = fs.has_prec and fs.prec or 6
   local body
-  local t = fs.typ
-  if t == "f" then
-    body = M.fixed_str(av, prec)
-  elseif t == "e" then
-    body = M.exp_str(av, prec)
-  elseif t == "%" then
-    if av == math.huge or av ~= av then
-      body = M.fixed_str(av, prec)
-    else
-      body = M.fixed_str(av * 100, prec) .. "%"
-    end
-  elseif t == "g" then
-    body = M.g_str(av, prec)
+  local t = fs.typ:lower()
+  if t == "f" or t == "e" or t == "g" or t == "n" or t == "%" then
+    if t == "n" and fs.comma then values.throw("ValueError", "Cannot specify '" .. fs.comma .. "' with 'n'.") end
+    local conversion = t == "%" and "f" or t == "n" and "g" or t
+    body = M.float_digits(t == "%" and av * 100 or av, prec, conversion, fs.alternate)
+    if t == "%" then body = body .. "%" end
   elseif t == "" then
-    if fs.has_prec then
-      body = M.g_str(av, prec)
+    if fs.has_prec and av == av and av ~= math.huge then
+      local significant = math.max(1, prec)
+      local scientific = M.float_digits(av, significant - 1, "e", fs.alternate)
+      local exponent = tonumber(scientific:match("e([%+%-]%d+)$"))
+      if exponent < -4 or exponent >= significant - 1 then
+        body = scientific
+        if not fs.alternate then body = body:gsub("(%..-)0+e", "%1e"):gsub("%.e", "e") end
+      else
+        body = M.float_digits(av, math.max(0, significant - exponent - 1), "f", fs.alternate)
+        if not fs.alternate then body = body:gsub("(%..-)0+$", "%1"):gsub("%.$", ".0") end
+        if not body:find(".", 1, true) then body = body .. ".0" end
+      end
     else
-      local s = M.py_float_str(av)
-      if s:sub(1, 1) == "-" then s = s:sub(2) end
-      body = s
+      body = M.py_float_str(av)
+      if fs.alternate and not body:find(".", 1, true) then body = body:gsub("e", ".e") end
     end
   else
-    values.throw("ValueError",
-      "Unknown format code '" .. t .. "' for object of type 'float'")
+    values.throw("ValueError", "Unknown format code '" .. fs.typ .. "' for object of type 'float'")
   end
-  if fs.comma then
+  if fs.coerce_zero and tonumber((body:gsub("%%$", ""))) == 0 then neg = false end
+  if fs.comma and body:match("^%d") then
     local dot = body:find("[.e%%]")
     if dot then
       body = group_with_zero_fill(body:sub(1, dot - 1), body:sub(dot), neg, fs)
@@ -486,13 +522,36 @@ format_float_spec = function(f, fs)
       body = group_with_zero_fill(body, "", neg, fs)
     end
   end
+  if fs.typ:match("^[EFG]$") then body = body:upper() end
   return pad_number(body, neg, fs)
 end
 
---- format(v, spec) - v must already be int/float/bool/str here; the interp
--- routes other values through str() first (I is the interp, for I:str).
+--- Format a value using its Python format protocol.
 function M.format_value(I, v, spec)
   local t = type(v)
+  if spec == "" then
+    if t == "string" then return v end
+    if t == "number" then
+      if math.type(v) == "integer" then return tostring(v) end
+      return M.py_float_str(v)
+    end
+    if t == "boolean" then return v and "True" or "False" end
+  end
+  if t == "table" and v.kind == "instance" then
+    local method = values.class_lookup(v.cls, "__format__")
+    if method ~= nil and not (v.prim ~= nil and method == values.OBJECT.ns.__format__) then
+      local result = I:call_dunder(v, "__format__", { spec })
+      if type(result) ~= "string" then values.throw("TypeError", "__format__ must return a str, not " .. values.type_name(result)) end
+      return result
+    end
+    if v.prim ~= nil then return M.format_value(I, v.prim, spec) end
+    if spec ~= "" then values.throw("TypeError", "unsupported format string passed to " .. v.cls.name .. ".__format__") end
+    return I:str(v)
+  end
+  if integers.is_bigint(v) then
+    if spec == "" then return integers.tostring(v) end
+    return format_int_spec(v, M.parse_fmt_spec(spec))
+  end
   if t ~= "number" and t ~= "boolean" and t ~= "string" then
     local k = v.kind
     if not (k == "bytes" or k == "none" or k == "list" or k == "tuple"
@@ -503,7 +562,7 @@ function M.format_value(I, v, spec)
   end
   if spec == "" then return I:str(v) end
   local fs = M.parse_fmt_spec(spec)
-  if t == "boolean" and fs.typ ~= "s" then
+  if t == "boolean" then
     v = v and 1 or 0
     t = "number"
   end
@@ -512,10 +571,6 @@ function M.format_value(I, v, spec)
     return format_float_spec(v, fs)
   end
   if t == "string" then return format_str_spec(v, fs) end
-  if t == "boolean" then return format_str_spec(v and "True" or "False", fs) end
-  if fs.typ == "s" or fs.typ == "" then
-    return format_str_spec(I:str(v), fs)
-  end
   values.throw("TypeError",
     "unsupported format string passed to " .. values.type_name(v) .. ".__format__")
 end

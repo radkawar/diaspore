@@ -1,13 +1,16 @@
 -- Diaspore VM (Lua 5.4 host) - core value model, exception hierarchy, hashing.
 --
 -- Diaspore values map to these Lua types:
---   int   -> Lua integer (math.type "integer")   float -> Lua float
+--   int   -> Lua integer or tagged bigint        float -> Lua float
 --   bool  -> Lua boolean                         str   -> Lua string (UTF-8)
 --   everything else -> a table with a `kind` field:
 --   none ellipsis bytes list tuple dict set range slice class instance
 --   function boundmethod staticmethod classmethod superobj supermarker
 --   module nativemodule builtin btype nativeobject file iter
 -- No diaspore value is ever Lua nil (absence is nil; JSON null in raw IR is NULL).
+
+local bigint = require("diaspore.bigint")
+local pcall = require("diaspore.protected").call
 
 local M = {}
 
@@ -52,9 +55,11 @@ function M.list(items) return { kind = "list", items = items or {} } end
 --- Wrap an array as a sandbox tuple.
 function M.tuple(items) return { kind = "tuple", items = items or {} } end
 --- Wrap a native callable as a sandbox builtin.
-function M.builtin(name, fn) return { kind = "builtin", name = name, fn = fn } end
+function M.builtin(name, fn, descriptor)
+  return { kind = "builtin", name = name, fn = fn, descriptor = descriptor }
+end
 --- Create a builtin type with its constructor.
-function M.btype(name, ctor) return { kind = "btype", name = name, ctor = ctor } end
+function M.btype(name, ctor) return { kind = "btype", name = name, ctor = ctor, ns = {} } end
 
 --- Create a sandbox range.
 function M.range(start, stop, step)
@@ -63,12 +68,12 @@ end
 
 --- Return the number of elements in a range.
 function M.range_len(r)
-  if r.step > 0 then
-    if r.stop <= r.start then return 0 end
-    return (r.stop - r.start + r.step - 1) // r.step
+  if bigint.cmp(r.step, 0) > 0 then
+    if bigint.cmp(r.stop, r.start) <= 0 then return 0 end
+    return bigint.add(bigint.floordiv(bigint.sub(bigint.sub(r.stop, r.start), 1), r.step), 1)
   end
-  if r.stop >= r.start then return 0 end
-  return (r.start - r.stop - r.step - 1) // -r.step
+  if bigint.cmp(r.stop, r.start) >= 0 then return 0 end
+  return bigint.add(bigint.floordiv(bigint.sub(bigint.sub(r.start, r.stop), 1), bigint.neg(r.step)), 1)
 end
 
 -- ---------------------------------------------------------------------------
@@ -91,7 +96,7 @@ function M.is_trap(e) return type(e) == "table" and e.tag == "trap" end
 -- ---------------------------------------------------------------------------
 -- numeric helpers
 
---- int-kind (int or bool) to Lua integer; nil if not int-kind.
+--- Return an integer value for int-kind inputs, or nil.
 function M.as_index(v)
   local t = type(v)
   if t == "number" then
@@ -99,26 +104,43 @@ function M.as_index(v)
     return nil
   end
   if t == "boolean" then return v and 1 or 0 end
+  if bigint.is_bigint(v) then return v end
   return nil
 end
 
 --- Test whether a value is an integer or boolean.
 function M.is_int_kind(v)
-  return type(v) == "boolean" or math.type(v) == "integer"
+  return type(v) == "boolean" or bigint.is_int(v)
+end
+
+--- Require an integer to fit a host-sized index.
+function M.to_size(n, message)
+  if bigint.is_bigint(n) then
+    M.throw("OverflowError", message or "Python int too large to convert to C ssize_t")
+  end
+  return n
+end
+
+--- Clamp an integer without converting or rounding arbitrary precision values.
+function M.clamp_index(n, low, high)
+  if bigint.cmp(n, low) < 0 then return low end
+  if bigint.cmp(n, high) > 0 then return high end
+  return n
 end
 
 --- Convert a numeric value to a float, or return nil.
 function M.as_float(v)
   local t = type(v)
-  if t == "number" then return v + 0.0 end
+  if t == "number" then return v * 1.0 end
   if t == "boolean" then return v and 1.0 or 0.0 end
+  if bigint.is_bigint(v) then return bigint.to_float(v) end
   return nil
 end
 
 --- Test whether a value is numeric, including booleans.
 function M.is_number(v)
   local t = type(v)
-  return t == "number" or t == "boolean"
+  return t == "number" or t == "boolean" or bigint.is_bigint(v)
 end
 
 -- ---------------------------------------------------------------------------
@@ -133,6 +155,7 @@ function M.type_name(v)
   if t == "boolean" then return "bool" end
   if t == "string" then return "str" end
   local k = v.kind
+  if bigint.is_bigint(v) then return "int" end
   if k == "none" then return "NoneType" end
   if k == "notimplemented" then return "NotImplementedType" end
   if k == "set" and v.frozen then return "frozenset" end
@@ -140,8 +163,11 @@ function M.type_name(v)
   if k == "instance" then return v.cls.name end
   if k == "class" or k == "btype" then return "type" end
   if k == "function" then return "function" end
-  if k == "boundmethod" then return "method" end
-  if k == "builtin" then return "builtin_function_or_method" end
+  if k == "boundmethod" then
+    if v.fn.descriptor == "wrapper_descriptor" then return "method-wrapper" end
+    return "method"
+  end
+  if k == "builtin" then return v.descriptor or "builtin_function_or_method" end
   if k == "module" or k == "nativemodule" then return "module" end
   if k == "nativeobject" then return v.nkind end
   if k == "staticmethod" then return "staticmethod" end
@@ -149,6 +175,7 @@ function M.type_name(v)
   if k == "superobj" or k == "supermarker" then return "super" end
   if k == "iter" then return v.iname end
   if k == "property" then return "property" end
+  if k == "descriptor" then return v.descriptor end
   return k -- bytes list tuple dict set range slice ellipsis file complex
 end
 
@@ -174,13 +201,27 @@ function M.hash_key(v)
     if v ~= v then return "fnan" end
     local iv = math.tointeger(v)
     if iv then return "i" .. iv end
+    if v ~= math.huge and v ~= -math.huge and v == math.floor(v) then
+      return "i" .. bigint.tostring(bigint.from_float(v))
+    end
     return "f" .. string.pack("d", v)
   end
   if t == "boolean" then return v and "i1" or "i0" end
   if t == "string" then return "s" .. v end
   local k = v.kind
+  if bigint.is_bigint(v) then return "i" .. bigint.tostring(v) end
   if k == "instance" then return "h" .. M.hash_value(v) end
   if k == "bytes" then return "b" .. v.b end
+  if k == "memoryview" then
+    local buffer = require("diaspore.buffer")
+    buffer.check(v)
+    if not v.readonly then M.throw("ValueError", "cannot hash writable memoryview object") end
+    if v.format ~= "B" and v.format ~= "b" and v.format ~= "c" then
+      M.throw("ValueError", "memoryview: hashing is restricted to formats 'B', 'b' or 'c'")
+    end
+    M.hash_key(v.base)
+    return "b" .. buffer.data(v)
+  end
   if k == "none" then return "N" end
   if k == "ellipsis" then return "E" end
   if k == "tuple" then
@@ -200,7 +241,9 @@ function M.hash_key(v)
     return table.concat(parts)
   end
   if k == "range" then
-    return "r" .. v.start .. "," .. v.stop .. "," .. v.step
+    local n = M.range_len(v)
+    return "r" .. M.hash_key(M.tuple({ n, n == 0 and M.NONE or v.start,
+      (n == 0 or n == 1) and M.NONE or v.step }))
   end
   if k == "complex" then
     -- imag==0 unifies with the real number (CPython: hash(1+0j)==hash(1))
@@ -226,9 +269,12 @@ function M.hash_key(v)
     return "S" .. M.hash_key(v.lower) .. "|" .. M.hash_key(v.upper)
       .. "|" .. M.hash_key(v.step)
   end
-  if k == "list" or k == "dict" or k == "set" or k == "mappingproxy"
+  if k == "list" or k == "dict" or k == "set" or k == "mappingproxy" or k == "bytearray"
       or (k == "dictview" and v.view ~= "values") then
     M.throw_val(M.make_exc("TypeError", "unhashable type: '" .. M.type_name(v) .. "'"))
+  end
+  if k == "GenericAlias" or k == "UnionType" then
+    return "h" .. require("diaspore.typeexpr").hash(v)
   end
   return "p" .. M.obj_id(v)
 end
@@ -237,6 +283,28 @@ local function fnv_hash(s)
   local h = 0xcbf29ce484222325
   for i = 1, #s do h = (h ~ s:byte(i)) * 0x100000001b3 end
   return h & 0x7fffffffffffffff
+end
+
+local function float_hash(v)
+  if v == math.huge then return 314159 end
+  if v == -math.huge then return -314159 end
+  if v ~= v then return fnv_hash("fnan") end
+  local bits = string.unpack("<I8", string.pack("<d", v))
+  local exponent = (bits >> 52) & 0x7ff
+  local mantissa = bits & 0xfffffffffffff
+  local shift
+  if exponent == 0 then
+    shift = -1074
+  else
+    mantissa = mantissa | 0x10000000000000
+    shift = exponent - 1075
+  end
+  shift = shift % 61
+  local modulus = 0x1fffffffffffffff
+  local hash = ((mantissa << shift) & modulus) | (mantissa >> (61 - shift))
+  if hash == modulus then hash = 0 end
+  if bits < 0 then hash = -hash end
+  return hash == -1 and -2 or hash
 end
 
 --- Return a numeric hash from a key already hashed by the value protocol.
@@ -250,10 +318,13 @@ function M.hash_code(v, encoded)
     hash = hash ~ #v.items
     return hash == -1 and -2 or hash
   end
-  if type(v) == "table" and v.kind == "complex" and v.im == 0.0 then v = v.re end
+  if type(v) == "table" and v.kind == "complex" then
+    local hash = float_hash(v.re) + 1000003 * float_hash(v.im)
+    return hash == -1 and -2 or hash
+  end
   local n = M.as_index(v)
-  if n == nil and math.type(v) == "float" then n = math.tointeger(v) end
-  if n ~= nil then return n == -1 and -2 or n end
+  if n ~= nil then return bigint.hash(n) end
+  if math.type(v) == "float" then return float_hash(v) end
   return fnv_hash(encoded)
 end
 
@@ -287,6 +358,7 @@ function M.hash_value(v)
       n = M.as_index(result.prim)
     end
     if n == nil then M.throw("TypeError", "__hash__ method should return an integer") end
+    if bigint.is_bigint(n) then return bigint.hash(n) end
     return n == -1 and -2 or n
   end
   return M.hash_code(v, M.hash_key(v))
@@ -368,6 +440,11 @@ function M.namespace_dict(cls)
   return d
 end
 
+--- Return the dictionary exposed by a read-only namespace proxy.
+function M.proxy_dict(proxy)
+  return proxy.mapping or M.namespace_dict(proxy.cls)
+end
+
 --- Create a live dictionary keys, values, or items view.
 function M.dict_view(source, view)
   return { kind = "dictview", source = source, view = view }
@@ -375,7 +452,7 @@ end
 
 --- Return the dictionary currently exposed by a view.
 function M.view_dict(view)
-  if view.source.kind == "mappingproxy" then return M.namespace_dict(view.source.cls) end
+  if view.source.kind == "mappingproxy" then return M.proxy_dict(view.source) end
   return view.source
 end
 
@@ -502,15 +579,26 @@ function M.set_has_hk(s, hk, val)
   return entry ~= nil
 end
 
---- Remove a set element and report whether it existed.
-function M.set_discard(s, val)
-  local hk, e = find_slot(s, M.hash_key(val), val)
+--- Remove a set element, optionally reusing its previously computed hash key.
+function M.set_discard(s, val, hashed)
+  local hk, e = find_slot(s, hashed or M.hash_key(val), val)
   if not e then return false end
   s.map[hk] = nil
   s.size = s.size - 1
   s.dead = s.dead + 1
   if s.dead > 8 and s.dead * 2 > #s.keys then compact(s) end
   return true
+end
+
+--- Remove an arbitrary set element without hashing it again.
+function M.set_pop(s)
+  local slot, entry = next(s.map)
+  if entry == nil then M.throw("KeyError", "pop from an empty set") end
+  s.map[slot] = nil
+  s.size = s.size - 1
+  s.dead = s.dead + 1
+  if s.dead > 8 and s.dead * 2 > #s.keys then compact(s) end
+  return entry.v
 end
 
 --- Array of live elements in insertion order.
@@ -646,6 +734,15 @@ function M.new_class(name, bases, ns, prim)
   local cls = { kind = "class", name = name, bases = diaspore_bases,
     declared_bases = bases, ns = ns, prim = prim }
   cls.mro = c3_mro(cls)
+  if prim ~= nil then
+    local present = false
+    for _, base in ipairs(cls.mro) do if base == prim then present = true end end
+    if not present then
+      local position = #cls.mro + 1
+      for i, base in ipairs(cls.mro) do if base == OBJECT then position = i; break end end
+      table.insert(cls.mro, position, prim)
+    end
+  end
   if OBJECT ~= nil then
     local found = false
     for _, c in ipairs(cls.mro) do
@@ -671,16 +768,29 @@ end
 
 --- Test whether a class inherits from another class.
 function M.issub(cls, other)
-  local mro = cls.mro
+  local mro = cls.mro or { cls }
   for i = 1, #mro do
     if mro[i] == other then return true end
   end
   return false
 end
 
---- Create an instance with an empty attribute dictionary.
+local SYNTAX_FIELDS = { "msg", "filename", "lineno", "offset", "text",
+  "end_lineno", "end_offset", "print_file_and_line" }
+
+--- Create an instance with the defaults required by its native base layout.
 function M.new_instance(cls)
-  return { kind = "instance", cls = cls, d = {} }
+  local d = {}
+  if M.BASE_EXC ~= nil and M.issub(cls, M.BASE_EXC) then
+    d.args = M.tuple({})
+    d.__traceback__, d.__cause__, d.__context__ = M.NONE, M.NONE, M.NONE
+    d.__suppress_context__ = false
+    if M.issub(cls, M.EXC_CLASSES.SyntaxError) then
+      for _, name in ipairs(SYNTAX_FIELDS) do d[name] = M.NONE end
+    end
+    if M.issub(cls, M.EXC_CLASSES.SystemExit) then d.code = M.NONE end
+  end
+  return { kind = "instance", cls = cls, d = d }
 end
 
 -- ---------------------------------------------------------------------------
@@ -698,6 +808,7 @@ local EXC_TREE = {
   { "OverflowError", "ArithmeticError" },
   { "AssertionError", "Exception" },
   { "AttributeError", "Exception" },
+  { "BufferError", "Exception" },
   { "EOFError", "Exception" },
   { "ImportError", "Exception" },
   { "ModuleNotFoundError", "ImportError" },
@@ -726,6 +837,7 @@ local EXC_TREE = {
   { "UnicodeError", "ValueError" },
   { "UnicodeDecodeError", "UnicodeError" },
   { "UnicodeEncodeError", "UnicodeError" },
+  { "UnicodeTranslateError", "UnicodeError" },
   { "BlockingIOError", "OSError" },
   { "ChildProcessError", "OSError" },
   { "ConnectionError", "OSError" },
@@ -740,6 +852,18 @@ local EXC_TREE = {
   { "NotADirectoryError", "OSError" },
   { "ProcessLookupError", "OSError" },
   { "TimeoutError", "OSError" },
+  { "Warning", "Exception" },
+  { "UserWarning", "Warning" },
+  { "DeprecationWarning", "Warning" },
+  { "PendingDeprecationWarning", "Warning" },
+  { "SyntaxWarning", "Warning" },
+  { "RuntimeWarning", "Warning" },
+  { "FutureWarning", "Warning" },
+  { "ImportWarning", "Warning" },
+  { "UnicodeWarning", "Warning" },
+  { "BytesWarning", "Warning" },
+  { "ResourceWarning", "Warning" },
+  { "EncodingWarning", "Warning" },
 }
 
 OBJECT = M.new_class("object", {}, {})
@@ -766,10 +890,104 @@ M.EXC_CLASSES.BaseException.ns.__init__ = M.builtin("__init__", function(_I, arg
   local rest = {}
   for i = 2, #args do rest[i - 1] = args[i] end
   self.d.args = M.tuple(rest)
+  if M.issub(self.cls, M.EXC_CLASSES.UnicodeDecodeError)
+      or M.issub(self.cls, M.EXC_CLASSES.UnicodeEncodeError) then
+    if #rest ~= 5 then M.throw("TypeError", self.cls.name .. " requires five arguments") end
+    self.d.encoding, self.d.object, self.d.start, self.d["end"], self.d.reason = table.unpack(rest)
+  elseif M.issub(self.cls, M.EXC_CLASSES.UnicodeTranslateError) then
+    if #rest ~= 4 then M.throw("TypeError", "UnicodeTranslateError requires four arguments") end
+    self.d.object, self.d.start, self.d["end"], self.d.reason = table.unpack(rest)
+  end
   return M.NONE
 end)
 
+M.EXC_CLASSES.SyntaxError.ns.__init__ = M.builtin("__init__", function(I, args, kw)
+  local self = args[1]
+  if self == nil then M.throw("TypeError", "descriptor '__init__' of 'SyntaxError' object needs an argument") end
+  if type(self) ~= "table" or self.kind ~= "instance" or not M.issub(self.cls, M.EXC_CLASSES.SyntaxError) then
+    M.throw("TypeError", "descriptor '__init__' requires a 'SyntaxError' object but received a '" .. M.type_name(self) .. "'")
+  end
+  if #kw > 0 then M.throw("TypeError", M.type_name(args[1]) .. "() takes no keyword arguments") end
+  M.EXC_CLASSES.BaseException.ns.__init__.fn(I, args, kw)
+  if #args >= 2 then self.d.msg = args[2] end
+  if #args == 3 then
+    local details = require("diaspore.iter").iter_to_array(I, args[3])
+    self.d.end_lineno, self.d.end_offset = M.NONE, M.NONE
+    if #details < 4 then M.throw("TypeError", "function takes at least 4 arguments (" .. #details .. " given)") end
+    if #details > 6 then M.throw("TypeError", "function takes at most 6 arguments (" .. #details .. " given)") end
+    self.d.filename, self.d.lineno, self.d.offset, self.d.text = details[1], details[2], details[3], details[4]
+    if #details >= 5 then self.d.end_lineno = details[5] end
+    if #details == 5 then M.throw("TypeError", "end_offset must be provided when end_lineno is provided") end
+    if #details == 6 then self.d.end_offset = details[6] end
+  end
+  return M.NONE
+end, "wrapper_descriptor")
+
+local function init_system_exit_code(self)
+  local args = self.d.args.items
+  if #args == 1 then self.d.code = args[1]
+  elseif #args > 1 then self.d.code = self.d.args end
+end
+
+M.EXC_CLASSES.SystemExit.ns.__init__ = M.builtin("__init__", function(I, args, kw)
+  local self = args[1]
+  if self == nil then M.throw("TypeError", "descriptor '__init__' of 'SystemExit' object needs an argument") end
+  if type(self) ~= "table" or self.kind ~= "instance" or not M.issub(self.cls, M.EXC_CLASSES.SystemExit) then
+    M.throw("TypeError", "descriptor '__init__' requires a 'SystemExit' object but received a '" .. M.type_name(self) .. "'")
+  end
+  if #kw > 0 then M.throw("TypeError", M.type_name(self) .. "() takes no keyword arguments") end
+  M.EXC_CLASSES.BaseException.ns.__init__.fn(I, args, kw)
+  init_system_exit_code(self)
+  return M.NONE
+end, "wrapper_descriptor")
+
 M.BASE_EXC = M.EXC_CLASSES.BaseException
+
+local function exception_method_args(name, args, kw)
+  local self = args[1]
+  if self == nil then
+    M.throw("TypeError", "descriptor '" .. name .. "' of 'BaseException' object needs an argument")
+  end
+  if type(self) ~= "table" or self.kind ~= "instance" or not M.issub(self.cls, M.BASE_EXC) then
+    M.throw("TypeError", "descriptor '" .. name .. "' for 'BaseException' objects doesn't apply to a '"
+      .. M.type_name(self) .. "' object")
+  end
+  if #kw > 0 then M.throw("TypeError", "BaseException." .. name .. "() takes no keyword arguments") end
+  if #args ~= 2 then
+    M.throw("TypeError", "BaseException." .. name .. "() takes exactly one argument (" .. (#args - 1) .. " given)")
+  end
+  return self, args[2]
+end
+
+M.BASE_EXC.ns.add_note = M.builtin("add_note", function(I, args, kw)
+  local self, note = exception_method_args("add_note", args, kw)
+  if type(I:raw(note)) ~= "string" then
+    M.throw("TypeError", "note must be a str, not '" .. M.type_name(note) .. "'")
+  end
+  local saved = #I.stack
+  local ok, notes = pcall(I.get_attr, I, self, "__notes__")
+  if not ok then
+    if not M.is_exc(notes) or not M.exc_isa(notes.value, "AttributeError") then error(notes, 0) end
+    I:trim(saved)
+    notes = M.list({})
+    I:set_attr(self, "__notes__", notes)
+  end
+  local raw = I:raw(notes)
+  if type(raw) ~= "table" or raw.kind ~= "list" then
+    M.throw("TypeError", "Cannot add note: __notes__ is not a list")
+  end
+  raw.items[#raw.items + 1] = note
+  return M.NONE
+end, "method_descriptor")
+
+M.BASE_EXC.ns.with_traceback = M.builtin("with_traceback", function(_I, args, kw)
+  local self, tb = exception_method_args("with_traceback", args, kw)
+  if tb ~= M.NONE and not (type(tb) == "table" and tb.kind == "traceback") then
+    M.throw("TypeError", "__traceback__ must be a traceback or None")
+  end
+  self.d.__traceback__ = tb
+  return self
+end, "method_descriptor")
 
 --- Build an ExceptionGroup / BaseExceptionGroup instance from a message + list.
 function M.make_group(message, excs, base)
@@ -827,6 +1045,7 @@ function M.make_exc(name, ...)
   local cls = M.EXC_CLASSES[name] or M.EXC_CLASSES.RuntimeError
   local inst = M.new_instance(cls)
   inst.d.args = M.tuple({ ... })
+  if M.issub(cls, M.EXC_CLASSES.SystemExit) then init_system_exit_code(inst) end
   return inst
 end
 

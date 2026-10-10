@@ -21,16 +21,55 @@ document is ambiguous). Round-trip conformance: `tests/test_dspb.py`.
 ## Layout
 
 ```
-magic     6 bytes  "DSPB01"
-strtab    varint count, then per string: varint byte-length + UTF-8 bytes
+magic     6 bytes  "DSPB01" (standalone) or "DSPB02" (linked)
+strtab    varint count, then per string: varint byte-length + UTF-8/surrogatepass bytes
 semver    varint   (1 - same value as JSON's "diaspore" field)
 main      str-ref
+stdlib    str-ref  (DSPB02 only; required)
 modules   varint count, then per module:
             name str-ref, file str-ref,
             src-flag byte (0|1), if 1: str-list (varint count + str-refs)
             body node-list
 node-list varint count + that many nodes
 ```
+
+`DSPB01` represents a standalone bundle: the decoded model MUST omit
+`stdlib`, and the encoding is unchanged from the standalone format.
+`DSPB02` represents a linked bundle: the decoded model MUST include the
+`stdlib` string referenced immediately after `main`, before the module count.
+There is no presence flag. The semantic version remains `diaspore: 1` in both
+containers; the magic selects the container layout, not the language version.
+Encoders MUST select `DSPB02` exactly when the model contains `stdlib`.
+The reference MUST be `sha256:` followed by exactly 64 lowercase hexadecimal
+digits (71 ASCII characters total). Null, empty strings, uppercase digits,
+other algorithms, and malformed references MUST be rejected.
+
+Decoders MUST consume the entire payload. Extra bytes after the final module,
+including an attempted metadata trailer, MUST be rejected for both versions.
+Truncated references and invalid string-table indices MUST be rejected.
+Readers that only support `DSPB01` reject the `DSPB02` magic rather than
+silently ignoring a linked dependency. Existing standalone fixtures remain
+valid and retain their byte-for-byte encoding.
+
+The decoded `stdlib` field participates in the canonical bundle digest just
+like every other model field; containers do not add separate digest rules.
+Before execution, runtimes MUST compare a linked reference with the shipped
+stdlib content id and reject a mismatch. An absent reference means standalone,
+not permission to use the shipped stdlib as an implicit import fallback.
+
+The Python decoder bounds nesting to 8000 nodes and further limits recursive
+descent to the available host call stack, reserving room to report a
+`DSPBError`. Decoding does not change the process recursion limit or require
+prior VM initialization.
+
+String-table bytes preserve lone surrogate codepoints using UTF-8
+`surrogatepass` (WTF-8); other malformed UTF-8 is rejected. Ordinary Unicode
+strings retain their standard UTF-8 representation.
+For string constants and literal f-string parts with `codepoints` metadata,
+encoders construct the string-table entry from those codepoints, not from the
+JSON `v` or `s` field. Decoders regenerate the metadata whenever the entry
+contains a surrogate codepoint and emit canonical JSON text in `v` or `s`
+(combining adjacent high/low pairs). No extra binary field or flag is needed.
 
 ## Nodes
 
@@ -77,14 +116,14 @@ Per-op payloads (after flags/ln). `N` = node, `L` = node-list,
 | list / tuple / set | L elts |
 | dict | varint count x (byte has-key? [1 -> N k], N v) |
 | fstring | varint count x part: byte flag (0 = text -> S; else bit0=value: N v, conv byte, bit1 -> N spec) |
-| func / funcexpr | S name, byte flags (bit0 gen, bit1 coro), byte pflags (bit0 vararg, bit1 kwarg), SL args, L defaults, [S vararg], SL kwonly, varint kwdefault-count x (byte present? [1 -> N]), [S kwarg], SL locals, SL gdecl, SL ndecl, L body |
+| func / funcexpr | S name, byte flags (bit0 gen, bit1 coro, bit2 asyncgen, bit3 annotation_scope), byte pflags (bit0 vararg, bit1 kwarg, bit2 posonly), [varint posonly if pflags & 4], SL args, L defaults, [S vararg], SL kwonly, varint kwdefault-count x (byte present? [1 -> N]), [S kwarg], SL locals, SL gdecl, SL ndecl, L body |
 | yield / return | [N v] per flags |
 | namedexpr | N target, N v |
 | assign | L targets, N v |
 | if / while | N test, L then/body, L orelse |
 | for | N target, N iter, L body, L orelse |
 | break / continue / pass | nothing |
-| class | S name, byte kwflag, [kwargs: varint count x (byte named? [1->S n], N v)], L bases, L body |
+| class | S name, byte flags (bit0 kwargs, bit1 binding), [S binding], [kwargs: varint count x (byte named? [1->S n], N v)], L bases, L body |
 | raise | [N exc], [N cause] per flags |
 | try | byte star, L body, varint handler-count x (byte hflags: bit0 t, bit1 name; [N t], [S name], L body), L orelse, L finalbody |
 | with | varint item-count x (byte has-name, N ctx, [N name]), L body |
@@ -93,5 +132,12 @@ Per-op payloads (after flags/ln). `N` = node, `L` = node-list,
 | del | L targets |
 
 Decoding materializes the compact JSON form (spec section 2.2): empty lists,
-false `gen`/`coro`/`star`, and absent optionals are omitted from the produced
+false `gen`/`coro`/`asyncgen`/`annotation_scope`/`star`, zero `params.posonly`, and absent optionals are omitted from the produced
 dicts. Key order does not affect structural equality.
+
+The optional class `binding` is the final namespace store key. If absent,
+it defaults to `name`; the source `name` remains the class construction and
+metadata name, including the context used for private slot-name mangling.
+When present, `binding` MUST be a string, not null. Its string reference
+precedes any keyword arguments. Class flag bits other than 0 and 1 are
+invalid. Classes without `binding` retain their existing binary encoding.

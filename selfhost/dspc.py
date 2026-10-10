@@ -3,33 +3,25 @@
 import json
 import sys
 
-from _pyparse import CompileError, Parser, tokenize
+from _pyparse import (
+    CompileError,
+    Parser,
+    implicit_call_modules,
+    lower_class_pattern,
+    lower_type_scope,
+    mangle_private_name,
+    module_dependencies,
+    tokenize,
+)
 from _pyunparse import unparse_annotation
 
 DIASPORE_VERSION = 1
 
-NATIVE_MODULES = {"time", "math", "json", "random", "sys", "net", "re", "tasks", "flow", "_os"}
-TYPE_ONLY_MODULES = {"typing", "__future__"}
-# Bundles name stdlib modules "<stdlib>/name.py", independent of the build host.
-STDLIB_FILE_PREFIX = "<stdlib>/"
-
-# Keep star-import exports synchronized with make_native_modules in vm.py.
-NATIVE_EXPORTS = {
-    "_os": ["getcwd", "kind", "listdir", "realpath"],
-    "sys": ["argv", "exit", "platform", "stderr_write", "stdin", "stdout", "stderr",
-            "getrecursionlimit", "setrecursionlimit"],
-    "math": ["pi", "e", "inf", "nan", "sqrt", "floor", "ceil", "fabs", "pow",
-             "log", "log2", "log10", "exp", "sin", "cos", "tan", "hypot",
-             "fmod", "isnan", "isinf"],
-    "time": ["time", "monotonic", "sleep"],
-    "json": ["dumps", "loads"],
-    "random": ["seed", "random", "randint", "choice", "shuffle", "Random"],
-    "re": ["IGNORECASE", "MULTILINE", "DOTALL", "search", "match", "fullmatch",
-           "findall", "split", "sub", "escape"],
-    "flow": ["suspend"],
-    "net": ["listen", "connect", "accept", "recv", "send", "close", "peer"],
-    "tasks": ["spawn", "channel", "lock"],
+NATIVE_MODULES = {
+    "builtins", "time", "math", "sys", "net", "re", "tasks", "flow", "_os", "_json", "_abc",
+    "_operator", "_diaspore_stdlib", "_diaspore_hash",
 }
+
 
 
 B64CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -84,6 +76,8 @@ class Col:
             for tg in s["targets"]:
                 self.tgt(tg)
             self.expr(s["v"])
+        elif t == "TypeAlias":
+            self.tgt(s["name"])
         elif t == "Ann":
             self.tgt(s["target"])
             self.expr(s["annotation"])
@@ -310,10 +304,24 @@ def yield_in_stmts(body):
     return False
 
 
+def yield_in_params(params):
+    for expr in params["defaults"] + params["kwdefaults"]:
+        if expr is not None and yield_in_expr(expr):
+            return True
+    for arg in params.get("argnodes", {}).values():
+        if arg["annotation"] is not None and yield_in_expr(arg["annotation"]):
+            return True
+    return False
+
+
 def yield_in_stmt(s):
     t = s["t"]
     if t == "Func":
-        return False
+        for expr in s["decorators"]:
+            if yield_in_expr(expr):
+                return True
+        return (yield_in_params(s["params"])
+                or (s.get("returns") is not None and yield_in_expr(s["returns"])))
     if t == "Expr":
         return yield_in_expr(s["v"])
     if t == "Assign":
@@ -322,7 +330,7 @@ def yield_in_stmt(s):
                 return True
         return yield_in_expr(s["v"])
     if t == "Ann":
-        if yield_in_expr(s["target"]):
+        if yield_in_expr(s["target"]) or yield_in_expr(s["annotation"]):
             return True
         return s["v"] is not None and yield_in_expr(s["v"])
     if t == "Aug":
@@ -348,7 +356,7 @@ def yield_in_stmt(s):
         for kw in s["keywords"]:
             if yield_in_expr(kw["v"]):
                 return True
-        return yield_in_stmts(s["body"])
+        return False
     if t == "Raise":
         if s["exc"] is not None and yield_in_expr(s["exc"]):
             return True
@@ -395,8 +403,10 @@ def yield_in_expr(e):
     t = e["t"]
     if t == "Yield" or t == "YieldFrom":
         return True
-    if t == "Lambda" or t == "Comp":
-        return False
+    if t == "Lambda":
+        return yield_in_params(e["params"])
+    if t == "Comp":
+        return yield_in_expr(e["gens"][0]["iter"])
     if t == "Await":
         return yield_in_expr(e["v"])
     if t == "Const" or t == "Name":
@@ -471,6 +481,24 @@ def yield_in_k(k):
     return yield_in_expr(k)
 
 
+def string_fields(value, key):
+    for char in value:
+        if 0xD800 <= ord(char) <= 0xDFFF:
+            points = [ord(char) for char in value]
+            text = []
+            i = 0
+            while i < len(points):
+                point = points[i]
+                if (0xD800 <= point <= 0xDBFF and i + 1 < len(points)
+                        and 0xDC00 <= points[i + 1] <= 0xDFFF):
+                    point = 0x10000 + ((point - 0xD800) << 10) + points[i + 1] - 0xDC00
+                    i += 1
+                text.append(chr(point))
+                i += 1
+            return {key: "".join(text), "codepoints": points}
+    return {key: value}
+
+
 def ir_name(id_):
     return {"op": "name", "id": id_}
 
@@ -529,12 +557,13 @@ def annotation_setup(ln):
 
 
 class Scope:
-    def __init__(self, kind, locals_, gdecl, ndecl, class_name=""):
+    def __init__(self, kind, locals_, gdecl, ndecl, class_name="", private_names=None):
         self.kind = kind
         self.locals = locals_
         self.gdecl = gdecl
         self.ndecl = ndecl
         self.class_name = class_name
+        self.private_names = private_names
 
 
 class ModuleCompiler:
@@ -547,9 +576,19 @@ class ModuleCompiler:
         # Empty package context denotes a top-level module.
         self.package_ctx = package_ctx
         self.bundler = bundler
-        self.tree_body = []
         self.tmp = 0
         self.future_annotations = False
+
+    def mangle(self, name):
+        """Return the identifier's spelling in the current lexical class scope."""
+        if name is None:
+            return None
+        for scope in self.scopes[::-1]:
+            if scope.kind == "class" or scope.class_name:
+                if scope.private_names is not None and name not in scope.private_names:
+                    return name
+                return mangle_private_name(name, scope.class_name)
+        return name
 
     def is_module(self, name):
         if self.bundler is None:
@@ -566,7 +605,6 @@ class ModuleCompiler:
     def compile(self):
         toks = tokenize(self.source, self.file)
         tree = Parser(toks, self.file).parse_module()
-        self.tree_body = tree["body"]
         for s in tree["body"]:
             if s["t"] == "ImportFrom" and s["level"] == 0 and s["module"] == "__future__":
                 for alias in s["names"]:
@@ -574,8 +612,22 @@ class ModuleCompiler:
                         self.future_annotations = True
         self.scopes.append(Scope("module", set(), set(), set()))
         body = [annotation_setup(tree["body"][0]["ln"])] if has_annotations(tree["body"]) else []
+        doc = self._docstring_assignment(tree["body"])
+        if doc is not None:
+            body.append(doc)
         body.extend(self.block(tree["body"]))
         return {"name": self.name, "file": self.file, "body": body}
+
+    def _docstring_assignment(self, body):
+        value = None
+        if (body and body[0]["t"] == "Expr" and body[0]["v"]["t"] == "Const"
+                and body[0]["v"]["kind"] == "str"):
+            value = self.expr(body[0]["v"])
+            ln = body[0]["ln"]
+        if value is None:
+            return None
+        return {"op": "assign", "targets": [{"op": "name", "id": "__doc__"}],
+                "v": value, "ln": ln}
 
     def block(self, stmts):
         out = []
@@ -640,6 +692,8 @@ class ModuleCompiler:
             return self.funcdef(s)
         if t == "Class":
             return self.classdef(s)
+        if t == "TypeAlias":
+            return self.type_scope(s, self.expr(s["v"]))
         if t == "Raise":
             node = {"op": "raise", "ln": ln}
             if s["exc"] is not None:
@@ -652,7 +706,7 @@ class ModuleCompiler:
             for h in s["handlers"]:
                 handlers.append({
                     "t": self.expr(h["type"]) if h["type"] is not None else None,
-                    "name": h["name"],
+                    "name": self.mangle(h["name"]),
                     "body": self.block(h["body"]),
                 })
             node = {"op": "try", "body": self.block(s["body"]),
@@ -683,19 +737,18 @@ class ModuleCompiler:
         if t == "Import":
             out = []
             for a in s["names"]:
-                if a["n"] in TYPE_ONLY_MODULES:
-                    continue
-                self.imports.add(a["n"])
+                module = self.mangle(a["n"])
+                self.imports.add(module)
                 if a["as"] is not None:
-                    out.append({"op": "import", "module": a["n"],
-                                "alias": a["as"], "ln": ln})
+                    out.append({"op": "import", "module": module,
+                                "alias": self.mangle(a["as"]), "ln": ln})
                 elif "." in a["n"]:
-                    out.append({"op": "import", "module": a["n"],
-                                "alias": a["n"].split(".")[0],
+                    out.append({"op": "import", "module": module,
+                                "alias": self.mangle(a["n"].split(".")[0]),
                                 "bind": "root", "ln": ln})
                 else:
-                    out.append({"op": "import", "module": a["n"],
-                                "alias": a["n"], "ln": ln})
+                    out.append({"op": "import", "module": module,
+                                "alias": self.mangle(a["n"]), "ln": ln})
             if out:
                 return out
             return None
@@ -746,10 +799,7 @@ class ModuleCompiler:
                                   "v": unparse_annotation(s["annotation"])}
                 else:
                     annotation = self.expr(s["annotation"])
-                name = target["id"]
-                class_name = self.scopes[-1].class_name.lstrip("_")
-                if class_name and name.startswith("__") and not name.endswith("__"):
-                    name = "_" + class_name + name
+                name = self.mangle(target["id"])
                 out.append({"op": "assign", "targets": [{
                     "op": "index", "o": ir_name("__annotations__"),
                     "k": {"op": "const", "t": "str", "v": name}}],
@@ -759,6 +809,7 @@ class ModuleCompiler:
         return out
 
     def import_from(self, s, ln):
+        module = self.mangle(s["module"])
         if s["level"]:
             ctx = self.package_ctx
             if not ctx:
@@ -771,16 +822,14 @@ class ModuleCompiler:
                         "attempted relative import beyond top-level package", ln)
                 ctx = ctx.rsplit(".", 1)[0]
                 k += 1
-            if s["module"]:
-                target = ctx + "." + s["module"]
+            if module:
+                target = ctx + "." + module
             else:
                 target = ctx
         else:
-            if s["module"] is None:
+            if module is None:
                 raise self.err("unsupported import form", ln)
-            target = s["module"]
-        if target in TYPE_ONLY_MODULES:
-            return None
+            target = module
         has_star = False
         for a in s["names"]:
             if a["n"] == "*":
@@ -788,12 +837,9 @@ class ModuleCompiler:
         if has_star:
             if len(s["names"]) != 1:
                 raise self.err("unsupported import form", ln)
-            if self.bundler is None:
-                raise self.err("'import *' is not supported here", ln)
-            exported = self.bundler.star_resolver(target, self, ln)
             self.imports.add(target)
             return {"op": "importfrom", "module": target,
-                    "names": [{"n": n2, "alias": n2} for n2 in exported],
+                    "names": [{"n": "*", "alias": "*"}],
                     "ln": ln}
         self.imports.add(target)
         out = []
@@ -805,21 +851,22 @@ class ModuleCompiler:
                 out.append({"op": "import", "module": child, "bind": "none",
                             "ln": ln})
         out.append({"op": "importfrom", "module": target,
-                    "names": [{"n": a["n"],
-                               "alias": a["as"] if a["as"] is not None else a["n"]}
+                    "names": [{"n": self.mangle(a["n"]),
+                               "alias": self.mangle(a["as"] if a["as"] is not None else a["n"])}
                               for a in s["names"]],
                     "ln": ln})
         return out
 
     def params(self, pa):
         return {
-            "args": pa["args"],
+            "args": [self.mangle(name) for name in pa["args"]],
+            "posonly": pa.get("posonly", 0),
             "defaults": [self.expr(d) for d in pa["defaults"]],
-            "vararg": pa["vararg"],
-            "kwonly": pa["kwonly"],
+            "vararg": self.mangle(pa["vararg"]),
+            "kwonly": [self.mangle(name) for name in pa["kwonly"]],
             "kwdefaults": [self.expr(d) if d is not None else None
                            for d in pa["kwdefaults"]],
-            "kwarg": pa["kwarg"],
+            "kwarg": self.mangle(pa["kwarg"]),
         }
 
     def function_node(self, name, pa, body, ln, op, coro=False):
@@ -827,6 +874,9 @@ class ModuleCompiler:
         col = Col()
         for st in body:
             col.stmt(st)
+        col.assigned = {self.mangle(n) for n in col.assigned}
+        col.gdecl = {self.mangle(n) for n in col.gdecl}
+        col.ndecl = {self.mangle(n) for n in col.ndecl}
         param_names = set(params["args"]) | set(params["kwonly"])
         if params["vararg"] is not None:
             param_names.add(params["vararg"])
@@ -839,8 +889,12 @@ class ModuleCompiler:
         locals_ = (col.assigned | param_names) - col.gdecl - col.ndecl
         for n2 in col.ndecl:
             found = False
-            for sc in self.scopes:
-                if sc.kind == "function" and n2 in sc.locals:
+            for sc in self.scopes[::-1]:
+                if sc.kind in ("function", "annotation") and n2 in sc.locals:
+                    if sc.kind == "annotation":
+                        raise self.err(
+                            "nonlocal binding not allowed for type parameter '" + n2 + "'", None
+                        )
                     found = True
                     break
             if not found:
@@ -848,71 +902,167 @@ class ModuleCompiler:
         self.scopes.append(Scope("function", locals_, col.gdecl, col.ndecl))
         try:
             compiled = self.block(body)
+            if (body and body[0]["t"] == "Expr" and body[0]["v"]["t"] == "Const"
+                    and body[0]["v"]["kind"] == "str"):
+                compiled.insert(0, self.stmt(body[0]))
         finally:
             self.scopes.pop()
-        # Await lowers to yield-from; coro preserves coroutine identity for the VM.
+        # Await lowers to yield-from, so retain both source-level distinctions.
+        source_yield = yield_in_stmts(body)
         return {
             "op": op, "name": name,
-            "gen": yield_in_stmts(body) or coro,
+            "gen": source_yield or coro,
             "coro": coro,
+            "asyncgen": coro and source_yield,
             "params": params,
             "locals": sorted(locals_), "gdecl": sorted(col.gdecl),
             "ndecl": sorted(col.ndecl), "body": compiled, "ln": ln,
         }
 
+    def type_scope(self, s, node, annotations=None, decorators=None, binding=None):
+        """Lower a declaration in its PEP 695 annotation scope.
+
+        Args:
+            s: Parsed declaration.
+            node: Lowered function, class, or lazy alias value.
+            annotations: Lowered generic function annotations, if present.
+            decorators: Precompiled decorators from the enclosing scope.
+            binding: Optional lexical destination distinct from the declaration name.
+
+        Returns:
+            The declaration assignment in the enclosing namespace.
+        """
+        self.imports.add("_typing")
+        parameters = []
+        for param in s["type_params"]:
+            bound = param["bound"]
+            parameters.append({
+                "t": param["t"], "name": param["name"],
+                "binding": self.mangle(param["name"]),
+                "bound": self.expr(bound) if bound is not None else None,
+                "constraints": bound is not None and bound["t"] == "Tuple",
+            })
+        name = s["name"]["id"] if s["t"] == "TypeAlias" else s["name"]
+        if decorators is None:
+            decorators = [self.expr(d) for d in s.get("decorators", [])]
+        return lower_type_scope(
+            name, parameters, node, decorators,
+            annotations, self.gensym, s["ln"], lambda message: self.err(message, s["ln"]),
+            self.mangle(name) if binding is None else binding,
+        )
+
     def funcdef(self, s):
-        node = self.function_node(s["name"], s["params"], s["body"], s["ln"],
-                                  "func", s["coro"])
-        if not s["decorators"]:
+        if s.get("type_params"):
+            self.scopes.append(Scope(
+                "annotation", {self.mangle(param["name"]) for param in s["type_params"]},
+                set(), set(),
+            ))
+        try:
+            node = self.function_node(s["name"], s["params"], s["body"], s["ln"],
+                                      "func", s["coro"])
+        finally:
+            if s.get("type_params"):
+                self.scopes.pop()
+        if s.get("type_params"):
+            entries = []
+            pairs = []
+            pa = s["params"]
+            args = pa["args"][:]
+            if pa["vararg"] is not None:
+                args.append(pa["vararg"])
+            args.extend(pa["kwonly"])
+            if pa["kwarg"] is not None:
+                args.append(pa["kwarg"])
+            for name in args:
+                annotation = pa["argnodes"][name]["annotation"]
+                if annotation is not None:
+                    pairs.append((self.mangle(name), annotation))
+            if s["returns"] is not None:
+                pairs.append(("return", s["returns"]))
+            for name, annotation in pairs:
+                value = ({"op": "const", "t": "str", "v": unparse_annotation(annotation)}
+                         if self.future_annotations else self.expr(annotation))
+                entries.append({"k": {"op": "const", "t": "str", "v": name}, "v": value})
+            return self.type_scope(s, node, {"op": "dict", "entries": entries})
+        binding = self.mangle(s["name"])
+        if not s["decorators"] and binding == s["name"]:
             return node
         node["op"] = "funcexpr"
         del node["ln"]
         value = node
         for dec in s["decorators"][::-1]:
             value = {"op": "call", "f": self.expr(dec), "args": [value], "kw": []}
-        return {"op": "assign", "targets": [{"op": "name", "id": s["name"]}],
+        return {"op": "assign", "targets": [{"op": "name", "id": binding}],
                 "v": value, "ln": s["ln"]}
 
     def classdef(self, s):
-        # A null keyword name denotes **mapping; the VM resolves metaclasses.
-        kwargs = []
-        for kw in s["keywords"]:
-            kwargs.append({"n": kw["n"], "v": self.expr(kw["v"])})
-        col = Col()
-        for st in s["body"]:
-            col.stmt(st)
-        self.scopes.append(Scope("class", col.assigned, col.gdecl, col.ndecl, s["name"]))
+        binding = self.mangle(s["name"])
+        decorators = [self.expr(d) for d in s["decorators"]]
+        if s.get("type_params"):
+            private_names = {param["name"] for param in s["type_params"]}
+            self.scopes.append(Scope(
+                "annotation", {mangle_private_name(n, s["name"]) for n in private_names},
+                set(), set(), s["name"], private_names,
+            ))
         try:
-            body = [annotation_setup(s["ln"])] if has_annotations(s["body"]) else []
-            body.extend(self.block(s["body"]))
+            kwargs = [{"n": kw["n"], "v": self.expr(kw["v"])} for kw in s["keywords"]]
+            col = Col()
+            for st in s["body"]:
+                col.stmt(st)
+            col.assigned = {mangle_private_name(n, s["name"]) for n in col.assigned}
+            col.gdecl = {mangle_private_name(n, s["name"]) for n in col.gdecl}
+            col.ndecl = {mangle_private_name(n, s["name"]) for n in col.ndecl}
+            self.scopes.append(Scope("class", col.assigned, col.gdecl, col.ndecl, s["name"]))
+            try:
+                for name in col.ndecl:
+                    for scope in self.scopes[::-1]:
+                        if scope.kind in ("function", "annotation") and name in scope.locals:
+                            if scope.kind == "annotation":
+                                raise self.err(
+                                    "nonlocal binding not allowed for type parameter '"
+                                    + name
+                                    + "'",
+                                    s["ln"],
+                                )
+                            break
+                body = [annotation_setup(s["ln"])] if has_annotations(s["body"]) else []
+                doc = self._docstring_assignment(s["body"])
+                if doc is not None:
+                    body.append(doc)
+                body.extend(self.block(s["body"]))
+            finally:
+                self.scopes.pop()
+            bases = []
+            for base in s["bases"]:
+                if base["t"] == "Starred":
+                    bases.append({"op": "starred", "v": self.expr(base["v"])})
+                else:
+                    bases.append(self.expr(base))
+            node = {"op": "class", "name": s["name"], "bases": bases,
+                    "body": body, "ln": s["ln"]}
+            if binding != s["name"]:
+                node["binding"] = binding
+            if kwargs:
+                node["kwargs"] = kwargs
+            if s.get("type_params"):
+                return self.type_scope(s, node, decorators=decorators, binding=binding)
         finally:
-            self.scopes.pop()
-        bases = []
-        for b in s["bases"]:
-            if b["t"] == "Starred":
-                bases.append({"op": "starred", "v": self.expr(b["v"])})
-            else:
-                bases.append(self.expr(b))
-        node = {"op": "class", "name": s["name"],
-                "bases": bases, "body": body, "ln": s["ln"]}
-        if kwargs:
-            node["kwargs"] = kwargs
-        if not s["decorators"]:
+            if s.get("type_params"):
+                self.scopes.pop()
+        if not decorators:
             return node
-        stmts = [node]
-        value = {"op": "name", "id": s["name"]}
-        for dec in s["decorators"][::-1]:
-            value = {"op": "call", "f": self.expr(dec), "args": [value], "kw": []}
-        stmts.append({"op": "assign", "targets": [{"op": "name", "id": s["name"]}],
-                      "v": value, "ln": s["ln"]})
-        return stmts
+        value = {"op": "name", "id": binding}
+        for decorator in decorators[::-1]:
+            value = {"op": "call", "f": decorator, "args": [value], "kw": []}
+        return [node, {"op": "assign", "targets": [{"op": "name", "id": binding}],
+                       "v": value, "ln": s["ln"]}]
 
     def target(self, t):
         k = t["t"]
         if k == "Name":
-            return {"op": "name", "id": t["id"]}
+            return {"op": "name", "id": self.mangle(t["id"])}
         if k == "Attr":
-            return {"op": "attr", "o": self.expr(t["o"]), "n": t["n"]}
+            return {"op": "attr", "o": self.expr(t["o"]), "n": self.mangle(t["n"])}
         if k == "Sub":
             return {"op": "index", "o": self.expr(t["o"]),
                     "k": self.subscript(t["k"])}
@@ -971,7 +1121,7 @@ class ModuleCompiler:
             return {"op": "const", "t": "complex", "re": str(0.0),
                     "im": str(c["v"])}
         if kind == "str":
-            return {"op": "const", "t": "str", "v": c["v"]}
+            return {"op": "const", "t": "str", **string_fields(c["v"], "v")}
         return {"op": "const", "t": "bytes", "v": b64encode(c["v"])}
 
     def expr(self, e):
@@ -979,9 +1129,9 @@ class ModuleCompiler:
         if t == "Const":
             return self.const(e)
         if t == "Name":
-            return {"op": "name", "id": e["id"]}
+            return {"op": "name", "id": self.mangle(e["id"])}
         if t == "Attr":
-            return {"op": "attr", "o": self.expr(e["o"]), "n": e["n"]}
+            return {"op": "attr", "o": self.expr(e["o"]), "n": self.mangle(e["n"])}
         if t == "Sub":
             return {"op": "index", "o": self.expr(e["o"]),
                     "k": self.subscript(e["k"])}
@@ -1008,7 +1158,11 @@ class ModuleCompiler:
                 else:
                     cargs.append(self.expr(a))
             ckw = [{"n": kwe["n"], "v": self.expr(kwe["v"])} for kwe in e["kw"]]
-            return {"op": "call", "f": self.expr(e["f"]), "args": cargs, "kw": ckw}
+            node = {"op": "call", "f": self.expr(e["f"]), "args": cargs, "kw": ckw}
+            if self.bundler is None or self.bundler.self_contained:
+                for dependency in implicit_call_modules(node):
+                    self.imports.add(dependency)
+            return node
         if t == "List":
             return {"op": "list", "elts": self.elts(e["elts"])}
         if t == "Tuple":
@@ -1041,7 +1195,7 @@ class ModuleCompiler:
             return {"op": "yieldfrom", "v": self.expr(e["v"])}
         if t == "Named":
             return {"op": "namedexpr",
-                    "target": {"op": "name", "id": e["target"]["id"]},
+                    "target": {"op": "name", "id": self.mangle(e["target"]["id"])},
                     "v": self.expr(e["v"])}
         if t == "Await":
             if self.scopes[-1].kind != "function":
@@ -1069,7 +1223,7 @@ class ModuleCompiler:
         out = []
         for p in parts:
             if "lit" in p:
-                out.append({"s": p["lit"]})
+                out.append(string_fields(p["lit"], "s"))
                 continue
             conv = None
             if p["conv"] == "r":
@@ -1170,7 +1324,7 @@ class ModuleCompiler:
     def collect_target_names(self, t, into):
         k = t["t"]
         if k == "Name":
-            into.add(t["id"])
+            into.add(self.mangle(t["id"]))
         elif k == "Tuple" or k == "List":
             for x in t["elts"]:
                 self.collect_target_names(x, into)
@@ -1307,25 +1461,9 @@ class ModuleCompiler:
             return self.map_pattern(p["keys"], p["pats"], p["rest"], subj,
                                     inner, ln)
         if t == "MCls":
-            if p["pos"]:
-                raise self.err(
-                    "positional class patterns are not supported; "
-                    "use keyword patterns (e.g. case Point(x=a, y=b))", ln)
-            chain = inner
-            attrs = p["attrs"]
-            kpats = p["kpats"]
-            j = len(attrs) - 1
-            while j >= 0:
-                attr = attrs[j]
-                kp = kpats[j]
-                sub = {"op": "attr", "o": subj, "n": attr}
-                chain = [ir_if(
-                    ir_call("hasattr",
-                            [subj, {"op": "const", "t": "str", "v": attr}]),
-                    self.pattern(kp, sub, chain), kp["ln"])]
-                j -= 1
-            return [ir_if(ir_call("isinstance", [subj, self.expr(p["cls"])]),
-                          chain, ln)]
+            return lower_class_pattern(self.expr(p["cls"]), p["pos"], p["attrs"],
+                                       p["kpats"], subj, inner, ln,
+                                       self.gensym, self.pattern)
         raise self.err("unsupported match pattern: " + t, ln)
 
     def seq_pattern(self, pats, subj, inner, ln):
@@ -1376,7 +1514,7 @@ class ModuleCompiler:
             copy = [self.bind(rest, ir_call("dict", [subj]), ln)]
             for ke in key_exprs:
                 copy.append({"op": "del", "targets": [
-                    {"op": "index", "o": ir_name(rest), "k": ke}], "ln": ln})
+                    {"op": "index", "o": ir_name(self.mangle(rest)), "k": ke}], "ln": ln})
             chain = copy + chain
         j = len(key_exprs) - 1
         while j >= 0:
@@ -1392,7 +1530,7 @@ class ModuleCompiler:
         return {"op": "assign", "targets": [ir_name(hidden)], "v": value, "ln": ln}
 
     def bind(self, user_name, value, ln):
-        return {"op": "assign", "targets": [ir_name(user_name)], "v": value,
+        return {"op": "assign", "targets": [ir_name(self.mangle(user_name))], "v": value,
                 "ln": ln}
 
 
@@ -1442,32 +1580,22 @@ def path_join(root, name):
     return name
 
 
-def module_exports(assigned, compiled):
-    """Return literal __all__ exports, or sorted public top-level names."""
-    for st in compiled["body"]:
-        if st["op"] == "assign" and len(st["targets"]) == 1 \
-                and st["targets"][0] == {"op": "name", "id": "__all__"} \
-                and st["v"]["op"] == "list":
-            ok = True
-            for e in st["v"]["elts"]:
-                if not (e["op"] == "const" and e.get("t") == "str"):
-                    ok = False
-                    break
-            if ok:
-                return [e["v"] for e in st["v"]["elts"]]
-    return sorted([n for n in assigned if not n.startswith("_")])
-
-
 class Bundler:
-    def __init__(self, roots, prefix, debug, stdlib_root=None):
+    def __init__(self, roots, prefix, debug, self_contained, stdlib):
         self.roots = roots
-        if stdlib_root is not None:
-            self.roots = roots + [stdlib_root]
-        self.stdlib_root = stdlib_root
+        self.self_contained = self_contained
+        self.stdlib_names = set()
+        self.stdlib_id = None
+        self.stdlib = None
+        if stdlib:
+            import _diaspore_stdlib
+
+            self.stdlib = _diaspore_stdlib
+            self.stdlib_names = set(_diaspore_stdlib.module_names())
+            self.stdlib_id = _diaspore_stdlib.get_id()
         self.prefix = prefix
         self.debug = debug
         self.modules = {}
-        self.exports = {}
         self.in_progress = set()
         self.unresolved = {}  # Map dotted module names to importing files.
 
@@ -1482,34 +1610,29 @@ class Bundler:
         return None
 
     def is_module(self, name):
-        return self.resolve_path(name) is not None
-
-    def star_resolver(self, target, mc, ln):
-        if target in NATIVE_EXPORTS:
-            return list(NATIVE_EXPORTS[target])
-        if target in NATIVE_MODULES:
-            raise mc.err("'import *' from native module '" + target
-                         + "' is not supported", ln)
-        if target in self.in_progress:
-            raise mc.err("'import *' from '" + target
-                         + "' within an import cycle", ln)
-        if not self.ensure(target):
-            raise mc.err("cannot resolve import '" + target + "' for 'import *'",
-                         ln)
-        return self.exports[target]
+        return name in self.stdlib_names or self.resolve_path(name) is not None
 
     def ensure(self, name):
         if name in self.modules or name in self.in_progress:
             return True
         rp = self.resolve_path(name)
-        if rp is None:
+        if rp is None and name not in self.stdlib_names:
             return False
         if "." in name:
             parent = name.rsplit(".", 1)[0]
             if not self.ensure(parent):
                 raise CompileError("package '" + parent + "' not found for "
-                                   "module '" + name + "'", rp[0], None)
-        self.compile_one(name, rp[0], rp[1])
+                                   "module '" + name + "'", rp[0] if rp else name, None)
+        if rp is not None:
+            self.compile_one(name, rp[0], rp[1])
+        elif self.self_contained:
+            module = self.stdlib.get_module(name)
+            if module is None:
+                raise CompileError("stdlib module missing from installed store", name, None)
+            if not self.debug:
+                module.pop("src", None)
+            self.modules[name] = module
+            self.include_dependencies(module_dependencies(module), module["file"])
         return True
 
     def compile_one(self, name, path, is_package):
@@ -1522,14 +1645,11 @@ class Bundler:
             pkg_ctx = name.rsplit(".", 1)[0]
         else:
             pkg_ctx = ""
-        if self.stdlib_root is not None and path.startswith(self.stdlib_root + "/"):
-            file = STDLIB_FILE_PREFIX + path[len(self.stdlib_root) + 1:]
-        else:
-            if self.prefix is None or not path.startswith(self.prefix + "/"):
-                prefix = find_cwd_prefix(path, source)
-                if prefix is not None:
-                    self.prefix = prefix
-            file = rel_file(path, self.prefix)
+        if self.prefix is None or not path.startswith(self.prefix + "/"):
+            prefix = find_cwd_prefix(path, source)
+            if prefix is not None:
+                self.prefix = prefix
+        file = rel_file(path, self.prefix)
         mc = ModuleCompiler(name, file, source, pkg_ctx, self)
         self.in_progress.add(name)
         try:
@@ -1539,19 +1659,19 @@ class Bundler:
         self.modules[name] = compiled
         if self.debug:
             compiled["src"] = source.splitlines()
-        col = Col()
-        for st in mc.tree_body:
-            col.stmt(st)
-        self.exports[name] = module_exports(col.assigned, compiled)
-        for dep in sorted(mc.imports):
-            if dep in self.modules or dep in self.in_progress:
-                continue
+        if self.self_contained and "_abc" in mc.imports:
+            mc.imports.add("_weakref")
+        self.include_dependencies(sorted(mc.imports), mc.file)
+
+    def include_dependencies(self, dependencies, file):
+        """Include source modules or copied stdlib IR for dependency names."""
+        for dep in dependencies:
             if self.ensure(dep):
                 continue
             if dep.split(".")[0] in NATIVE_MODULES and "." not in dep:
                 continue
             # Defer ImportError until execution to preserve optional and lazy imports.
-            self.unresolved.setdefault(dep, mc.file)
+            self.unresolved.setdefault(dep, file)
 
 
 # Omit default-valued fields; readers restore their defaults (spec 2.2).
@@ -1559,7 +1679,9 @@ OMIT_DEFAULTS = [
     ("orelse", []), ("finalbody", []), ("handlers", []), ("kw", []),
     ("args", []), ("elts", []), ("entries", []), ("bases", []),
     ("gdecl", []), ("ndecl", []), ("locals", []), ("gen", False), ("coro", False),
+    ("asyncgen", False), ("annotation_scope", False),
     ("defaults", []), ("kwonly", []), ("kwdefaults", []),
+    ("posonly", 0),
     ("vararg", None), ("kwarg", None), ("conv", None), ("spec", None),
     ("t", None), ("name", None),
 ]
@@ -1589,7 +1711,19 @@ def compact_bundle(bundle):
     return bundle
 
 
-def compile_bundle(entry_path, debug, search_paths, stdlib_root=None):
+def compile_bundle(entry_path, debug=False, search_paths=(), self_contained=False, stdlib=True):
+    """Compile program modules and link or embed the installed stdlib.
+
+    Args:
+        entry_path: Entry source filename.
+        debug: Retain source lines for tracebacks.
+        search_paths: User module search roots after the entry directory.
+        self_contained: Copy reachable stdlib modules instead of linking.
+        stdlib: Resolve imports against the installed compiled stdlib.
+
+    Returns:
+        A compact portable program bundle.
+    """
     slash = entry_path.rfind("/")
     if slash >= 0:
         root = entry_path[:slash]
@@ -1608,40 +1742,46 @@ def compile_bundle(entry_path, debug, search_paths, stdlib_root=None):
         raise CompileError("entry file not found", entry_path, None)
     prefix = find_cwd_prefix(entry_path, entry_src)
 
-    b = Bundler([root] + search_paths, prefix, debug, stdlib_root)
+    b = Bundler([root] + list(search_paths), prefix, debug, self_contained, stdlib)
     b.compile_one(entry_name, entry_path, False)
     ordered = {}
     ordered[entry_name] = b.modules[entry_name]
     for name in sorted([k for k in b.modules if k != entry_name]):
         ordered[name] = b.modules[name]
-    return compact_bundle({"diaspore": DIASPORE_VERSION, "main": entry_name,
-                           "modules": ordered})
+    bundle = {"diaspore": DIASPORE_VERSION, "main": entry_name, "modules": ordered}
+    if stdlib and not self_contained:
+        bundle["stdlib"] = b.stdlib_id
+    return compact_bundle(bundle)
 
 
 def main():
     args = []
     debug = False
     search_paths = []
-    stdlib_root = None
+    self_contained = False
+    stdlib = True
     pending = None
     for a in sys.argv[1:]:
         if pending == "--path":
             search_paths.append(a.rstrip("/") or "/")
             pending = None
-        elif pending == "--stdlib":
-            stdlib_root = a.rstrip("/") or "/"
-            pending = None
-        elif a == "--path" or a == "--stdlib":
+        elif a == "--path":
             pending = a
         elif a == "--debug":
             debug = True
+        elif a == "--self-contained":
+            self_contained = True
+        elif a == "--no-stdlib":
+            stdlib = False
         else:
             args.append(a)
     if len(args) != 1 or pending is not None:
-        sys.stderr_write("usage: dspc [--debug] [--path DIR ...] [--stdlib DIR] entry.py\n")
+        sys.stderr_write(
+            "usage: dspc [--debug] [--path DIR ...] [--self-contained] [--no-stdlib] entry.py\n"
+        )
         exit(2)
     try:
-        bundle = compile_bundle(args[0], debug, search_paths, stdlib_root)
+        bundle = compile_bundle(args[0], debug, search_paths, self_contained, stdlib)
     except CompileError as e:
         if e.line:
             loc = e.file + ":" + str(e.line)
@@ -1652,4 +1792,5 @@ def main():
     print(json.dumps(bundle))
 
 
-main()
+if __name__ == "__main__":
+    main()

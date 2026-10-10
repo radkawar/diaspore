@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 
-import { type Value, NONE, DiasporeList, DiasporeDict } from "./values.ts";
+import { type Value, type PyString, NONE, PyStr, DiasporeList, DiasporeDict, strCmp } from "./values.ts";
 import { pyFloatStr } from "./format.ts";
 import { jsonDumps, jsonLoads } from "./json.ts";
 import type { Interp, JournalEntry } from "./interp.ts";
@@ -35,6 +35,10 @@ function canonicalJSON(b: string[], v: unknown): void {
     b.push("null");
     return;
   }
+  if (v instanceof PyStr) {
+    b.push(canonicalEscape(v));
+    return;
+  }
   switch (typeof v) {
     case "boolean":
       b.push(v ? "true" : "false");
@@ -63,7 +67,7 @@ function canonicalJSON(b: string[], v: unknown): void {
     return;
   }
   const obj = v as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
+  const keys = Object.keys(obj).sort(strCmp);
   b.push("{");
   for (let i = 0; i < keys.length; i++) {
     if (i > 0) b.push(",");
@@ -74,9 +78,8 @@ function canonicalJSON(b: string[], v: unknown): void {
   b.push("}");
 }
 
-/** Matches Python json.dumps(ensure_ascii=False): only the quote, backslash,
- * and control characters are escaped. */
-export function canonicalEscape(s: string): string {
+/** Canonical JSON escaping, retaining Unicode scalars but escaping lone surrogates. */
+export function canonicalEscape(s: PyString): string {
   let b = '"';
   for (const ch of s) {
     const r = ch.codePointAt(0) as number;
@@ -103,7 +106,7 @@ export function canonicalEscape(s: string): string {
         b += "\\f";
         break;
       default:
-        if (r < 0x20) b += "\\u" + r.toString(16).padStart(4, "0");
+        if (r < 0x20 || (r >= 0xd800 && r <= 0xdfff)) b += "\\u" + r.toString(16).padStart(4, "0");
         else b += ch;
     }
   }
@@ -113,11 +116,25 @@ export function canonicalEscape(s: string): string {
 // --------------------------------------------------------------------------
 // snapshots
 
+function linkedStdlib(bundle: unknown): string | null {
+  if (typeof bundle !== "object" || bundle === null || !Object.hasOwn(bundle, "stdlib")) return null;
+  const reference = (bundle as Record<string, unknown>).stdlib;
+  if (typeof reference !== "string" || !/^sha256:[0-9a-f]{64}$/.test(reference)) {
+    throw new Error("invalid bundle stdlib content id");
+  }
+  return reference;
+}
+
 /** Serializes the flow snapshot; journal object values keep their key order. */
 export function buildSnapshot(I: Interp, bundle: unknown): string {
   const parts: string[] = [];
   parts.push('{"diaspore_flow": 1, "bundle_sha256": ');
   parts.push(canonicalEscape(bundleDigest(bundle)));
+  const stdlib = linkedStdlib(bundle);
+  if (stdlib !== null) {
+    parts.push(', "stdlib": ');
+    parts.push(canonicalEscape(stdlib));
+  }
   parts.push(', "argv": ');
   parts.push(jsonDumps(new DiasporeList(I.argv.map((a) => a as Value)), NONE));
   parts.push(', "journal": [');
@@ -147,6 +164,7 @@ export interface ParsedSnapshot {
   argv: string[] | null;
   journal: JournalEntry[];
   bundleSha: string | null;
+  stdlib: string | null;
 }
 
 /** Parses and validates a snapshot file's content (may be gzipped JSON).
@@ -163,6 +181,11 @@ export function parseSnapshot(data: Buffer): ParsedSnapshot {
   let bundleSha: string | null = null;
   const sha = v.getHK("sbundle_sha256");
   if (typeof sha === "string" && sha !== "") bundleSha = sha;
+  const reference = v.getHK("sstdlib");
+  if (reference !== undefined && (typeof reference !== "string" || !/^sha256:[0-9a-f]{64}$/.test(reference))) {
+    throw new Error("bad snapshot: invalid stdlib content id");
+  }
+  const stdlib = reference === undefined ? null : reference as string;
   let argv: string[] | null = null;
   const av = v.getHK("sargv");
   if (av instanceof DiasporeList && av.items.length > 0) {
@@ -185,7 +208,24 @@ export function parseSnapshot(data: Buffer): ParsedSnapshot {
     if (r === undefined) r = NONE;
     journal.push({ m, f, r });
   }
-  return { argv, journal, bundleSha };
+  return { argv, journal, bundleSha, stdlib };
+}
+
+/** Reject a snapshot whose linked library or program digest differs from the bundle. */
+export function validateSnapshotBundle(snapshot: ParsedSnapshot, bundle: unknown): void {
+  const stdlib = linkedStdlib(bundle);
+  if (snapshot.stdlib !== stdlib) {
+    throw new Error(`snapshot stdlib mismatch (snapshot ${snapshot.stdlib ?? "none"}, bundle ${stdlib ?? "none"})`);
+  }
+  if (snapshot.bundleSha !== null) {
+    const actual = bundleDigest(bundle);
+    if (snapshot.bundleSha !== actual) {
+      throw new Error(
+        `snapshot was taken from a different bundle ` +
+        `(snapshot ${snapshot.bundleSha.slice(0, 12)}..., this bundle ${actual.slice(0, 12)}...)`,
+      );
+    }
+  }
 }
 
 /** Compact JSON of a suspend payload for the CLI's stderr line. */

@@ -4,6 +4,8 @@
 import {
   type Value,
   type G,
+  type PyString,
+  isPyString,
   NONE,
   PyNoneT,
   makeExc,
@@ -15,6 +17,7 @@ import {
   DiasporeSet,
   DiasporeRange,
   DiasporeInstance,
+  DiasporeClass,
   DiasporeFunction,
   NativeObject,
   chars,
@@ -26,6 +29,8 @@ import {
   diasporeErr,
 } from "./values.ts";
 import type { Interp, Frame } from "./interp.ts";
+import { lookupSpecial } from "./helpers.ts";
+import { diasporeLen } from "./ops.ts";
 
 /** Iterate a list while observing its current length. */
 export class ListIter extends DiasporeIterBase {
@@ -39,6 +44,25 @@ export class ListIter extends DiasporeIterBase {
   *next(): G<[Value, boolean]> {
     if (this.i >= this.l.items.length) return [NONE, false];
     return [this.l.items[this.i++], true];
+  }
+}
+
+/** Iterate a list backward, observing item changes without copying its storage. */
+export class ListReverseIter extends DiasporeIterBase {
+  kindName = "list_reverseiterator";
+  l: DiasporeList;
+  i: number;
+  constructor(l: DiasporeList) {
+    super();
+    this.l = l;
+    this.i = l.items.length - 1;
+  }
+  *next(): G<[Value, boolean]> {
+    if (this.i < 0 || this.i >= this.l.items.length) {
+      this.i = -1;
+      return [NONE, false];
+    }
+    return [this.l.items[this.i--], true];
   }
 }
 
@@ -109,14 +133,44 @@ export class DictViewIter extends DiasporeIterBase {
   }
 }
 
-/** Iterate Unicode code points rather than UTF-16 code units. */
+/** Iterate live set entries, rejecting size changes until exhaustion. */
+export class SetIter extends DiasporeIterBase {
+  kindName = "set_iterator";
+  set: DiasporeSet;
+  size: number;
+  entries: Iterator<Value>;
+  done = false;
+  invalid = false;
+  constructor(set: DiasporeSet) {
+    super();
+    this.set = set;
+    this.size = set.size;
+    this.entries = set.map.values();
+  }
+  *next(): G<[Value, boolean]> {
+    if (this.done) return [NONE, false];
+    if (this.invalid || this.set.size !== this.size) {
+      this.invalid = true;
+      throw diasporeErr("RuntimeError", "Set changed size during iteration");
+    }
+    const entry = this.entries.next();
+    if (entry.done) {
+      this.done = true;
+      return [NONE, false];
+    }
+    return [entry.value, true];
+  }
+}
+
+/** Iterate Python code points, preserving explicit surrogate boundaries. */
 export class StrIter extends DiasporeIterBase {
   kindName = "str_iterator";
   rs: string[];
   i = 0;
-  constructor(s: string) {
+  constructor(s: PyString) {
     super();
-    this.rs = chars(s).slice();
+    this.rs = chars(s);
+    if (typeof s === "string" && !/[^\x00-\x7f]/.test(s)) this.kindName = "str_ascii_iterator";
   }
   *next(): G<[Value, boolean]> {
     if (this.i >= this.rs.length) return [NONE, false];
@@ -139,17 +193,24 @@ export class BytesIter extends DiasporeIterBase {
   }
 }
 
-/** Iterate a range without materializing its values. */
+/** Iterate forward or backward over a range without materializing its values. */
 export class RangeIter extends DiasporeIterBase {
   kindName = "range_iterator";
   cur: bigint;
   step: bigint;
   left: bigint;
-  constructor(r: DiasporeRange) {
+  constructor(r: DiasporeRange, reverse = false) {
     super();
-    this.cur = r.start;
-    this.step = r.step;
     this.left = r.len();
+    this.cur = reverse ? r.start + (this.left - 1n) * r.step : r.start;
+    this.step = reverse ? -r.step : r.step;
+    const min = -(1n << 63n), max = (1n << 63n) - 1n;
+    const fits = r.start >= min && r.start <= max && r.stop >= min && r.stop <= max &&
+      r.step >= min && r.step <= max && this.left <= max;
+    const endpointFits = reverse
+      ? r.step !== min && r.start - r.step >= min && r.start - r.step <= max
+      : this.left === 0n || (r.step > 0n ? r.stop <= max - (r.step - 1n) : r.stop >= min + (-1n - r.step));
+    if (!fits || !endpointFits) this.kindName = "longrange_iterator";
   }
   *next(): G<[Value, boolean]> {
     if (this.left <= 0n) return [NONE, false];
@@ -164,9 +225,9 @@ export class RangeIter extends DiasporeIterBase {
 export class InstIter extends DiasporeIterBase {
   kindName = "iterator";
   I: Interp;
-  obj: DiasporeInstance;
+  obj: DiasporeInstance | DiasporeClass;
   done = false;
-  constructor(I: Interp, obj: DiasporeInstance) {
+  constructor(I: Interp, obj: DiasporeInstance | DiasporeClass) {
     super();
     this.I = I;
     this.obj = obj;
@@ -174,7 +235,9 @@ export class InstIter extends DiasporeIterBase {
   *next(): G<[Value, boolean]> {
     if (this.done) return [NONE, false];
     try {
-      const v = yield* this.I.callDunder(this.obj, "__next__", []);
+      const method = yield* lookupSpecial(this.I, this.obj, "__next__");
+      if (method === undefined) throw diasporeErr("TypeError", `'${typeName(this.obj)}' object is not an iterator`);
+      const v = yield* this.I.invoke(method, [], new Map());
       return [v, true];
     } catch (e) {
       if (e instanceof DiasporeError && excIsA(e.value, "StopIteration")) {
@@ -186,6 +249,57 @@ export class InstIter extends DiasporeIterBase {
       throw e;
     }
   }
+}
+
+/** Iterate the integer-indexed sequence protocol until IndexError. */
+class ItemIter extends DiasporeIterBase {
+  kindName = "iterator";
+  I: Interp;
+  obj: DiasporeInstance | DiasporeClass;
+  index = 0n;
+  done = false;
+  reverse: boolean;
+  constructor(I: Interp, obj: DiasporeInstance | DiasporeClass, index = 0n, reverse = false) {
+    super();
+    this.I = I;
+    this.obj = obj;
+    this.index = index;
+    this.reverse = reverse;
+    if (reverse) this.kindName = "reversed";
+  }
+  *next(): G<[Value, boolean]> {
+    if (this.done || (this.reverse && this.index < 0n)) return [NONE, false];
+    const method = yield* lookupSpecial(this.I, this.obj, "__getitem__");
+    if (method === undefined) throw diasporeErr("TypeError", `'${typeName(this.obj)}' object is not subscriptable`);
+    try {
+      const value = yield* this.I.invoke(method, [this.index], new Map());
+      this.index += this.reverse ? -1n : 1n;
+      return [value, true];
+    } catch (error) {
+      if (error instanceof DiasporeError &&
+          (excIsA(error.value, "IndexError") || excIsA(error.value, "StopIteration"))) {
+        this.done = true;
+        return [NONE, false];
+      }
+      throw error;
+    }
+  }
+}
+
+/** Reverse a list or user sequence through live integer-indexed access. */
+export function* reverseSequenceIterator(I: Interp, value: Value): G<DiasporeIterBase> {
+  if (value instanceof DiasporeList) return new ListReverseIter(value);
+  const cls = value instanceof DiasporeInstance ? value.cls :
+    value instanceof DiasporeClass ? value.metaclass : null;
+  if (!(cls instanceof DiasporeClass) || cls.lookup("__getitem__") === undefined) {
+    throw diasporeErr("TypeError", `'${typeName(value)}' object is not reversible`);
+  }
+  const length = yield* diasporeLen(I, value);
+  if (length < 0n) throw diasporeErr("ValueError", "__len__() should return >= 0");
+  if (length > 9223372036854775807n) {
+    throw diasporeErr("OverflowError", "cannot fit 'int' into an index-sized integer");
+  }
+  return new ItemIter(I, value as DiasporeInstance | DiasporeClass, length - 1n, true);
 }
 
 /** Apply a sandbox callable to values from each input iterator. */
@@ -310,12 +424,17 @@ export class DiasporeGenerator extends DiasporeIterBase {
   kindName = "generator";
   fn: DiasporeFunction;
   it: G<Value>;
+  frame: Frame;
+  runtime: Interp;
   started = false;
   done = false;
   constructor(I: Interp, fn: DiasporeFunction, frame: Frame) {
     super();
     this.fn = fn;
+    this.kindName = fn.asyncgen ? "async_generator" : fn.coro ? "coroutine" : "generator";
     this.it = genBody(I, fn, frame);
+    this.frame = frame;
+    this.runtime = I;
   }
 
   advance(token: GenToken): [Value, boolean] {
@@ -325,6 +444,8 @@ export class DiasporeGenerator extends DiasporeIterBase {
     }
     this.started = true;
     let res: IteratorResult<{ yv: Value }, Value>;
+    this.frame.back = this.runtime.frames.at(-1) ?? null;
+    this.runtime.frames.push(this.frame);
     try {
       if (token.kind === "send") {
         res = this.it.next(token.v);
@@ -334,6 +455,8 @@ export class DiasporeGenerator extends DiasporeIterBase {
     } catch (e) {
       this.done = true;
       throw e;
+    } finally {
+      this.runtime.frames.pop();
     }
     if (res.done) {
       this.done = true;
@@ -396,28 +519,40 @@ function* genBody(I: Interp, fn: DiasporeFunction, frame: Frame): G<Value> {
 export function* getIter(I: Interp, v: Value): G<DiasporeIterBase> {
   if (v instanceof DiasporeIterBase) return v;
   if (v instanceof DiasporeList) return new ListIter(v);
-  if (v instanceof DiasporeTuple) return new SeqIter(v.items);
-  if (typeof v === "string") return new StrIter(v);
+  if (v instanceof DiasporeTuple) return new SeqIter(v.items, "tuple_iterator");
+  if (isPyString(v)) return new StrIter(v);
   if (v instanceof Uint8Array) return new BytesIter(v);
   if (v instanceof DiasporeRange) return new RangeIter(v);
   if (v instanceof DiasporeDictView) return new DictViewIter(v);
-  if (v instanceof DiasporeDict) return new SeqIter(v.keys());
-  if (v instanceof DiasporeSet) return new SeqIter(v.elems());
+  if (v instanceof DiasporeDict) return new DictViewIter(new DiasporeDictView(v, "keys"));
+  if (v instanceof DiasporeSet) return new SetIter(v);
   if (v instanceof NativeObject) {
     throw diasporeErr("TypeError", `'${v.kind}' object is not iterable`);
   }
-  if (v instanceof DiasporeInstance) {
-    if (v.cls.lookup("__iter__") !== undefined) {
-      const it = yield* I.callDunder(v, "__iter__", []);
+  if (v instanceof DiasporeInstance || v instanceof DiasporeClass) {
+    const method = yield* lookupSpecial(I, v, "__iter__");
+    if (method !== undefined) {
+      if (method instanceof PyNoneT) throw diasporeErr("TypeError", `'${typeName(v)}' object is not iterable`);
+      const it = yield* I.invoke(method, [], new Map());
       if (it instanceof DiasporeIterBase) return it;
-      if (it instanceof DiasporeInstance) return new InstIter(I, it);
-      return yield* getIter(I, it);
+      const cls = it instanceof DiasporeInstance ? it.cls :
+        it instanceof DiasporeClass ? it.metaclass : null;
+      if (cls instanceof DiasporeClass && cls.lookup("__next__") !== undefined) {
+        return new InstIter(I, it as DiasporeInstance | DiasporeClass);
+      }
+      throw diasporeErr("TypeError", `iter() returned non-iterator of type '${typeName(it)}'`);
     }
-    if (v.cls.lookup("__next__") !== undefined) {
-      return new InstIter(I, v);
+    if (v instanceof DiasporeInstance && v.prim !== null) {
+      const primitive = v.prim;
+      if (isPyString(primitive) || primitive instanceof Uint8Array ||
+          primitive instanceof DiasporeList || primitive instanceof DiasporeTuple ||
+          primitive instanceof DiasporeDict || primitive instanceof DiasporeSet ||
+          primitive instanceof DiasporeRange) return yield* getIter(I, primitive);
     }
-    if (v.prim !== null) return yield* getIter(I, v.prim);
-    throw diasporeErr("TypeError", `'${v.cls.name}' object is not iterable`);
+    const cls = v instanceof DiasporeInstance ? v.cls : v.metaclass;
+    if (cls instanceof DiasporeClass && cls.lookup("__getitem__") !== undefined) {
+      return new ItemIter(I, v);
+    }
   }
   throw diasporeErr("TypeError", `'${typeName(v)}' object is not iterable`);
 }

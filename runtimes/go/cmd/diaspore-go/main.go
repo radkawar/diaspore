@@ -9,6 +9,7 @@
 //	diaspore-go resume <bundle> <snapshot> [--send JSON] [--snapshot OUT]
 //	         [--max-steps N] [--max-depth N]
 //	diaspore-go build <entry.py> [-o OUT[.gz]] [--debug] [--pretty] [--path DIR ...]
+//	         [--self-contained]
 //
 // Capability flags accept optional scoped specs (spec 13.1):
 // --allow-net listen:HOST:PORT / connect:HOST:PORT ('*' wildcards),
@@ -20,7 +21,6 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -37,7 +37,8 @@ func usage() {
 			"                  [--allow-spawn] [--max-steps N] [--max-depth N]\n"+
 			"                  [--durable] [--snapshot PATH] [--deterministic]\n"+
 			"       diaspore-go resume <bundle> <snapshot> [--send JSON] [--snapshot OUT] [--max-steps N] [--max-depth N]\n"+
-			"       diaspore-go build <entry.py> [-o OUT[.gz]] [--debug] [--pretty] [--path DIR ...]")
+			"       diaspore-go build <entry.py> [-o OUT[.gz]] [--debug] [--pretty] [--path DIR ...]\n"+
+			"                         [--self-contained]")
 	os.Exit(2)
 }
 
@@ -279,6 +280,7 @@ func cmdRun(rest []string) int {
 	if a.durable {
 		opts = append(opts, interp.WithDurable())
 		vm := interp.New(bundle, opts...)
+		defer vm.Close()
 		out := vm.RunDurable()
 		stdout.Flush()
 		snap := a.snapshot
@@ -288,6 +290,7 @@ func cmdRun(rest []string) int {
 		return finishDurable(out, snap)
 	}
 	vm := interp.New(bundle, opts...)
+	defer vm.Close()
 	return vm.Run()
 }
 
@@ -317,6 +320,7 @@ func cmdResume(rest []string) int {
 		opts = append(opts, interp.WithMaxSteps(a.maxSteps))
 	}
 	vm := interp.New(bundle, opts...)
+	defer vm.Close()
 	out, err := vm.Resume(snapshot, send)
 	if err != nil {
 		die(err.Error())
@@ -334,7 +338,7 @@ func cmdResume(rest []string) int {
 func cmdBuild(rest []string) int {
 	var entry, out string
 	var searchPaths []string
-	var debug, pretty bool
+	var debug, pretty, selfContained bool
 	for i := 0; i < len(rest); i++ {
 		tok := rest[i]
 		switch {
@@ -364,6 +368,8 @@ func cmdBuild(rest []string) int {
 			debug = true
 		case tok == "--pretty":
 			pretty = true
+		case tok == "--self-contained":
+			selfContained = true
 		case tok == "--binding" || strings.HasPrefix(tok, "--binding="):
 			die("--binding is not supported by the embedded compiler " +
 				"(declare bindings when building with the Python CLI: uv run diaspore build --binding NAME)")
@@ -382,7 +388,9 @@ func cmdBuild(rest []string) int {
 	if _, err := os.Stat(entry); err != nil {
 		die(err.Error())
 	}
-	r, err := dspc.CompileFile(entry, debug, searchPaths)
+	r, err := dspc.CompileFile(entry, dspc.CompileOptions{
+		Debug: debug, SearchPaths: searchPaths, SelfContained: selfContained,
+	})
 	if err != nil {
 		die(err.Error())
 	}
@@ -392,8 +400,8 @@ func cmdBuild(rest []string) int {
 	}
 
 	text := strings.TrimRight(r.Bundle, "\n")
-	var bundle map[string]any
-	if err := json.Unmarshal([]byte(text), &bundle); err != nil {
+	bundle, err := interp.LoadBundle([]byte(text))
+	if err != nil {
 		die("embedded compiler produced invalid JSON: " + err.Error())
 	}
 	if out == "" {

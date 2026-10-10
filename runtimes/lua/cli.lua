@@ -1,12 +1,13 @@
--- diaspore-lua CLI: execute Diaspore JSON bundles (docs/spec.md) on Lua 5.4.
+-- diaspore-lua CLI: compile Python sources and execute JSON bundles on Lua 5.4.
 --
 -- Usage:
+--   lua5.4 cli.lua build <entry.py> -o <bundle.dsp.json> [--path DIR] [--self-contained]
 --   lua5.4 cli.lua run <bundle.dsp.json> [prog-args...]
 --          [--allow-net [SPEC]] [--allow-fs [SPEC]] [--allow-spawn]
 --          [--max-steps N] [--max-depth N] [--deterministic]
 --
--- Limitations: no tasks / re / net (their module functions raise RuntimeError),
--- int64 integers, no gzip bundles, no durable flows. See runtimes/lua/README.md.
+-- Limitations: no tasks / net, gzip bundles, DSPB bundles, or durable flows.
+-- See runtimes/lua/README.md.
 
 local script = arg[0] or "cli.lua"
 local dir = script:match("^(.*)[/\\][^/\\]*$") or "."
@@ -18,7 +19,8 @@ local interp = require("diaspore.interp")
 
 local function usage()
   io.stderr:write(
-    "usage: diaspore-lua run <bundle.dsp.json> [prog-args...] [--allow-net [SPEC]] [--allow-fs [SPEC]]\n"
+    "usage: diaspore-lua build <entry.py> -o <bundle.dsp.json> [--path DIR] [--self-contained]\n"
+    .. "       diaspore-lua run <bundle.dsp.json> [prog-args...] [--allow-net [SPEC]] [--allow-fs [SPEC]]\n"
     .. "                [--allow-spawn] [--max-steps N] [--max-depth N] [--deterministic]\n")
   os.exit(2, true)
 end
@@ -35,6 +37,9 @@ local function read_bundle(path)
   f:close()
   if #data >= 2 and data:byte(1) == 0x1F and data:byte(2) == 0x8B then
     die("gzip bundles are not supported by diaspore-lua; pass plain JSON")
+  end
+  if data:sub(1, 6) == "DSPB01" or data:sub(1, 6) == "DSPB02" then
+    die("DSPB bundles are not supported by diaspore-lua; pass plain JSON")
   end
   local ok, bundle = pcall(json.parse, data)
   if not ok then
@@ -182,6 +187,7 @@ local function caps_and_policy(a)
   return caps, policy
 end
 
+
 local function cmd_run(rest)
   local a = parse_args(rest)
   if #a.pos == 0 then usage() end
@@ -200,10 +206,68 @@ local function cmd_run(rest)
     deterministic = a.deterministic,
   })
   if not ok then
+    if values.is_exc(I) then
+      local args = values.exc_args(I.value)
+      I = args[1] or values.type_name(I.value)
+    end
     io.stderr:write("diaspore: " .. tostring(I) .. "\n")
     return 2
   end
-  return I:run()
+  local code = I:run()
+  local closed, err = pcall(I.close, I)
+  if not closed then
+    if values.is_exc(err) then I:ewrite(I:str(err.value) .. "\n")
+    else io.stderr:write("diaspore: error during shutdown\n") end
+    if code == 0 then code = 1 end
+  end
+  return code
+end
+
+local function cmd_build(rest)
+  local entry, output
+  local opts = { search_paths = {}, self_contained = false }
+  local i = 1
+  while i <= #rest do
+    local tok = rest[i]
+    if tok == "--self-contained" then
+      opts.self_contained = true
+    elseif tok == "-o" or tok == "--output" or tok == "--path" then
+      i = i + 1
+      if rest[i] == nil then die(tok .. " requires a value") end
+      if tok == "--path" then opts.search_paths[#opts.search_paths + 1] = rest[i]
+      else output = rest[i] end
+    elseif tok:sub(1, 7) == "--path=" then
+      opts.search_paths[#opts.search_paths + 1] = tok:sub(8)
+    elseif tok:sub(1, 9) == "--output=" then
+      output = tok:sub(10)
+    elseif tok:sub(1, 1) == "-" then
+      die("unknown flag " .. tok)
+    elseif entry ~= nil then
+      die("build accepts one entry file")
+    else
+      entry = tok
+    end
+    i = i + 1
+  end
+  if entry == nil or output == nil then usage() end
+  local ok, encoded = pcall(function()
+    local bundle = require("diaspore.compiler").compile_file(entry, opts)
+    return json.stringify_raw(bundle)
+  end)
+  if not ok then
+    if values.is_exc(encoded) then
+      local args = values.exc_args(encoded.value)
+      encoded = args[1] or values.type_name(encoded.value)
+    end
+    die(tostring(encoded))
+  end
+  local file, message = io.open(output, "wb")
+  if file == nil then die(tostring(message)) end
+  local written, write_error = file:write(encoded, "\n")
+  local closed, close_error = file:close()
+  if not written then die(tostring(write_error)) end
+  if not closed then die(tostring(close_error)) end
+  return 0
 end
 
 local function main()
@@ -211,10 +275,10 @@ local function main()
   local args = arg
   if #args == 0 then usage() end
   local code
-  if args[1] == "run" then
+  if args[1] == "run" or args[1] == "build" then
     local rest = {}
     for j = 2, #args do rest[#rest + 1] = args[j] end
-    code = cmd_run(rest)
+    code = args[1] == "build" and cmd_build(rest) or cmd_run(rest)
   elseif args[1] == "resume" then
     die("diaspore-lua does not support durable flows")
   else

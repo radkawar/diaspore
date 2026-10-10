@@ -1,21 +1,27 @@
-"""Generate the browser standard library and asset fingerprint."""
+"""Generate the browser asset fingerprint and embedded stdlib identity."""
 
+import gzip
 import hashlib
 import json
+import shutil
 from pathlib import Path
-
-from diaspore.compiler import write_stdlib_overlay
 
 
 def main() -> None:
-    """Write the standard library overlay and a cache-safe asset manifest."""
+    """Write a cache-safe asset manifest with the linked standard-library id."""
     site = Path(__file__).resolve().parent
-    write_stdlib_overlay(str(site / "stdlib.json"))
+    # Use the artifact embedded by the wasm build, not a newer source-tree snapshot.
+    with gzip.open(site.parent / "runtimes/go/interp/stdlib.json.gz", "rt",
+                   encoding="utf-8") as compiled:
+        stdlib_id = json.load(compiled)["id"]
+    notices = site / "cpython"
+    notices.mkdir(exist_ok=True)
+    for name in ("LICENSE", "UNICODE_LICENSE", "stdlib_manifest.json"):
+        shutil.copyfile(site.parent / "src" / "diaspore" / "cpython" / name, notices / name)
     assets = sorted(site.glob("js/*.js")) + [
         site / "style.css",
         site / "diaspore.wasm",
         site / "wasm_exec.js",
-        site / "stdlib.json",
     ]
     digest = hashlib.sha256()
     for path in assets:
@@ -24,6 +30,7 @@ def main() -> None:
     version = digest.hexdigest()[:16]
     manifest = {
         "version": version,
+        "stdlib": stdlib_id,
         "modules": [path.relative_to(site).as_posix() for path in assets if path.suffix == ".js"],
     }
     (site / "build.json").write_text(json.dumps(manifest) + "\n")

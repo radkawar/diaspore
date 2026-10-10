@@ -31,7 +31,7 @@ dev = ["pytest>=8.0", "ruff>=0.6", "pydantic>=2.7"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["runtimes/**/testdata"]
+extend-exclude = ["runtimes/**/testdata", "src/diaspore/cpython", "runtimes/ts/cpython"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "D"]
@@ -48,7 +48,6 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 "tests/corpus*/**" = ["ALL"]  # Corpus programs are the language under test.
 "src/diaspore/ir.py" = ["E501"]  # The discriminated-union line is one long type.
-"src/diaspore/stdlib/**" = ["D"]
 "selfhost/**" = ["D"]
 "tests/**" = ["D"]
 "examples/**" = ["D"]

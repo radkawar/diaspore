@@ -4,6 +4,10 @@
 -- never runs pending finally blocks (allowed by spec section 7).
 
 local values = require("diaspore.values")
+local bigint = require("diaspore.bigint")
+local buffer = require("diaspore.buffer")
+local protected = require("diaspore.protected")
+local pcall = protected.call
 
 local M = {}
 
@@ -61,11 +65,21 @@ function M.range_iter(r)
   local cur = r.start
   local step = r.step
   local left = values.range_len(r)
+  if type(cur) == "number" and type(step) == "number"
+      and type(r.stop) == "number" and type(left) == "number" then
+    return mk("range_iterator", function()
+      if left == 0 then return NONE, false end
+      local v = cur
+      left = left - 1
+      if left ~= 0 then cur = cur + step end
+      return v, true
+    end)
+  end
   return mk("range_iterator", function()
-    if left <= 0 then return NONE, false end
+    if left == 0 then return NONE, false end
     local v = cur
-    cur = cur + step
-    left = left - 1
+    cur = bigint.add(cur, step)
+    left = bigint.sub(left, 1)
     return v, true
   end)
 end
@@ -103,25 +117,59 @@ function M.dict_view_iter(view, reverse)
   end)
 end
 
+--- Iterate live set entries, preserving size-change failures after detection.
+function M.set_iter(s)
+  local size, position, done = s.size, 0, false
+  return mk("set_iterator", function()
+    if done then return NONE, false end
+    if s.size ~= size then
+      size = -1
+      throw("RuntimeError", "Set changed size during iteration")
+    end
+    while position < #s.keys do
+      position = position + 1
+      local entry = s.map[s.keys[position]]
+      if entry ~= nil and entry.pos == position then return entry.v, true end
+    end
+    done = true
+    return NONE, false
+  end)
+end
+
+local function special_method(I, obj, name)
+  if type(obj) ~= "table" then return nil end
+  local cls
+  if obj.kind == "instance" then cls = obj.cls
+  elseif obj.kind == "class" or obj.kind == "btype" then cls = obj.metaclass or I.types.type
+  else return nil end
+  return I:lookup_type_attr(cls, name), cls
+end
+
+--- Test the iterator slot on an object's actual type, including metaclasses.
+function M.is_iterator(I, obj)
+  if type(obj) == "table" and obj.kind == "iter" then return true end
+  return special_method(I, obj, "__next__") ~= nil
+end
+
+--- Advance a user-defined iterator through its type's next descriptor.
+function M.next_value(I, obj)
+  local method, cls = special_method(I, obj, "__next__")
+  if method == nil then throw("TypeError", "'" .. type_name(obj) .. "' object is not an iterator") end
+  return I:call(I:bind_attr(method, obj, cls), {}, {})
+end
+
 --- Adapts a diaspore object implementing __next__.
 function M.inst_iter(I, obj)
-  local done = false
   local it
   it = mk("iterator", function()
-    if done then return NONE, false end
     local saved = #I.stack
-    local ok, res = pcall(I.call_dunder, I, obj, "__next__", {})
+    local ok, res = pcall(M.next_value, I, obj)
     if ok then return res, true end
     if values.is_exc(res) and values.exc_isa(res.value, "StopIteration") then
       I:trim(saved)
-      done = true
       local args = values.exc_args(res.value)
-      if #args > 0 then
-        it.retval = args[1]
-        it.stop_args = { args[1] }
-      else
-        it.stop_args = {}
-      end
+      if #args > 0 then it.retval = args[1] else it.retval = NONE end
+      it.stop_args = args
       return NONE, false
     end
     error(res, 0)
@@ -193,7 +241,11 @@ function M.enum_iter(it, start)
     local x, ok = it.next()
     if not ok then return NONE, false end
     local v = values.tuple({ n, x })
-    n = n + 1
+    if type(n) == "number" and n ~= math.maxinteger then
+      n = n + 1
+    else
+      n = bigint.add(n, 1)
+    end
     return v, true
   end)
 end
@@ -223,22 +275,30 @@ function M.new_generator(I, fn, frame)
   gen = mk("generator", nil)
   gen.done = false
   gen.started = false
-  gen.stack = {}
+  local entry = { fr = frame }
+  gen.stack = { entry }
   gen.fname = fn.name
   -- Raw advance: (value, true) on yield; (nil, false) on exhaustion
   -- (retval/stop_args set); diaspore errors propagate.
   gen.advance = function(token)
+    if gen.running then throw("ValueError", "generator already executing") end
     if gen.done then
       gen.retval = NONE
       gen.stop_args = nil -- already-done: plain StopIteration
       return nil, false
     end
-    gen.started = true
-    -- the generator body records its call frames on its own stack
-    local prev = I.stack
-    I.stack = gen.stack
-    local ok, a = coroutine.resume(co, token)
-    I.stack = prev
+    if I.depth >= I.recursion_limit then
+      throw("RecursionError", "maximum recursion depth exceeded")
+    end
+    gen.started, gen.running = true, true
+    local prev, depth = I.stack, I.depth
+    entry.previous, entry.depth0 = prev[#prev], depth
+    if entry.frame_value then require("diaspore.metadata").retain(entry) end
+    I.stack, I.depth = gen.stack, depth + 1
+    local ok, a = protected.resume(co, token)
+    if not ok and values.is_exc(a) then I:prepare_exception(a, 1) end
+    I.stack, I.depth = prev, depth
+    gen.running = false
     if not ok then
       gen.done = true
       error(a, 0)
@@ -253,6 +313,7 @@ function M.new_generator(I, fn, frame)
       end
       return nil, false
     end
+    entry.previous, entry.retained_previous = nil, nil
     return a, true
   end
   gen.next = function()
@@ -346,46 +407,67 @@ end
 -- ---------------------------------------------------------------------------
 -- protocol entry points
 
---- Return an iterator using the sandbox iteration protocol.
+local function protocol_iterator(I, obj, method, cls)
+  local result = I:call(I:bind_attr(method, obj, cls), {}, {})
+  if M.is_iterator(I, result) then
+    return result
+  end
+  throw("TypeError", "iter() returned non-iterator of type '" .. type_name(result) .. "'")
+end
+
+--- Return the Python-visible iterator, preserving user object identity.
+function M.iter_object(I, obj)
+  local method, cls = special_method(I, obj, "__iter__")
+  if method ~= nil then return protocol_iterator(I, obj, method, cls) end
+  return M.get_iter(I, obj)
+end
+
+--- Adapt an iterable to the internal next() -> (value, available) protocol.
 function M.get_iter(I, v)
   local t = type(v)
   if t == "string" then return M.str_iter(v) end
   if t == "table" then
     local k = v.kind
     if k == "iter" then return v end
+    if k == "GenericAlias" then return require("diaspore.typeexpr").iter(I, v) end
     if k == "dictview" then return M.dict_view_iter(v, false) end
     if k == "list" then return M.list_iter(v) end
     if k == "tuple" then return M.seq_iter(v.items) end
     if k == "bytes" then return M.bytes_iter(v) end
+    if k == "bytearray" or k == "memoryview" then
+      local i = 0
+      local done = false
+      return mk(k .. "_iterator", function()
+        if done then return NONE, false end
+        if i >= buffer.length(v) then done = true; return NONE, false end
+        local result = buffer.get(v, i)
+        i = i + 1
+        return result, true
+      end)
+    end
     if k == "range" then return M.range_iter(v) end
-    if k == "mappingproxy" then return M.get_iter(I, values.namespace_dict(v.cls)) end
+    if k == "mappingproxy" then return M.get_iter(I, values.proxy_dict(v)) end
     if k == "dict" then
       local keys = {}
       local entries = values.dict_entries(v)
       for i = 1, #entries do keys[i] = entries[i].k end
       return M.seq_iter(keys)
     end
-    if k == "set" then return M.seq_iter(values.set_elems(v)) end
+    if k == "set" then return M.set_iter(v) end
     if k == "nativeobject" then
       throw("TypeError", "'" .. v.nkind .. "' object is not iterable")
     end
-    if k == "instance" then
-      if values.class_lookup(v.cls, "__iter__") == nil
-          and values.class_lookup(v.cls, "__next__") == nil and v.prim ~= nil then
+    if k == "instance" or k == "class" or k == "btype" then
+      local method, cls = special_method(I, v, "__iter__")
+      if method == nil and k == "instance" and v.prim ~= nil then
         return M.get_iter(I, v.prim)
       end
-      if values.class_lookup(v.cls, "__iter__") ~= nil then
-        local it = I:call_dunder(v, "__iter__", {})
-        if type(it) == "table" then
-          if it.kind == "iter" then return it end
-          if it.kind == "instance" then return M.inst_iter(I, it) end
-        end
-        return M.get_iter(I, it)
+      if method ~= nil then
+        local it = protocol_iterator(I, v, method, cls)
+        if it.kind == "iter" then return it end
+        return M.inst_iter(I, it)
       end
-      if values.class_lookup(v.cls, "__next__") ~= nil then
-        return M.inst_iter(I, v)
-      end
-      throw("TypeError", "'" .. v.cls.name .. "' object is not iterable")
+      throw("TypeError", "'" .. type_name(v) .. "' object is not iterable")
     end
   end
   throw("TypeError", "'" .. type_name(v) .. "' object is not iterable")

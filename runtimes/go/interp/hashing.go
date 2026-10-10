@@ -75,18 +75,18 @@ func encodedHash(v Value, hk string) int64 {
 		n, _ := strconv.ParseInt(hk[1:], 10, 64)
 		return n
 	}
-	if c, ok := v.(complex128); ok && imag(c) == 0 {
-		v = real(c)
+	if isIntKind(v) {
+		return pythonIntegerHash(v)
 	}
-	if f, ok := v.(float64); ok && !math.IsInf(f, 0) && !math.IsNaN(f) &&
-		f == math.Trunc(f) && f >= float64(math.MinInt64) && f < float64(math.MaxInt64) {
-		v = int64(f)
+	if f, ok := v.(float64); ok && !math.IsNaN(f) {
+		return pythonFloatHash(f)
 	}
-	if n, ok := asInt(v); ok {
-		if n == -1 {
-			return -2
+	if c, ok := v.(complex128); ok && !math.IsNaN(real(c)) && !math.IsNaN(imag(c)) {
+		hash := int64(uint64(pythonFloatHash(real(c))) + 1000003*uint64(pythonFloatHash(imag(c))))
+		if hash == -1 {
+			hash = -2
 		}
-		return n
+		return hash
 	}
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(hk))
@@ -114,6 +114,13 @@ func compoundHash(items []Value) (int64, error) {
 
 func keyVM(v Value) *VM {
 	switch t := v.(type) {
+	case *GenericAlias:
+		if vm := keyVM(t.Origin); vm != nil {
+			return vm
+		}
+		return keyVM(t.Args)
+	case *UnionType:
+		return keyVM(t.Args)
 	case *Instance:
 		return t.Class.vm
 	case *Tuple:

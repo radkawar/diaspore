@@ -60,7 +60,9 @@ func diasporeTrace(this js.Value, args []js.Value) (out any) {
 	vm := interp.New(bundle, interp.WithStdout(&stdout), interp.WithStderr(&stderr),
 		interp.WithArgs(opts.Args), interp.WithMaxSteps(opts.MaxSteps), interp.WithMaxDepth(opts.MaxDepth),
 		interp.WithSnippetCompiler(dspc.CompileSnippet), interp.WithTracer(tracer))
+	defer vm.Close()
 	code := vm.Run()
+	vm.Close()
 	res := result(stdout.String(), stderr.String(), code, vm.Steps())
 	// JSON parsing converts the nested typed snapshots to JavaScript objects.
 	data, err := json.Marshal(events)

@@ -1,4 +1,6 @@
-const worker = new Worker(new URL(`./wasm-worker.js?v=${globalThis.diasporeBuild}`, import.meta.url), {type: 'module'});
+const workerURL = new URL('./wasm-worker.js', import.meta.url);
+workerURL.search = new URLSearchParams({v: globalThis.diasporeBuild, stdlib: globalThis.diasporeStdlib});
+const worker = new Worker(workerURL, {type: 'module'});
 let sequence = 0;
 const pending = new Map();
 let resolveReady, rejectReady;
@@ -34,4 +36,9 @@ export async function invoke(method, ...args) {
     pending.set(id, {resolve, reject});
     worker.postMessage({id, method, args});
   });
+}
+
+/** Compile user/package sources; self_contained embeds reachable stdlib modules. */
+export function compile(source, files = {}, {self_contained = false} = {}) {
+  return invoke('compile', source, JSON.stringify(files), JSON.stringify({self_contained}));
 }

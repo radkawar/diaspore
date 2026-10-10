@@ -20,7 +20,7 @@ func encodedSmoke(t *testing.T) []byte {
 		t.Skip("uv not available")
 	}
 	dst := filepath.Join(t.TempDir(), "smoke.json")
-	cmd := exec.Command("uv", "run", "diaspore", "build", "tests/corpus/smoke.py", "-o", dst)
+	cmd := exec.Command("uv", "run", "diaspore", "build", "--self-contained", "tests/corpus/smoke.py", "-o", dst)
 	cmd.Dir = filepath.Join("..", "..", "..")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("uv run diaspore build: %v\n%s", err, out)
@@ -147,5 +147,38 @@ func TestDSPBBadEnumBytes(t *testing.T) {
 		if _, err := DecodeDSPB(blob); err == nil {
 			t.Fatalf("%s decoded without error", label)
 		}
+	}
+}
+
+func TestDSPBBothVersionsRejectTrailingBytes(t *testing.T) {
+	for _, id := range []string{"", "sha256:" + strings.Repeat("f", 64)} {
+		data, err := EncodeDSPB(dspbLinkedTestBundle(id), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, suffix := range [][]byte{{0}, {' ', '\n'}, []byte("DSPB01")} {
+			corrupted := append(append([]byte{}, data...), suffix...)
+			if _, err := DecodeDSPB(corrupted); err == nil || !strings.Contains(err.Error(), "trailing bytes") {
+				t.Fatalf("version %q accepted trailing %x: %v", data[:6], suffix, err)
+			}
+		}
+		for cut := range len(data) {
+			if _, err := DecodeDSPB(data[:cut]); err == nil {
+				t.Fatalf("version %q accepted truncation at %d", data[:6], cut)
+			}
+		}
+	}
+}
+
+func TestDSPBLinkedRequiresStdlibStringReference(t *testing.T) {
+	// One-entry string table cannot satisfy linked header's reference 1.
+	data := append([]byte("DSPB02"), 1, 1, 'm', 1, 0, 1, 0)
+	if _, err := DecodeDSPB(data); err == nil || !strings.Contains(err.Error(), "bad string ref") {
+		t.Fatalf("invalid linked string reference: %v", err)
+	}
+	// A standalone payload cannot be relabeled as linked without the field.
+	data = append([]byte("DSPB02"), 1, 1, 'm', 1, 0, 0)
+	if _, err := DecodeDSPB(data); err == nil {
+		t.Fatal("linked header without a valid stdlib reference was accepted")
 	}
 }

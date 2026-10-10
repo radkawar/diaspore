@@ -7,8 +7,13 @@
  * Port of src/diaspore/dspb.py (the normative reference).
  */
 
-/** Magic bytes identifying a DSPB container. */
+import { encodeWTF8, decodeWTF8 } from "./unicode-transport.ts";
+import { type PyString, hashKey, isPyString, strFromChars, strText } from "./values.ts";
+
+/** Magic bytes identifying a standalone DSPB container. */
 export const DSPB_MAGIC = Buffer.from("DSPB01", "ascii");
+/** Magic bytes identifying a DSPB container with a linked standard library. */
+export const DSPB_LINKED_MAGIC = Buffer.from("DSPB02", "ascii");
 
 const OPS = [
   "const", "name", "attr", "index", "slicelit", "starred", "call", "binop",
@@ -57,7 +62,7 @@ function isPresent(node: Node, key: string): boolean {
 class Writer {
   bytes: number[] = [];
   strings = new Map<string, number>();
-  strlist: string[] = [];
+  strlist: PyString[] = [];
 
   u(n: number): void {
     if (n < 0) throw new DSPBError("negative varint");
@@ -76,11 +81,12 @@ class Writer {
     this.bytes.push(b & 0xff);
   }
 
-  s(text: string): void {
-    let idx = this.strings.get(text);
+  s(text: PyString): void {
+    const key = hashKey(text);
+    let idx = this.strings.get(key);
     if (idx === undefined) {
       idx = this.strlist.length;
-      this.strings.set(text, idx);
+      this.strings.set(key, idx);
       this.strlist.push(text);
     }
     this.u(idx);
@@ -92,7 +98,7 @@ const MAX_DEPTH = 8000; // hostile-input bound on node nesting
 class Reader {
   data: Buffer;
   pos: number;
-  strings: string[] = [];
+  strings: PyString[] = [];
   depth = 0;
 
   constructor(data: Buffer, pos: number) {
@@ -127,16 +133,39 @@ class Reader {
     return this.data[this.pos++];
   }
 
-  s(): string {
+  text(): PyString {
     const idx = this.u();
     if (idx >= this.strings.length) throw new DSPBError("bad string ref");
     return this.strings[idx];
+  }
+
+  s(): string {
+    return strText(this.text());
   }
 }
 
 function enumAt<T>(table: T[], idx: number, what: string): T {
   if (idx >= table.length) throw new DSPBError(`bad ${what} byte`);
   return table[idx];
+}
+
+function literalText(node: Node, field: string): PyString {
+  const points = node.codepoints as number[] | undefined;
+  return points === undefined ? node[field] as PyString : strFromChars(points.map(point => String.fromCodePoint(point)));
+}
+
+function decodedLiteral(value: PyString, field: string): Node {
+  const node: Node = { [field]: strText(value) };
+  let hasSurrogate = false;
+  for (const char of value) {
+    const point = char.codePointAt(0)!;
+    if (point >= 0xd800 && point <= 0xdfff) {
+      hasSurrogate = true;
+      break;
+    }
+  }
+  if (hasSurrogate) node.codepoints = Array.from(value, char => char.codePointAt(0)!);
+  return node;
 }
 
 // ------------------------------------------------------------------ encoding
@@ -177,7 +206,7 @@ function enc(w: Writer, node: Node): void {
       const kind = node.t as string;
       w.byte(reqIdx(CONST_IDX, kind, "const kind"));
       if (kind === "int" || kind === "float" || kind === "str" || kind === "bytes") {
-        w.s(node.v as string);
+        w.s(kind === "str" ? literalText(node, "v") : node.v as string);
       } else if (kind === "bool") {
         w.byte(node.v === true ? 1 : 0);
       } else if (kind === "complex") {
@@ -278,9 +307,9 @@ function enc(w: Writer, node: Node): void {
       const parts = node.parts as Node[];
       w.u(parts.length);
       for (const p of parts) {
-        if (typeof p.s === "string") {
+        if (isPyString(p.s)) {
           w.byte(0);
-          w.s(p.s);
+          w.s(literalText(p, "s"));
         } else {
           let flag = 1;
           if (isPresent(p, "spec")) flag |= 2;
@@ -296,10 +325,11 @@ function enc(w: Writer, node: Node): void {
     case "func":
     case "funcexpr": {
       w.s(node.name as string);
-      w.byte((node.gen === true ? 1 : 0) | (node.coro === true ? 2 : 0));
+      w.byte((node.gen === true ? 1 : 0) | (node.coro === true ? 2 : 0) | (node.asyncgen === true ? 4 : 0) | (node.annotation_scope === true ? 8 : 0));
       const p = (node.params as Node | undefined) ?? {};
-      const pf = (isPresent(p, "vararg") ? 1 : 0) | (isPresent(p, "kwarg") ? 2 : 0);
+      const pf = (isPresent(p, "vararg") ? 1 : 0) | (isPresent(p, "kwarg") ? 2 : 0) | (p.posonly ? 4 : 0);
       w.byte(pf);
+      if (p.posonly) w.u(p.posonly as number);
       encStrs(w, p.args as string[] | undefined);
       encNodes(w, p.defaults as Node[] | undefined);
       if (isPresent(p, "vararg")) w.s(p.vararg as string);
@@ -352,7 +382,10 @@ function enc(w: Writer, node: Node): void {
     case "class": {
       w.s(node.name as string);
       const kwargs = (node.kwargs as Node[] | undefined) ?? [];
-      w.byte(kwargs.length > 0 ? 1 : 0);
+      const hasBinding = Object.hasOwn(node, "binding");
+      if (hasBinding && typeof node.binding !== "string") throw new DSPBError("invalid class binding");
+      w.byte((kwargs.length > 0 ? 1 : 0) | (hasBinding ? 2 : 0));
+      if (hasBinding) w.s(node.binding as string);
       if (kwargs.length > 0) {
         w.u(kwargs.length);
         for (const kw of kwargs) {
@@ -469,7 +502,8 @@ function decInner(r: Reader): Node {
       const kind = enumAt(CONST_KINDS, r.byte(), "const-kind");
       n.t = kind;
       if (kind === "int" || kind === "float" || kind === "str" || kind === "bytes") {
-        n.v = r.s();
+        if (kind === "str") Object.assign(n, decodedLiteral(r.text(), "v"));
+        else n.v = r.s();
       } else if (kind === "bool") {
         n.v = r.byte() === 1;
       } else if (kind === "complex") {
@@ -570,7 +604,7 @@ function decInner(r: Reader): Node {
       for (let i = 0; i < count; i++) {
         const flag = r.byte();
         if (flag === 0) {
-          parts.push({ s: r.s() });
+          parts.push(decodedLiteral(r.text(), "s"));
         } else {
           const part: Node = { v: dec(r) };
           const conv = enumAt(CONV_KINDS, r.byte(), "conv");
@@ -588,8 +622,11 @@ function decInner(r: Reader): Node {
       const gbyte = r.byte();
       if ((gbyte & 1) !== 0) n.gen = true;
       if ((gbyte & 2) !== 0) n.coro = true;
+      if ((gbyte & 4) !== 0) n.asyncgen = true;
+      if ((gbyte & 8) !== 0) n.annotation_scope = true;
       const pf = r.byte();
       const p: Node = {};
+      if ((pf & 4) !== 0) p.posonly = r.u();
       const args = decStrs(r);
       if (args.length > 0) p.args = args;
       const defaults = decNodes(r);
@@ -648,7 +685,10 @@ function decInner(r: Reader): Node {
       break;
     case "class": {
       n.name = r.s();
-      if (r.byte() !== 0) {
+      const flags = r.byte();
+      if ((flags & ~3) !== 0) throw new DSPBError("unknown class flags");
+      if ((flags & 2) !== 0) n.binding = r.s();
+      if ((flags & 1) !== 0) {
         const count = r.count();
         const kwargs: Node[] = [];
         for (let i = 0; i < count; i++) {
@@ -731,9 +771,14 @@ function decInner(r: Reader): Node {
 /** Encode a bundle as a DSPB container. */
 export function dspbEncode(bundle: Node): Buffer {
   if (bundle.diaspore !== 1) throw new DSPBError("unsupported Diaspore bundle version");
+  const linked = Object.hasOwn(bundle, "stdlib");
+  if (linked && (typeof bundle.stdlib !== "string" || !/^sha256:[0-9a-f]{64}$/.test(bundle.stdlib))) {
+    throw new DSPBError("invalid stdlib content id");
+  }
   const w = new Writer();
   w.u(1); // semantic version, same as JSON's "diaspore"
   w.s(bundle.main as string);
+  if (linked) w.s(bundle.stdlib as string);
   const mods = bundle.modules as Record<string, Node>;
   const names = Object.keys(mods);
   w.u(names.length);
@@ -755,26 +800,24 @@ export function dspbEncode(bundle: Node): Buffer {
   head.u(w.strlist.length);
   const headParts: Buffer[] = [];
   for (const s of w.strlist) {
-    const raw = Buffer.from(s, "utf8");
+    const raw = encodeWTF8(s);
     head.u(raw.length);
     for (const b of raw) head.bytes.push(b);
   }
   headParts.push(Buffer.from(head.bytes));
-  return Buffer.concat([DSPB_MAGIC, ...headParts, body]);
+  return Buffer.concat([linked ? DSPB_LINKED_MAGIC : DSPB_MAGIC, ...headParts, body]);
 }
 
 /** Test whether bytes begin with the DSPB magic. */
 export function isDSPB(data: Buffer): boolean {
   return (
     data.length >= DSPB_MAGIC.length &&
-    data.subarray(0, DSPB_MAGIC.length).equals(DSPB_MAGIC)
+    (data.subarray(0, DSPB_MAGIC.length).equals(DSPB_MAGIC) ||
+      data.subarray(0, DSPB_LINKED_MAGIC.length).equals(DSPB_LINKED_MAGIC))
   );
 }
 
-const utf8Strict = new TextDecoder("utf-8", { fatal: true });
-
-/** Decode untrusted DSPB bytes. Only ever throws DSPBError: hostile input is
- * rejected with a clean message, never a raw TypeError/RangeError. */
+/** Decode untrusted DSPB bytes, rejecting errors through DSPBError. */
 export function dspbDecode(data: Buffer): Node {
   try {
     return dspbDecodeInner(data);
@@ -792,7 +835,7 @@ function dspbDecodeInner(data: Buffer): Node {
     const length = r.u();
     if (r.pos + length > r.data.length) throw new DSPBError("truncated string table");
     try {
-      r.strings.push(utf8Strict.decode(r.data.subarray(r.pos, r.pos + length)));
+      r.strings.push(decodeWTF8(r.data.subarray(r.pos, r.pos + length)));
     } catch {
       throw new DSPBError("invalid UTF-8 in string table");
     }
@@ -800,6 +843,11 @@ function dspbDecodeInner(data: Buffer): Node {
   }
   if (r.u() !== 1) throw new DSPBError("unsupported semantic version");
   const main = r.s();
+  const linked = data.subarray(0, DSPB_LINKED_MAGIC.length).equals(DSPB_LINKED_MAGIC);
+  const stdlib = linked ? r.s() : undefined;
+  if (stdlib !== undefined && !/^sha256:[0-9a-f]{64}$/.test(stdlib)) {
+    throw new DSPBError("invalid stdlib content id");
+  }
   const modules: Record<string, Node> = {};
   const modCount = r.count();
   for (let i = 0; i < modCount; i++) {
@@ -809,5 +857,6 @@ function dspbDecodeInner(data: Buffer): Node {
     mod.body = decNodes(r);
     modules[name] = mod;
   }
-  return { diaspore: 1, main, modules };
+  if (r.pos !== data.length) throw new DSPBError("trailing bytes after DSPB bundle");
+  return linked ? { diaspore: 1, main, stdlib, modules } : { diaspore: 1, main, modules };
 }

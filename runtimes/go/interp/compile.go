@@ -25,7 +25,9 @@ type execFn func(fr *frame) error
 type assignFn func(fr *frame, v Value) error
 
 type compiledFunc struct {
+	metadata   codeMetadata
 	name       string
+	doc        Value
 	gen        bool
 	moduleName string
 	nSlots     int
@@ -55,34 +57,51 @@ func (cf *compiledFunc) getFrame() *frame {
 			fname: cf.name, moduleName: cf.moduleName}
 	}
 	fr.line = 0
+	fr.metadata.code = cf
+	fr.metadata.lasti = -1
+	fr.metadata.override = nil
 	return fr
 }
 
 func (cf *compiledFunc) putFrame(fr *frame) {
-	if cf.poolable && len(cf.freelist) < 64 {
+	if cf.poolable && !fr.metadata.retained && len(cf.freelist) < 64 {
 		cf.freelist = append(cf.freelist, fr)
 	}
 }
 
 // scope is the compile-time mirror of the runtime frame chain.
 type scope struct {
-	parent  *scope
-	isClass bool
-	strict  bool // function scope: slot-indexed
-	layout  map[string]int
-	nHard   int // slots 0..nHard-1 are declared locals; the rest are soft
-	nSlots  int
-	gdecl   map[string]bool
-	ndecl   map[string]bool
+	metadataName string
+	parent       *scope
+	isClass      bool
+	strict       bool // function scope: slot-indexed
+	annotation   bool // annotation scopes retain their defining class namespace
+	layout       map[string]int
+	nHard        int // slots 0..nHard-1 are declared locals; the rest are soft
+	nSlots       int
+	gdecl        map[string]bool
+	ndecl        map[string]bool
+}
+
+func (sc *scope) runtimeParent() *scope {
+	parent := sc.parent
+	if sc.strict && !sc.annotation {
+		for parent != nil && parent.isClass {
+			parent = parent.parent
+		}
+	}
+	return parent
 }
 
 type compiler struct {
-	vm          *VM
-	moduleName  string
-	sc          *scope
-	cells       map[string]*cell // the module's global cells
-	err         error
-	interactive bool
+	metadataNext  int
+	vm            *VM
+	moduleName    string
+	sc            *scope
+	cells         map[string]*cell // the module's global cells
+	globalMapping Value
+	err           error
+	interactive   bool
 }
 
 // cellFor resolves (or creates) the module-global cell for a name at
@@ -146,19 +165,26 @@ func (c *compiler) compileFunction(n node) *compiledFunc {
 		kwonly: nStrs(p, "kwonly"),
 		kwarg:  nStr(p, "kwarg"),
 	}
+	if count, ok := p["posonly"].(float64); ok {
+		spec.posonly = int(count)
+	}
+	if spec.posonly < 0 || spec.posonly > len(spec.args) {
+		c.fail("invalid positional-only parameter count")
+	}
 	locals := nStrs(n, "locals")
 	layout := make(map[string]int, len(locals))
 	for i, name := range locals {
 		layout[name] = i
 	}
 	sc := &scope{
-		parent: c.sc,
-		strict: true,
-		layout: layout,
-		nHard:  len(locals),
-		nSlots: len(locals),
-		gdecl:  strSet(nStrs(n, "gdecl")),
-		ndecl:  strSet(nStrs(n, "ndecl")),
+		parent:     c.sc,
+		strict:     true,
+		annotation: n["annotation_scope"] == true,
+		layout:     layout,
+		nHard:      len(locals),
+		nSlots:     len(locals),
+		gdecl:      strSet(nStrs(n, "gdecl")),
+		ndecl:      strSet(nStrs(n, "ndecl")),
 	}
 	collectSoftSlots(nList(n, "body"), sc)
 
@@ -168,6 +194,8 @@ func (c *compiler) compileFunction(n node) *compiledFunc {
 		moduleName: c.moduleName,
 		params:     spec,
 	}
+	sc.metadataName = cf.name
+	cf.initMetadata(n, sc)
 	spec.argIdx = make([]int, len(spec.args))
 	for i, a := range spec.args {
 		spec.argIdx[i] = layout[a]
@@ -197,15 +225,34 @@ func (c *compiler) compileFunction(n node) *compiledFunc {
 		}
 	}
 
-	// The runtime closure skips any class frames enclosing the def site.
+	// Ordinary methods omit class namespaces from their lexical closure.
 	hops := 0
-	for s := c.sc; s != nil && s.isClass; s = s.parent {
-		hops++
+	if !sc.annotation {
+		for s := c.sc; s != nil && s.isClass; s = s.parent {
+			hops++
+		}
 	}
 	cf.classHops = hops
 
-	inner := &compiler{vm: c.vm, moduleName: c.moduleName, sc: sc, cells: c.cells}
-	cf.body = inner.compileBlock(nList(n, "body"))
+	inner := &compiler{vm: c.vm, moduleName: c.moduleName, sc: sc, cells: c.cells, globalMapping: c.globalMapping}
+	body := nList(n, "body")
+	cf.doc = None
+	if len(body) > 0 {
+		first, _ := body[0].(node)
+		if nStr(first, "op") == "expr" {
+			expression := nNode(first, "v")
+			if nStr(expression, "op") == "const" && nStr(expression, "t") == "str" {
+				doc, err := parseConst(expression)
+				if err != nil {
+					c.fail("%v", err)
+				} else {
+					cf.doc = doc
+				}
+				body = body[1:]
+			}
+		}
+	}
+	cf.body = inner.compileBlock(body)
 	if inner.err != nil {
 		c.fail("%v", inner.err)
 	}
@@ -338,7 +385,7 @@ func collectSoftSlots(body []any, sc *scope) {
 					walkExpr(d.(node))
 				}
 			case "class":
-				bind(nStr(s, "name"))
+				bind(classBinding(s))
 				for _, b := range nList(s, "bases") {
 					walkExpr(b.(node))
 				}
@@ -437,19 +484,19 @@ func (c *compiler) compileBlock(stmts []any) execFn {
 
 func (c *compiler) compileStmt(s node) execFn {
 	fn := c.compileStmtInner(s)
+	index := c.metadataNext
+	c.metadataNext++
+	line, hasLine := s["ln"].(float64)
 	if c.vm.tracer != nil {
-		line, _ := s["ln"].(float64)
-		return c.vm.traceStatement(fn, int(line))
+		fn = c.vm.traceStatement(fn, int(line))
 	}
-	if ln, ok := s["ln"].(float64); ok {
-		line := int(ln)
-		inner := fn
-		return func(fr *frame) error {
-			fr.line = line
-			return inner(fr)
+	return func(fr *frame) error {
+		fr.metadata.lasti = index
+		if hasLine {
+			fr.line = int(line)
 		}
+		return fn(fr)
 	}
-	return fn
 }
 
 func (c *compiler) compileStmtInner(s node) execFn {
@@ -627,6 +674,15 @@ func (c *compiler) compileStmtInner(s node) execFn {
 		}
 	case "importfrom":
 		modName := nStr(s, "module")
+		if specs := nList(s, "names"); len(specs) == 1 && nStr(specs[0].(node), "n") == "*" {
+			return func(fr *frame) error {
+				mod, err := vm.importModule(modName)
+				if err != nil {
+					return err
+				}
+				return vm.importStar(fr, mod)
+			}
+		}
 		type fromName struct {
 			n     string
 			store assignFn
@@ -698,7 +754,14 @@ func (c *compiler) compileFor(s node) execFn {
 		}
 		switch t := iterable.(type) {
 		case *Range:
-			cur, left := t.Start, t.Len()
+			if t.big != nil {
+				break
+			}
+			length := t.smallLength()
+			if length>>63 != 0 {
+				break
+			}
+			cur, left := t.Start, int64(length)
 			for ; left > 0; left-- {
 				if err := vm.fuel(); err != nil {
 					return err
@@ -833,9 +896,21 @@ func (c *compiler) compileAugAssign(s node) execFn {
 	return execNop
 }
 
+func classBinding(s node) string {
+	if binding, ok := s["binding"].(string); ok {
+		return binding
+	}
+	return nStr(s, "name")
+}
+
 func (c *compiler) compileClass(s node) execFn {
 	vm := c.vm
 	name := nStr(s, "name")
+	if raw, present := s["binding"]; present {
+		if _, valid := raw.(string); !valid {
+			c.fail("class binding must be a string")
+		}
+	}
 	type baseSpec struct {
 		fn      evalFn
 		starred bool
@@ -859,13 +934,14 @@ func (c *compiler) compileClass(s node) execFn {
 		nm, _ := kw["n"].(string)
 		kwFns = append(kwFns, kwSpec{nm, c.compileExpr(nNode(kw, "v"))})
 	}
-	classScope := &scope{parent: c.sc, isClass: true}
-	inner := &compiler{vm: vm, moduleName: c.moduleName, sc: classScope, cells: c.cells}
+	classScope := &scope{parent: c.sc, isClass: true, metadataName: name}
+	qualname := metadataQualname(classScope)
+	inner := &compiler{vm: vm, moduleName: c.moduleName, sc: classScope, cells: c.cells, globalMapping: c.globalMapping}
 	bodyFn := inner.compileBlock(nList(s, "body"))
 	if inner.err != nil {
 		c.fail("%v", inner.err)
 	}
-	store := c.compileStore(name)
+	store := c.compileStore(classBinding(s))
 	return func(fr *frame) error {
 		var bases []*Class
 		var primBase *BuiltinType
@@ -888,6 +964,7 @@ func (c *compiler) compileClass(s node) execFn {
 			}
 			return newErrorf("TypeError", "cannot subclass %s in diaspore", r)
 		}
+		var originalBases []Value
 		for _, bs := range baseFns {
 			bv, err := bs.fn(fr)
 			if err != nil {
@@ -898,13 +975,37 @@ func (c *compiler) compileClass(s node) execFn {
 				if err != nil {
 					return err
 				}
-				for _, x := range items {
-					if err := checkBase(x); err != nil {
+				originalBases = append(originalBases, items...)
+			} else {
+				originalBases = append(originalBases, bv)
+			}
+		}
+		resolvedBases := false
+		for _, base := range originalBases {
+			switch base.(type) {
+			case *Class, *BuiltinType:
+				if err := checkBase(base); err != nil {
+					return err
+				}
+			default:
+				resolve, err := vm.getAttr(base, "__mro_entries__")
+				if err != nil {
+					return err
+				}
+				value, err := vm.call(resolve, []Value{&Tuple{Items: originalBases}}, nil)
+				if err != nil {
+					return err
+				}
+				entries, ok := value.(*Tuple)
+				if !ok {
+					return newError("TypeError", "__mro_entries__ must return a tuple")
+				}
+				for _, entry := range entries.Items {
+					if err := checkBase(entry); err != nil {
 						return err
 					}
 				}
-			} else if err := checkBase(bv); err != nil {
-				return err
+				resolvedBases = true
 			}
 		}
 		var metaclass Value
@@ -936,19 +1037,83 @@ func (c *compiler) compileClass(s node) execFn {
 				kwargs = append(kwargs, KwArg{spec.name, v})
 			}
 		}
-		cf := &frame{
-			vars:       map[string]Value{},
-			parent:     fr,
-			globals:    fr.globals,
-			fname:      name,
-			moduleName: fr.moduleName,
-		}
-		if err := bodyFn(cf); err != nil {
+		var err error
+		metaclass, err = vm.selectMetaclass(metaclass, bases)
+		if err != nil {
 			return err
+		}
+		var namespace Value
+		if meta, custom := metaclass.(*Class); custom {
+			if prepare, err := vm.getAttr(meta, "__prepare__"); err == nil {
+				namespace, err = vm.call(prepare, []Value{name, &Tuple{Items: baseValues(bases, primBase, primIndex)}}, kwargs)
+				if err != nil {
+					return err
+				}
+			} else if _, missing := raisedAs(err, "AttributeError"); !missing {
+				return err
+			}
+		}
+		cf := &frame{
+			vars:          map[string]Value{},
+			namespace:     namespace,
+			parent:        fr,
+			globals:       fr.globals,
+			globalMapping: fr.globalMapping,
+			fname:         name,
+			moduleName:    fr.moduleName,
+		}
+		moduleName := Value(fr.moduleName)
+		if cell := fr.globals["__name__"]; cell != nil && cell.v != nil {
+			moduleName = cell.v
+		}
+		cf.vars["__module__"], cf.vars["__qualname__"] = moduleName, qualname
+		cf.varOrder = append(cf.varOrder, "__module__", "__qualname__")
+		if namespace != nil {
+			if err := vm.setIndex(namespace, "__module__", moduleName); err != nil {
+				return err
+			}
+			if err := vm.setIndex(namespace, "__qualname__", qualname); err != nil {
+				return err
+			}
+		}
+		cf.metadata.source = s
+		cf.metadata.lasti = -1
+		vm.enterMetadataFrame(cf)
+		bodyErr := bodyFn(cf)
+		vm.leaveMetadataFrame(cf)
+		if bodyErr != nil {
+			if raised, ok := bodyErr.(*Raised); ok {
+				vm.recordMetadataTraceback(raised, cf)
+			}
+			return bodyErr
+		}
+		if resolvedBases {
+			original := &Tuple{Items: originalBases}
+			if namespace != nil {
+				if err := vm.setIndex(namespace, "__orig_bases__", original); err != nil {
+					return err
+				}
+			} else {
+				cf.vars["__orig_bases__"] = original
+				cf.varOrder = append(cf.varOrder, "__orig_bases__")
+			}
+		}
+		if namespace != nil {
+			cls, err := vm.call(metaclass, []Value{name, &Tuple{Items: baseValues(bases, primBase, primIndex)}, namespace}, kwargs)
+			if err != nil {
+				return err
+			}
+			if created, ok := cls.(*Class); ok {
+				cf.vars, cf.namespace = created.NS, nil
+			}
+			return store(fr, cls)
 		}
 		cls, err := vm.buildClass(name, bases, cf.vars, cf.varOrder, metaclass, kwargs, primBase, primIndex)
 		if err != nil {
 			return err
+		}
+		if created, ok := cls.(*Class); ok {
+			cf.vars = created.NS
 		}
 		return store(fr, cls)
 	}
@@ -1014,7 +1179,7 @@ func (c *compiler) compileRaise(s node) execFn {
 			if len(vm.excStack) == 0 {
 				return newError("RuntimeError", "No active exception to re-raise")
 			}
-			return &Raised{Exc: vm.excStack[len(vm.excStack)-1]}
+			return &Raised{Exc: vm.excStack[len(vm.excStack)-1], metadataFrame: fr}
 		}
 	}
 	excFn := c.compileExpr(excNode)
@@ -1086,6 +1251,7 @@ func (c *compiler) compileTry(s node) execFn {
 		if !ok {
 			return err
 		}
+		vm.recordMetadataTraceback(r, fr)
 		if star {
 			return vm.runStarHandlers(fr, r, handlers, elseFn)
 		}
@@ -1182,6 +1348,15 @@ func (c *compiler) compileWithItem(item node, inner execFn) execFn {
 		var enter func() (Value, error)
 		var exit func(a, b, c Value) (Value, error)
 		switch t := ctx.(type) {
+		case *MemoryView:
+			enter = func() (Value, error) { return t, t.check() }
+			exit = func(a, b, c Value) (Value, error) {
+				release, err := vm.bufferAttr(t, "release")
+				if err != nil {
+					return nil, err
+				}
+				return vm.call(release, nil, nil)
+			}
 		case *File:
 			enter = func() (Value, error) { return t, nil }
 			exit = func(a, b, c Value) (Value, error) { t.close(); return false, nil }
@@ -1222,8 +1397,11 @@ func (c *compiler) compileWithItem(item node, inner execFn) execFn {
 		}
 		err = inner(fr)
 		if r, ok := err.(*Raised); ok {
+			vm.recordMetadataTraceback(r, fr)
 			inst := r.Exc.(*Instance)
-			suppress, xerr := exit(inst.Class, inst, None)
+			vm.excStack = append(vm.excStack, inst)
+			suppress, xerr := exit(inst.Class, inst, orNone(inst.dictValue("__traceback__")))
+			vm.excStack = vm.excStack[:len(vm.excStack)-1]
 			if xerr != nil {
 				return xerr
 			}
@@ -1348,33 +1526,80 @@ func (c *compiler) compileUnpack(elts []any) assignFn {
 type freeRef struct {
 	hops int
 	idx  int
+	hard bool
 }
 
-// freeRefs computes the enclosing candidates for id, skipping class scopes
-// (they never appear in a function's runtime parent chain).
+// freeRefs resolves lexical slots through the actual runtime parent chain.
 func (c *compiler) freeRefs(id string) []freeRef {
 	var refs []freeRef
 	hops := 0
-	for s := c.sc.parent; s != nil; s = s.parent {
+	for s := c.sc.runtimeParent(); s != nil; s = s.runtimeParent() {
+		hops++
 		if s.isClass {
 			continue
 		}
 		if !s.strict {
 			break // module scope: handled via fr.globals
 		}
-		hops++
 		if i, ok := s.layout[id]; ok {
-			refs = append(refs, freeRef{hops, i})
+			refs = append(refs, freeRef{hops: hops, idx: i, hard: i < s.nHard})
+			if i < s.nHard {
+				break
+			}
 		}
 	}
 	return refs
 }
 
 func (c *compiler) compileLoad(id string) evalFn {
+	fallback := c.compileLexicalLoad(id)
+	if !c.sc.annotation || c.sc.gdecl[id] {
+		return fallback
+	}
+	if _, local := c.sc.layout[id]; local {
+		return fallback
+	}
+	hops := 0
+	for s := c.sc.runtimeParent(); s != nil; s = s.runtimeParent() {
+		hops++
+		if s.isClass {
+			return func(fr *frame) (Value, error) {
+				owner := fr
+				for range hops {
+					owner = owner.parent
+				}
+				if owner.namespace != nil {
+					value, err := c.vm.getIndex(owner.namespace, id)
+					if err == nil {
+						return value, nil
+					}
+					if _, missing := raisedAs(err, "KeyError"); !missing {
+						return nil, err
+					}
+				} else if value, found := owner.vars[id]; found {
+					return value, nil
+				}
+				return fallback(fr)
+			}
+		}
+		if !s.annotation {
+			break
+		}
+	}
+	return fallback
+}
+
+func (c *compiler) compileLexicalLoad(id string) evalFn {
 	vm := c.vm
+	if id == ".builtins" {
+		return func(fr *frame) (Value, error) { return vm.natives["builtins"], nil }
+	}
 	sc := c.sc
 	if sc.strict {
 		if sc.gdecl[id] {
+			if c.globalMapping != nil {
+				return c.mappingGlobalLoad(id)
+			}
 			gc := c.cellFor(id)
 			return func(fr *frame) (Value, error) {
 				if v := gc.v; v != nil {
@@ -1410,6 +1635,9 @@ func (c *compiler) compileLoad(id string) evalFn {
 		refs := c.freeRefs(id)
 		gc := c.cellFor(id)
 		if len(refs) == 0 {
+			if c.globalMapping != nil {
+				return c.mappingGlobalLoad(id)
+			}
 			// Only globals/builtins can supply it.
 			bv := vm.builtins[id]
 			return func(fr *frame) (Value, error) {
@@ -1452,8 +1680,11 @@ func loadFree(vm *VM, fr *frame, id string, refs []freeRef, gc *cell) (Value, er
 		for ; at < r.hops; at++ {
 			f = f.parent
 		}
-		if v := f.slots[r.idx]; v != nil {
+		if v := f.closureValue(r.idx); v != nil {
 			return v, nil
+		}
+		if r.hard {
+			return nil, newErrorf("NameError", "cannot access free variable '%s' where it is not associated with a value in enclosing scope", id)
 		}
 	}
 	if v := gc.v; v != nil {
@@ -1469,6 +1700,16 @@ func loadFree(vm *VM, fr *frame, id string, refs []freeRef, gc *cell) (Value, er
 // scopes (module and class bodies).
 func (vm *VM) loadDynamic(fr *frame, id string) (Value, error) {
 	for f := fr; f != nil; f = f.parent {
+		if f.namespace != nil {
+			value, err := vm.getIndex(f.namespace, id)
+			if err == nil {
+				return value, nil
+			}
+			if _, missing := raisedAs(err, "KeyError"); !missing {
+				return nil, err
+			}
+			continue
+		}
 		if f.vars != nil {
 			if v, ok := f.vars[id]; ok {
 				return v, nil
@@ -1478,9 +1719,18 @@ func (vm *VM) loadDynamic(fr *frame, id string) (Value, error) {
 				return c.v, nil
 			}
 		} else if i, ok := f.layout[id]; ok {
-			if v := f.slots[i]; v != nil {
+			if v := f.closureValue(i); v != nil {
 				return v, nil
 			}
+		}
+	}
+	if fr.globalMapping != nil {
+		value, err := vm.getIndex(fr.globalMapping, id)
+		if err == nil {
+			return value, nil
+		}
+		if _, missing := raisedAs(err, "KeyError"); !missing {
+			return nil, err
 		}
 	}
 	if fr.globals != nil {
@@ -1498,6 +1748,9 @@ func (c *compiler) compileStore(id string) assignFn {
 	sc := c.sc
 	if sc.strict {
 		if sc.gdecl[id] {
+			if mapping := c.globalMapping; mapping != nil {
+				return func(fr *frame, v Value) error { return c.vm.setIndex(mapping, id, v) }
+			}
 			gc := c.cellFor(id)
 			return func(fr *frame, v Value) error {
 				gc.v = v
@@ -1506,14 +1759,14 @@ func (c *compiler) compileStore(id string) assignFn {
 		}
 		if sc.ndecl[id] {
 			hops := 0
-			for s := sc.parent; s != nil; s = s.parent {
+			for s := sc.runtimeParent(); s != nil; s = s.runtimeParent() {
+				hops++
 				if s.isClass {
 					continue
 				}
 				if !s.strict {
 					break
 				}
-				hops++
 				if idx, ok := s.layout[id]; ok {
 					h := hops
 					return func(fr *frame, v Value) error {
@@ -1521,7 +1774,7 @@ func (c *compiler) compileStore(id string) assignFn {
 						for i := 0; i < h; i++ {
 							f = f.parent
 						}
-						f.slots[idx] = v
+						f.storeClosure(idx, v)
 						return nil
 					}
 				}
@@ -1552,6 +1805,9 @@ func (c *compiler) compileStore(id string) assignFn {
 	// Class scope: record first-assignment order (metaclasses receive the
 	// namespace as an insertion-ordered dict).
 	return func(fr *frame, v Value) error {
+		if fr.namespace != nil {
+			return c.vm.setIndex(fr.namespace, id, v)
+		}
 		if _, seen := fr.vars[id]; !seen {
 			fr.varOrder = append(fr.varOrder, id)
 		}
@@ -1592,6 +1848,25 @@ func (c *compiler) compileDelete(t node) execFn {
 	case "name":
 		id := nStr(t, "id")
 		sc := c.sc
+		if sc.strict && sc.ndecl[id] {
+			refs := c.freeRefs(id)
+			return func(fr *frame) error {
+				outer, hops := fr, 0
+				for _, ref := range refs {
+					for ; hops < ref.hops; hops++ {
+						outer = outer.parent
+					}
+					if outer.closureValue(ref.idx) != nil {
+						outer.storeClosure(ref.idx, nil)
+						return nil
+					}
+					if ref.hard {
+						break
+					}
+				}
+				return newErrorf("NameError", "cannot access free variable '%s' where it is not associated with a value in enclosing scope", id)
+			}
+		}
 		if sc.strict && !sc.gdecl[id] {
 			if idx, ok := sc.layout[id]; ok {
 				hard := idx < sc.nHard
@@ -1614,6 +1889,17 @@ func (c *compiler) compileDelete(t node) execFn {
 			}
 		}
 		// Module/class scopes and global-declared names.
+		if mapping := c.globalMapping; mapping != nil {
+			return func(fr *frame) error {
+				if err := c.vm.delIndex(mapping, id); err != nil {
+					if _, missing := raisedAs(err, "KeyError"); missing {
+						return newErrorf("NameError", "name '%s' is not defined", id)
+					}
+					return err
+				}
+				return nil
+			}
+		}
 		gc := c.cellFor(id)
 		return func(fr *frame) error {
 			if fr.vars != nil {
@@ -1972,7 +2258,7 @@ func parseConst(e node) (Value, error) {
 		}
 		return f, nil
 	case "str":
-		return nStr(e, "v"), nil
+		return irString(e, "v")
 	case "bool":
 		return e["v"] == true, nil
 	case "bytes":
@@ -2386,10 +2672,14 @@ func (c *compiler) compileCall(e node) evalFn {
 						return nil, err
 					}
 					callee := cf.getFrame()
+					if fn.metadata != nil {
+						callee.metadata.override = fn.metadata.code
+					}
 					callee.parent = fn.closure
 					callee.defclass = fn.defclass
 					if fn.closure != nil {
 						callee.globals = fn.closure.globals
+						callee.globalMapping = fn.closure.globalMapping
 					}
 					idx := cf.params.argIdx
 					for i, aFn := range argFns {
@@ -2563,8 +2853,12 @@ func (c *compiler) compileFString(e node) evalFn {
 	specs := make([]partSpec, len(parts))
 	for i, raw := range parts {
 		p := raw.(node)
-		if s, ok := p["s"].(string); ok {
-			specs[i] = partSpec{static: s}
+		if _, ok := p["s"].(string); ok {
+			text, err := irString(p, "s")
+			if err != nil {
+				c.fail("%v", err)
+			}
+			specs[i] = partSpec{static: text}
 			continue
 		}
 		ps := partSpec{vFn: c.compileExpr(nNode(p, "v"))}

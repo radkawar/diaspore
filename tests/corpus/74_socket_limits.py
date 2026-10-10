@@ -19,8 +19,45 @@ unsupported("file descriptor constructor", lambda: socket.socket(fileno=1))
 unsupported("connection timeout", lambda: socket.create_connection(("127.0.0.1", 1), 1))
 unsupported("source address", lambda: socket.create_connection(
     ("127.0.0.1", 1), source_address=("127.0.0.1", 0)))
-unsupported("aggregated errors", lambda: socket.create_connection(
-    ("127.0.0.1", 1), all_errors=True))
+
+original_socket = socket.socket
+original_getaddrinfo = socket.getaddrinfo
+closed = []
+
+
+class RefusedSocket(original_socket):
+    def connect(self, address):
+        raise OSError("controlled connection failure")
+
+    def close(self):
+        closed.append(True)
+        super().close()
+
+
+def repeated_addresses(*args, **kwargs):
+    return original_getaddrinfo(*args, **kwargs) * 2
+
+
+socket.socket = RefusedSocket
+socket.getaddrinfo = repeated_addresses
+try:
+    try:
+        socket.create_connection(("127.0.0.1", 1), all_errors=True)
+    except ExceptionGroup as errors:
+        print("aggregated errors", errors.message,
+              [str(error) for error in errors.exceptions], len(closed))
+    else:
+        raise AssertionError("connection errors were not aggregated")
+    closed.clear()
+    try:
+        socket.create_connection(("127.0.0.1", 1))
+    except OSError as error:
+        print("last connection error", str(error), len(closed))
+    else:
+        raise AssertionError("connection error was not raised")
+finally:
+    socket.socket = original_socket
+    socket.getaddrinfo = original_getaddrinfo
 
 with socket.socket() as endpoint:
     unsupported("timeout", lambda: endpoint.settimeout(1))

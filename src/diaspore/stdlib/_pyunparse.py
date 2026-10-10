@@ -1,17 +1,33 @@
 """Render parser expressions with CPython 3.12 ast.unparse normalization."""
 
-
 _BINOPS = {
-    "bitor": ("|", 9), "bitxor": ("^", 10), "bitand": ("&", 11),
-    "lshift": ("<<", 12), "rshift": (">>", 12),
-    "add": ("+", 13), "sub": ("-", 13),
-    "mul": ("*", 14), "matmul": ("@", 14), "div": ("/", 14),
-    "mod": ("%", 14), "floordiv": ("//", 14), "pow": ("**", 16),
+    "bitor": ("|", 9),
+    "bitxor": ("^", 10),
+    "bitand": ("&", 11),
+    "lshift": ("<<", 12),
+    "rshift": (">>", 12),
+    "add": ("+", 13),
+    "sub": ("-", 13),
+    "mul": ("*", 14),
+    "matmul": ("@", 14),
+    "div": ("/", 14),
+    "mod": ("%", 14),
+    "floordiv": ("//", 14),
+    "pow": ("**", 16),
 }
-_UNARY = {"not": ("not ", 7), "neg": ("-", 15),
-          "pos": ("+", 15), "invert": ("~", 15)}
-_COMPARE = {"eq": "==", "ne": "!=", "lt": "<", "le": "<=", "gt": ">",
-            "ge": ">=", "in": "in", "notin": "not in", "is": "is", "isnot": "is not"}
+_UNARY = {"not": ("not ", 7), "neg": ("-", 15), "pos": ("+", 15), "invert": ("~", 15)}
+_COMPARE = {
+    "eq": "==",
+    "ne": "!=",
+    "lt": "<",
+    "le": "<=",
+    "gt": ">",
+    "ge": ">=",
+    "in": "in",
+    "notin": "not in",
+    "is": "is",
+    "isnot": "is not",
+}
 _QUOTES = ["'", '"', '"""', "'''"]
 
 
@@ -206,8 +222,13 @@ def _expr(node, required):
             parts.append(_expr(node["comps"][index], 9))
         return _parenthesize(" ".join(parts), 8, required)
     if tag == "Cond":
-        text = (_expr(node["then"], 5) + " if " + _expr(node["test"], 5)
-                + " else " + _expr(node["else"], 4))
+        text = (
+            _expr(node["then"], 5)
+            + " if "
+            + _expr(node["test"], 5)
+            + " else "
+            + _expr(node["else"], 4)
+        )
         return _parenthesize(text, 4, required)
     if tag == "Call":
         parts = [_expr(arg, 4) for arg in node["args"]]
