@@ -1,5 +1,5 @@
 import {highlight, escapeHTML} from './common.js';
-import {ready, isReady, invoke, compile} from './runtime.js';
+import {ready, isReady, invoke, compile, packageVersion} from './runtime.js';
 import {install, curated} from './packages.js';
 import {shareLink, restoreLink} from './share.js';
 
@@ -195,27 +195,29 @@ async function installPackage(spec) {
   $('packages-button').title = `${installed.size} package${installed.size === 1 ? '' : 's'} installed`;
 }
 const packageExamples = curated.filter(pkg => !['art', 'snowballstemmer'].includes(pkg.name));
+packageExamples.push({
+  name: 'diaspore', version: packageVersion, example: 'durable', title: 'Durable workflow',
+});
 const group = document.createElement('optgroup');
 group.label = 'With packages';
 for (const pkg of packageExamples) {
   const option = document.createElement('option');
-  option.value = `package:${pkg.name}`;
-  option.textContent = pkg.name;
+  option.value = pkg.example || `package:${pkg.name}`;
+  option.textContent = pkg.title || pkg.name;
   group.append(option);
 }
 $('example').append(group);
 async function loadExample() {
-  const pkg = packageExamples.find(pkg => `package:${pkg.name}` === $('example').value);
-  if (pkg) {
+  const pkg = packageExamples.find(pkg => (pkg.example || `package:${pkg.name}`) === $('example').value);
+  if (pkg?.demo) {
     source.value = pkg.demo.replaceAll('; ', '\n') + '\n';
-    repaint();
-    await installPackage(`${pkg.name}==${pkg.version}`);
   } else {
-    const response = await fetch(`examples/${$('example').value}.py`);
+    const response = await fetch(`examples/${pkg?.example || $('example').value}.py`);
     if (!response.ok) throw new Error('Could not load example');
     source.value = await response.text();
-    repaint();
   }
+  repaint();
+  if (pkg) await installPackage(`${pkg.name}==${pkg.version}`);
 }
 $('example').onchange = async () => {
   setBusy(true);

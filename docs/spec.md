@@ -72,17 +72,50 @@ filesystem. A standalone bundle cannot silently fall back to the runtime's
 store; dynamic imports must name modules included in that bundle or native
 modules.
 
-The store is `{"diaspore_stdlib": 1, "id": "sha256:...", "modules": {...}}`.
+The store's logical shape is
+`{"diaspore_stdlib": 1, "id": "sha256:...", "modules": {...}}`.
 Its id hashes the canonical JSON object containing `diaspore_stdlib` and
 `modules`, excluding `id`, using the canonical encoding in section 14.
-Optional `licenses` and `manifest` metadata retain distribution notices and
-source provenance; they do not affect the compiled-code id.
-`make generate` compiles the store for Go, WebAssembly, TypeScript and Lua.
-The native Python package compiles and caches the same store from its installed
-sources. When running inside a sandbox, it uses the private `_diaspore_stdlib`
-bridge to obtain installed module IR without filesystem access. Generated
-stores are not committed. Embedding APIs use the shipped store for linked
-bundles by default; this supplies code, not filesystem or network capabilities.
+Distribution notices and source manifests do not affect this compiled-code id.
+Embedding APIs accepting a parsed store validate its canonical content hash.
+
+Installed stores use the `DSPS02` binary container (`stdlib.dsps`), not
+whole-store JSON. Its compact index contains the canonical store id, a preset
+DEFLATE dictionary of up to 32768 bytes, sorted module names and filenames,
+payload spans, codecs, decoded lengths and per-payload SHA256 hashes. Startup
+validates the index hash (including the dictionary) and structure without
+decoding module IR. Older `DSPS01` installed containers are rejected and must
+be regenerated.
+Module lookup and package resolution use only the index. On first access, the
+runtime verifies the stored payload hash, decompresses it if needed, and decodes
+one standalone DSPB01 module with its own local string table. Codec 0 stores
+raw DSPB01 bytes; codec 1 stores raw DEFLATE, not gzip, using the index dictionary.
+An empty dictionary selects ordinary raw DEFLATE. Python, Go and TypeScript
+ship dictionary-compressed modules; Lua ships raw modules with an empty
+dictionary and rejects compressed payload codecs. Decompression is bounded by
+the declared decoded length and rejects incomplete streams, trailing bytes and
+length mismatches. There is no store-wide string table. The runtime validates
+the bundle and module identity against
+the index before caching the decoded IR privately. Module globals and import
+state remain separate for each machine. Neither the container encoding nor its
+compression changes the canonical store id. These hashes detect corruption;
+they are not signatures authenticating a distribution. See [dspb.md](dspb.md)
+for the container layout.
+
+`make generate` compiles paired compiler bundles and stores for Python, Go
+(including WebAssembly), TypeScript and Lua. Python ships a prebuilt store too;
+installed startup does not compile or hash the source tree. Self-contained
+compilation copies reachable precompiled IR, including stored source lines.
+Python wheel builds compile a fresh store; source distributions include the
+source roots and build hook rather than a generated store. Runtime packages
+retain license notices separately, without duplicate library source trees or
+whole-store JSON. The Python wheel keeps only the parser helper source and its
+package initializer needed by the native compiler. A missing or corrupt installed
+store is an error, not a request to compile sources or load a legacy JSON cache.
+When running inside a sandbox, Python uses the private `_diaspore_stdlib` bridge
+to obtain installed module IR without filesystem access. Generated stores are
+not committed. Embedding APIs use the shipped store for linked bundles by
+default; this supplies code, not filesystem or network capabilities.
 
 A module's `file` is its path relative to the compiler's working directory
 (absolute when outside it). Standard library modules are named

@@ -788,6 +788,13 @@ MEMORYVIEW_METHODS = {"tobytes", "tolist", "hex", "cast", "toreadonly", "release
 MEMORYVIEW_ATTRS = {"obj", "nbytes", "readonly", "format", "itemsize", "ndim",
                     "shape", "strides", "suboffsets", "c_contiguous", "f_contiguous",
                     "contiguous"}
+_HOST_METHODS = {
+    str: STR_METHODS, list: LIST_METHODS, dict: DICT_METHODS, set: SET_METHODS,
+    frozenset: FROZENSET_METHODS, tuple: TUPLE_METHODS, bytes: BYTES_METHODS,
+    bytearray: BYTEARRAY_METHODS, memoryview: MEMORYVIEW_METHODS,
+    MappingProxyType: {"keys", "values", "items", "get", "copy"},
+    _DICT_KEYS: {"isdisjoint"}, _DICT_ITEMS: {"isdisjoint"},
+}
 _FAST_CODECS = {
     "utf-8": "utf-8", "utf8": "utf-8", "utf": "utf-8", "u8": "utf-8",
     "cp65001": "utf-8", "ascii": "ascii", "us-ascii": "ascii", "646": "ascii",
@@ -1004,7 +1011,8 @@ class Interp:
 
     def fuel(self):
         """Charge one execution step and enforce the step budget."""
-        self._check_interrupt()
+        if self.pending_interrupt:
+            self._check_interrupt()
         self.steps += 1
         if self.max_steps is not None and self.steps > self.max_steps:
             raise DiasporeTrap(f"diaspore: step budget exceeded ({self.max_steps})")
@@ -1941,6 +1949,12 @@ class Interp:
 
     def binop(self, kind, l, r, inplace=False):
         """Apply a binary operator with sandbox protocol dispatch."""
+        # Exact integers cannot override numeric protocols or grow sequences.
+        if type(l) is int and type(r) is int:
+            try:
+                return (_IBINOPS if inplace else _BINOPS)[kind](l, r)
+            except Exception as exc:
+                raise host_exc_to_diaspore(exc) from None
         if kind == "mod" and isinstance(l, (str, bytes, bytearray)):
             try:
                 return l % percent_value(self, r)
@@ -2355,12 +2369,12 @@ class Interp:
     def call(self, f, args, kwargs):
         """Invoke a sandbox or host callable with explicit arguments."""
         self.fuel()
+        if isinstance(f, DiasporeFunction):
+            return self.call_function(f, args, kwargs)
         if isinstance(f, StaticMethod):
             return self.call(f.fn, args, kwargs)
         if isinstance(f, GenericAlias):
             return self.call(f.__origin__, args, kwargs)
-        if isinstance(f, DiasporeFunction):
-            return self.call_function(f, args, kwargs)
         if isinstance(f, BoundMethod):
             return self.call(f.fn, [f.obj] + args, kwargs)
         if isinstance(f, DiasporeClass):
@@ -2431,6 +2445,9 @@ class Interp:
         """Bind positional and keyword arguments to a function's parameters."""
         p = fn.params
         names = p["args"]
+        if (not kwargs and len(args) == len(names) and not p["kwonly"]
+                and not p["vararg"] and not p["kwarg"]):
+            return dict(zip(names, args))
         posonly = names[:p["posonly"]]
         bad = [name for name in posonly if name in kwargs]
         if bad and not p["kwarg"]:
@@ -2621,6 +2638,10 @@ class Interp:
             return getattr(o, n)
         if not isinstance(n, str):
             raise DiasporeError(make_exc("TypeError", "attribute name must be string"))
+        # Only exact host primitives use this path; sandbox descriptors still bind below.
+        allowed = _HOST_METHODS.get(type(o))
+        if allowed is not None and n in allowed:
+            return self.host_attr(o, n)
         if not raw and isinstance(o, DiasporeInstance):
             hook = o.cls.lookup("__getattribute__")
             if hook is not _MISSING and hook is not OBJECT.ns.get("__getattribute__"):
@@ -2964,14 +2985,7 @@ class Interp:
     def host_attr(self, o, n):
         """Resolve an allowlisted attribute on a host primitive."""
         t = type(o)
-        allowed = {str: STR_METHODS, list: LIST_METHODS, dict: DICT_METHODS,
-                   set: SET_METHODS, frozenset: FROZENSET_METHODS,
-                   tuple: TUPLE_METHODS, bytes: BYTES_METHODS,
-                   bytearray: BYTEARRAY_METHODS, memoryview: MEMORYVIEW_METHODS}.get(t)
-        if t is MappingProxyType:
-            allowed = {"keys", "values", "items", "get", "copy"}
-        if t in (_DICT_KEYS, _DICT_ITEMS):
-            allowed = {"isdisjoint"}
+        allowed = _HOST_METHODS.get(t)
         if allowed and n in allowed:
             if t is str and n == "encode":
                 return lambda encoding="utf-8", errors="strict": self.codec(o, encoding, errors)
@@ -4536,14 +4550,7 @@ def make_native_modules(interp: Interp):
     def stdlib_module(name):
         from .stdlib_store import get_stdlib_module
 
-        def copy_ir(value):
-            if isinstance(value, dict):
-                return {key: copy_ir(item) for key, item in value.items()}
-            if isinstance(value, list):
-                return [copy_ir(item) for item in value]
-            return value
-
-        return copy_ir(get_stdlib_module(name))
+        return get_stdlib_module(name)
 
     modules = {"time": time_mod, "math": math_mod,
                "sys": sys_mod, "net": net_mod,

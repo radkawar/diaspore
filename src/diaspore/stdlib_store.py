@@ -1,10 +1,9 @@
-"""Compile and cache the installed, content-addressed standard-library store.
+"""Load the installed content-addressed standard library without compiling it.
 
-Sandboxed copies use the private runtime bridge instead of reading host files.
-Host processes retain one immutable installed-source snapshot; the persistent
-cache key includes all source bytes and the compiler implementation.
-Optional licenses and manifest metadata preserve distribution notices; only the
-diaspore_stdlib version and modules mapping participate in the store identifier.
+Host consumers read the compact DSPS02 index and decode individual DSPB modules
+on demand. Sandboxed copies use the private runtime bridge instead of host files.
+Source compilation is an explicit generation operation; distribution metadata
+does not participate in the canonical content identifier.
 """
 
 try:
@@ -119,58 +118,24 @@ def _validate_store(store):
                          + str(store.get("id")) + ", actual " + actual)
 
 
-def load_stdlib_store():
-    """Return the host's cached immutable compiled standard-library store.
+def _store_path():
+    import os
 
-    The source and compiler digest selects the on-disk cache. Runtime consumers
-    must not mutate returned IR; each machine maintains its own module globals.
+    return os.path.join(os.path.dirname(__file__), "stdlib.dsps")
+
+
+def load_stdlib_store():
+    """Return the installed store with index-only startup and lazy module IR.
+
+    The distribution must include stdlib.dsps. Missing or corrupt artifacts are
+    errors, never a request to compile sources or load a whole-store JSON cache.
     """
     global _store
-    if _store is not None:
-        return _store
-    import gzip
-    import hashlib
-    import json
-    import os
-    import tempfile
+    if _store is None:
+        from .stdlib_store_codec import load_stdlib_store as load_compact_store
 
-    from . import compiler
-
-    sources = _sources()
-    metadata = _distribution_metadata()
-    fingerprint = hashlib.sha256()
-    for path in (compiler.__file__, __file__):
-        with open(path, "rb") as implementation:
-            data = implementation.read()
-        fingerprint.update(len(data).to_bytes(8, "big"))
-        fingerprint.update(data)
-    for name in sorted(sources):
-        relative, package, data = sources[name]
-        fingerprint.update(_canonical([name, relative, package, len(data)]))
-        fingerprint.update(data)
-    fingerprint.update(_canonical(metadata))
-    cache_root = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-    directory = os.path.join(cache_root, "diaspore", "stdlib")
-    path = os.path.join(directory, fingerprint.hexdigest() + ".json.gz")
-    if os.path.isfile(path):
-        with gzip.open(path, "rt", encoding="utf-8") as cached:
-            store = json.load(cached)
-        _validate_store(store)
-        _store = store
-        return _store
-    store = _compile(sources, metadata)
-    os.makedirs(directory, exist_ok=True)
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=directory, delete=False) as output:
-            temporary = output.name
-            output.write(gzip.compress(_canonical(store), mtime=0))
-        os.replace(temporary, path)
-    finally:
-        if temporary is not None and os.path.exists(temporary):
-            os.unlink(temporary)
-    _store = store
-    return store
+        _store = load_compact_store(_store_path())
+    return _store
 
 
 def get_stdlib_id():
@@ -188,18 +153,26 @@ def stdlib_module_names():
 
 
 def get_stdlib_module(name):
-    """Return immutable module IR, or None when the store has no such module."""
+    """Return isolated module IR, or None when the store has no such module."""
     if _bridge is not None:
         return _bridge.get_module(name)
-    return load_stdlib_store()["modules"].get(name)
+    modules = load_stdlib_store()["modules"]
+    if isinstance(modules, dict):
+        import copy
+
+        return copy.deepcopy(modules.get(name))
+    return modules.get(name)
 
 
-def write_stdlib_store(path):
-    """Write a runtime store artifact, gzip-compressed for a .gz destination."""
-    import gzip
+def write_stdlib_store(path, *, compress=True):
+    """Compile current sources and write a fresh compact runtime store.
 
-    data = _canonical(load_stdlib_store()) + b"\n"
-    if path.endswith(".gz"):
-        data = gzip.compress(data, mtime=0)
+    Args:
+        path: Destination DSPS02 artifact.
+        compress: Use preset-dictionary raw deflate; false writes raw DSPB payloads.
+    """
+    from .stdlib_store_codec import encode_stdlib_store
+
+    data = encode_stdlib_store(compile_stdlib_store(), compress=compress)
     with open(path, "wb") as output:
         output.write(data)

@@ -134,9 +134,15 @@ func (vm *VM) execEval(caller *frame, code Value, glob, loc Value, mode string) 
 			return nil, newError("SyntaxError", cerr.Error())
 		}
 		fr := &frame{cells: cells, globals: cells, moduleName: name, fname: "<eval>"}
+		fr.metadata.source = node{"body": body}
+		fr.metadata.positions.add(metadataInt(expr, "ln"))
+		fr.line = metadataInt(expr, "ln")
 		vm.enterMetadataFrame(fr)
 		defer vm.leaveMetadataFrame(fr)
 		v, rerr := evalFn(fr)
+		if raised, ok := rerr.(*Raised); ok {
+			vm.recordMetadataTraceback(raised, fr)
+		}
 		delete(vm.modCells, name)
 		if writeBack != nil {
 			cellsToDict(cells, writeBack)
@@ -144,12 +150,14 @@ func (vm *VM) execEval(caller *frame, code Value, glob, loc Value, mode string) 
 		return v, rerr
 	}
 
-	execFn, cerr := compileSnippet(vm, name, body, cells, bodyMode == "single")
+	execFn, positions, cerr := compileSnippet(vm, name, body, cells, bodyMode == "single")
 	if cerr != nil {
 		delete(vm.modCells, name)
 		return nil, newError("SyntaxError", cerr.Error())
 	}
 	fr := &frame{cells: cells, globals: cells, moduleName: name, fname: "<exec>"}
+	fr.metadata.source = node{"body": body}
+	fr.metadata.positions = positions
 	vm.enterMetadataFrame(fr)
 	defer vm.leaveMetadataFrame(fr)
 	rerr := execFn(fr)

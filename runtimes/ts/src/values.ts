@@ -73,6 +73,8 @@ export function strJoin(parts: Iterable<PyString>, separator: PyString = ""): Py
   let result = "";
   let points: string[] | null = null;
   let first = true;
+  // Inspect the new chunk, not the growing rope: indexing the rope flattens it.
+  let last = -1;
   const append = (part: PyString): void => {
     if (points !== null) {
       for (const point of part) points.push(point);
@@ -80,13 +82,13 @@ export function strJoin(parts: Iterable<PyString>, separator: PyString = ""): Py
       points = Array.from(result);
       for (const point of part) points.push(point);
     } else {
-      const last = result.charCodeAt(result.length - 1);
       const next = part.charCodeAt(0);
       if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
         points = Array.from(result);
         for (const point of part) points.push(point);
       } else {
         result += part;
+        if (part.length !== 0) last = part.charCodeAt(part.length - 1);
       }
     }
   };

@@ -22,30 +22,41 @@ def _write(path: Path, data: bytes) -> None:
 
 
 def _generate() -> None:
+    from diaspore import stdlib_store
     from diaspore.compiler import compile_bundle, dumps
-    from diaspore.stdlib_store import _canonical, load_stdlib_store
+    from diaspore.stdlib_store_codec import encode_stdlib_store
 
     os.chdir(ROOT)
-    store = load_stdlib_store()
+    store = stdlib_store.compile_stdlib_store()
+    stdlib_store._store = store
     bundle = compile_bundle(str(ROOT / "selfhost" / "dspc.py"))
     if bundle.get("stdlib") != store["id"]:
         raise ValueError("generated compiler and standard-library snapshot ids differ")
     source = dumps(bundle).encode("utf-8") + b"\n"
     compressed_source = gzip.compress(source, mtime=0)
-    library = _canonical(store) + b"\n"
-    compressed_library = gzip.compress(library, mtime=0)
+    compressed_library = encode_stdlib_store(store)
+    raw_library = encode_stdlib_store(store, compress=False)
     for relative, data in (
-        ("runtimes/go/interp/stdlib.json.gz", compressed_library),
-        ("runtimes/ts/stdlib.json.gz", compressed_library),
-        ("runtimes/lua/stdlib.json", library),
+        ("src/diaspore/stdlib.dsps", compressed_library),
+        ("runtimes/go/interp/stdlib.dsps", compressed_library),
+        ("runtimes/ts/stdlib.dsps", compressed_library),
+        ("runtimes/lua/stdlib.dsps", raw_library),
         ("runtimes/go/dspc/dspc.dsp.json.gz", compressed_source),
         ("runtimes/ts/dspc.dsp.json.gz", compressed_source),
         ("runtimes/lua/dspc.dsp.json", source),
     ):
         _write(ROOT / relative, data)
+    for relative in (
+        "runtimes/go/interp/stdlib.json.gz",
+        "runtimes/ts/stdlib.json.gz",
+        "runtimes/lua/stdlib.json",
+    ):
+        (ROOT / relative).unlink(missing_ok=True)
     print("Generated linked runtimes: " + store["id"] + "; "
           + str(len(store["modules"])) + " standard-library modules; "
-          + str(len(compressed_source)) + " compiler bytes")
+          + str(len(compressed_source)) + " compiler bytes; "
+          + str(len(compressed_library)) + " indexed store bytes; "
+          + str(len(raw_library)) + " uncompressed indexed store bytes")
 
 
 def main() -> None:

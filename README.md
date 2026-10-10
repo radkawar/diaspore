@@ -18,8 +18,13 @@ lua5.4 runtimes/lua/cli.lua run app.dsp.json  # Lua
 ```
 
 By default, bundles contain program code and a content hash identifying the
-standard library shipped by the runtime. Imports initialize library modules
-only when needed. A mismatched library is rejected before execution.
+standard library shipped by the runtime. The prebuilt `stdlib.dsps` (`DSPS02`)
+store loads only its compact index initially; standalone module DSPB payloads
+are checked, decoded and cached on demand. Python, Go and TypeScript compress
+each module with raw DEFLATE and a shared preset dictionary from the index;
+Lua ships raw payloads. Compression does not change the library's content hash.
+Imports initialize each machine's library modules only when needed. A mismatched
+library is rejected before execution.
 For an artifact that carries its own reachable library modules:
 
 ```sh
@@ -28,6 +33,11 @@ diaspore build app.py --self-contained -o app.dsp.json
 
 `compile_bundle(..., self_contained=True)` provides the same option to Python
 embedders. Go, TypeScript and Lua compilers expose the corresponding option.
+
+`make generate` produces matching stores for all four runtimes, including the
+Python package; runtime startup does not compile installed library sources.
+Index and per-module hashes detect corrupted artifacts, not malicious replacement
+of a distribution. See [docs/dspb.md](docs/dspb.md) for the binary format.
 
 ## Features
 
@@ -158,8 +168,9 @@ See `tools/stdlib_manifest.json` for the exact vendored module inventory.
 The bundled pure-Python standard library includes unmodified files from
 CPython v3.12.12, distributed under the Python Software Foundation license and
 the notices in [src/diaspore/cpython/LICENSE](src/diaspore/cpython/LICENSE).
-Unmodified sources and their manifest ship in `src/diaspore/cpython`; Diaspore's
-maintained C-layer adapters and overlays live in `src/diaspore/stdlib`.
+Source distributions retain unmodified sources and their manifest in
+`src/diaspore/cpython`; Diaspore's maintained C-layer adapters and overlays live
+in `src/diaspore/stdlib`. Runtime packages ship precompiled code and notices.
 Compilers search the maintained root before the upstream root.
 Unicode property and identifier tables include data distributed under the
 [Unicode License](src/diaspore/cpython/UNICODE_LICENSE).

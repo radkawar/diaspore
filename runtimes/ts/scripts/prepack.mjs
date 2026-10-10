@@ -1,11 +1,11 @@
 import { accessSync, constants, copyFileSync } from "node:fs";
 
+// Ship the generated DSPS02 preset-dictionary store alongside the gzip compiler bundle.
 for (const file of [
   "../dspc.dsp.json.gz",
-  "../stdlib.json.gz",
+  "../stdlib.dsps",
   "../cpython/LICENSE",
   "../cpython/UNICODE_LICENSE",
-  "../cpython/stdlib_manifest.json",
 ]) {
   try {
     accessSync(new URL(file, import.meta.url), constants.R_OK);

@@ -1,17 +1,22 @@
 package interp
 
 import (
+	"bytes"
+	"compress/flate"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"sort"
+	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
-//go:embed stdlib.json.gz
+//go:embed stdlib.dsps
 var stdlibData []byte
 
 type stdlibStore struct {
@@ -21,95 +26,164 @@ type stdlibStore struct {
 }
 
 type stdlibModule struct {
-	raw  []byte
-	once sync.Once
-	ir   node
-	err  error
-}
-
-// UnmarshalJSON retains a view into the store's immutable decompressed bytes.
-// Unlike json.RawMessage, it does not copy each module's serialized payload.
-func (module *stdlibModule) UnmarshalJSON(data []byte) error {
-	module.raw = data
-	return nil
+	name       string
+	file       string
+	raw        []byte
+	decoded    uint32
+	codec      byte
+	digest     [sha256.Size]byte
+	dictionary []byte
+	once       sync.Once
+	ir         node
+	err        error
 }
 
 func (module *stdlibModule) load() (node, error) {
 	module.once.Do(func() {
-		var value any
-		value, module.err = DecodeJSON(module.raw)
-		if module.err != nil {
-			return
-		}
-		var ok bool
-		module.ir, ok = value.(map[string]any)
-		if !ok {
-			module.err = fmt.Errorf("stdlib module is not an object")
-			return
-		}
-		if _, ok := module.ir["body"].([]any); !ok {
-			module.err = fmt.Errorf("stdlib module body is not an array")
-		}
+		module.ir, module.err = module.decode()
 	})
 	return module.ir, module.err
 }
 
-type stdlibModuleIndex struct {
-	raw     []byte
-	modules map[string]*stdlibModule
-}
-
-// UnmarshalJSON indexes module payloads without constructing their IR trees.
-func (index *stdlibModuleIndex) UnmarshalJSON(data []byte) error {
-	index.raw = data
-	return json.Unmarshal(data, &index.modules)
+func (module *stdlibModule) decode() (node, error) {
+	if sha256.Sum256(module.raw) != module.digest {
+		return nil, fmt.Errorf("stdlib module %q payload digest mismatch", module.name)
+	}
+	data := module.raw
+	if module.codec == 1 {
+		source := bytes.NewReader(data)
+		var reader io.ReadCloser
+		if len(module.dictionary) == 0 {
+			reader = flate.NewReader(source)
+		} else {
+			reader = flate.NewReaderDict(source, module.dictionary)
+		}
+		defer reader.Close()
+		data = make([]byte, int(module.decoded))
+		if _, err := io.ReadFull(reader, data); err != nil {
+			return nil, fmt.Errorf("stdlib module %q decoded length: %w", module.name, err)
+		}
+		var extra [1]byte
+		if n, err := reader.Read(extra[:]); n != 0 || err != io.EOF || source.Len() != 0 {
+			return nil, fmt.Errorf("stdlib module %q invalid deflate length or trailer", module.name)
+		}
+	}
+	if !bytes.HasPrefix(data, dspbMagic) {
+		return nil, fmt.Errorf("stdlib module %q must be a standalone DSPB01 bundle", module.name)
+	}
+	bundle, err := DecodeDSPB(data)
+	if err != nil {
+		return nil, err
+	}
+	modules, _ := bundle["modules"].(map[string]any)
+	moduleIR, _ := modules[module.name].(map[string]any)
+	if bundle["diaspore"] != float64(1) || bundle["main"] != module.name || len(modules) != 1 ||
+		moduleIR["name"] != module.name || moduleIR["file"] != module.file {
+		return nil, fmt.Errorf("stdlib module %q does not match its index record", module.name)
+	}
+	if _, linked := bundle["stdlib"]; linked {
+		return nil, fmt.Errorf("stdlib module %q contains a stdlib reference", module.name)
+	}
+	if err := validateStoreModule(moduleIR); err != nil {
+		return nil, fmt.Errorf("stdlib module %q: %w", module.name, err)
+	}
+	return moduleIR, nil
 }
 
 func loadStdlib() (*stdlibStore, error) {
-	data, err := maybeGunzip(stdlibData)
-	if err != nil {
-		return nil, fmt.Errorf("cannot load shipped stdlib: %w", err)
-	}
-	return indexStdlib(data)
+	return indexStdlib(stdlibData)
 }
 
+const stdlibHeaderSize = 6 + 4 + sha256.Size
+const stdlibMaxModuleSize = 256 << 20
+
+// indexStdlib touches only the header and index, never the module payloads.
+// The backing bytes are immutable for the lifetime of the store.
 func indexStdlib(data []byte) (*stdlibStore, error) {
-	var root struct {
-		Version int               `json:"diaspore_stdlib"`
-		ID      string            `json:"id"`
-		Modules stdlibModuleIndex `json:"modules"`
+	if len(data) < stdlibHeaderSize || string(data[:6]) != "DSPS02" {
+		return nil, fmt.Errorf("invalid shipped stdlib DSPS02 header")
 	}
-	if err := json.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("invalid shipped stdlib JSON: %w", err)
+	indexSize := uint64(binary.LittleEndian.Uint32(data[6:10]))
+	if indexSize < 38 || indexSize > 64<<20 || indexSize > uint64(len(data)-stdlibHeaderSize) {
+		return nil, fmt.Errorf("invalid shipped stdlib index length")
 	}
-	if root.Version != 1 {
-		return nil, fmt.Errorf("not a diaspore v1 stdlib store")
+	index := data[stdlibHeaderSize : stdlibHeaderSize+int(indexSize)]
+	digest := sha256.Sum256(index)
+	if !bytes.Equal(digest[:], data[10:stdlibHeaderSize]) {
+		return nil, fmt.Errorf("shipped stdlib index digest mismatch")
 	}
-	if !validStdlibID(root.ID) {
-		return nil, fmt.Errorf("invalid shipped stdlib content id")
+	dictionarySize := int(binary.LittleEndian.Uint16(index[32:34]))
+	if dictionarySize > 32768 || dictionarySize > len(index)-38 {
+		return nil, fmt.Errorf("invalid shipped stdlib dictionary length")
 	}
-	if root.Modules.modules == nil {
-		return nil, fmt.Errorf("shipped stdlib modules are not an object")
+	dictionary := index[34 : 34+dictionarySize]
+	count := binary.LittleEndian.Uint32(index[34+dictionarySize : 38+dictionarySize])
+	if uint64(count) > uint64(len(index)-38-dictionarySize)/51 {
+		return nil, fmt.Errorf("invalid shipped stdlib module count")
 	}
-	// Generated stores use canonical JSON. Hash the exact canonical modules
-	// object, excluding notices and the declared id, without allocating IR.
-	hash := sha256.New()
-	hash.Write([]byte(`{"diaspore_stdlib":1,"modules":`))
-	hash.Write(root.Modules.raw)
-	hash.Write([]byte("}"))
-	actual := "sha256:" + hex.EncodeToString(hash.Sum(nil))
-	if root.ID != actual {
-		return nil, fmt.Errorf("shipped stdlib content id mismatch: declared %s, actual %s", root.ID, actual)
+	store := &stdlibStore{
+		id:      "sha256:" + hex.EncodeToString(index[:32]),
+		modules: make(map[string]*stdlibModule, int(count)),
+		names:   make([]string, 0, int(count)),
 	}
-	names := make([]string, 0, len(root.Modules.modules))
-	for name, module := range root.Modules.modules {
-		if module == nil {
-			return nil, fmt.Errorf("shipped stdlib module %q is not an object", name)
+	index = index[38+dictionarySize:]
+	payloads := data[stdlibHeaderSize+int(indexSize):]
+	var next uint64
+	previous := ""
+	for range count {
+		name, rest, err := stdlibIndexString(index)
+		if err != nil {
+			return nil, err
 		}
-		names = append(names, name)
+		file, rest, err := stdlibIndexString(rest)
+		if err != nil {
+			return nil, err
+		}
+		if name <= previous || !validStoreModuleName(name) || strings.IndexByte(file, 0) >= 0 {
+			return nil, fmt.Errorf("invalid shipped stdlib module name or file %q", name)
+		}
+		if len(rest) < 45 {
+			return nil, fmt.Errorf("truncated shipped stdlib index record")
+		}
+		offset := uint64(binary.LittleEndian.Uint32(rest[:4]))
+		size := uint64(binary.LittleEndian.Uint32(rest[4:8]))
+		decoded := binary.LittleEndian.Uint32(rest[8:12])
+		codec := rest[12]
+		if offset != next || size < 1 || size > stdlibMaxModuleSize || offset+size > uint64(len(payloads)) ||
+			decoded < 6 || decoded > stdlibMaxModuleSize || codec > 1 ||
+			(codec == 0 && size != uint64(decoded)) {
+			return nil, fmt.Errorf("invalid shipped stdlib payload span, length or codec for %q", name)
+		}
+		module := &stdlibModule{name: name, file: file, raw: payloads[int(offset):int(offset+size)], decoded: decoded, codec: codec, dictionary: dictionary}
+		copy(module.digest[:], rest[13:45])
+		store.modules[name] = module
+		store.names = append(store.names, name)
+		next, previous, index = offset+size, name, rest[45:]
 	}
-	sort.Strings(names)
-	return &stdlibStore{id: root.ID, modules: root.Modules.modules, names: names}, nil
+	if len(index) != 0 || next != uint64(len(payloads)) {
+		return nil, fmt.Errorf("trailing shipped stdlib index or payload bytes")
+	}
+	return store, nil
+}
+
+func stdlibIndexString(data []byte) (string, []byte, error) {
+	if len(data) < 2 {
+		return "", nil, fmt.Errorf("truncated shipped stdlib index string")
+	}
+	size := int(binary.LittleEndian.Uint16(data[:2]))
+	if size == 0 || size > len(data)-2 || !utf8.Valid(data[2:2+size]) {
+		return "", nil, fmt.Errorf("invalid shipped stdlib index string")
+	}
+	return string(data[2 : 2+size]), data[2+size:], nil
+}
+
+func validStoreModuleName(name string) bool {
+	for part := range strings.SplitSeq(name, ".") {
+		if !pyIsIdentifier(part) {
+			return false
+		}
+	}
+	return true
 }
 
 var shippedStdlib = sync.OnceValues(loadStdlib)

@@ -1254,9 +1254,7 @@ def compile_bundle(entry_path: str,
                 if "." in name:
                     ensure(name.rsplit(".", 1)[0])
                 return True
-            import copy
-
-            module = copy.deepcopy(get_stdlib_module(name))
+            module = get_stdlib_module(name)
             if not debug:
                 module.pop("src", None)
             modules[name] = module

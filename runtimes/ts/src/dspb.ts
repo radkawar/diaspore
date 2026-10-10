@@ -852,10 +852,11 @@ function dspbDecodeInner(data: Buffer): Node {
   const modCount = r.count();
   for (let i = 0; i < modCount; i++) {
     const name = r.s();
+    if (Object.hasOwn(modules, name)) throw new DSPBError("duplicate module name");
     const mod: Node = { name, file: r.s() };
     if (r.byte() === 1) mod.src = decStrs(r);
     mod.body = decNodes(r);
-    modules[name] = mod;
+    Object.defineProperty(modules, name, { value: mod, enumerable: true, writable: true, configurable: true });
   }
   if (r.pos !== data.length) throw new DSPBError("trailing bytes after DSPB bundle");
   return linked ? { diaspore: 1, main, stdlib, modules } : { diaspore: 1, main, modules };

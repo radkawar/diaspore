@@ -126,9 +126,13 @@ func (vm *VM) replaceInstanceDictionary(instance *Instance, value Value) error {
 func (vm *VM) instanceLookup(instance *Instance, name string) (Value, bool, error) {
 	switch dictionary := rawPrim(instance.dictionary).(type) {
 	case *Dict:
+		if dictionary.slowKeys == 0 {
+			value, found := dictionary.GetStr(name)
+			return value, found, nil
+		}
 		return dictionary.Get(name)
 	case *metadataNamespace:
-		return dictionary.get(name)
+		return dictionary.getString(name)
 	}
 	return nil, false, nil
 }
@@ -140,9 +144,13 @@ func (vm *VM) instanceStore(instance *Instance, name string, value Value) error 
 	}
 	switch target := rawPrim(dictionary).(type) {
 	case *Dict:
+		if target.slowKeys == 0 {
+			target.SetStr(name, value)
+			return nil
+		}
 		return target.Set(name, value)
 	case *metadataNamespace:
-		return target.set(name, value)
+		return target.setString(name, value)
 	}
 	return newError("TypeError", "invalid instance dictionary")
 }

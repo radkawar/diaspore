@@ -818,6 +818,8 @@ def decode(data: bytes) -> dict:
     modules: dict[str, dict] = {}
     for _ in range(r.count()):
         name = r.s()
+        if name in modules:
+            raise DSPBError("duplicate module in DSPB bundle")
         mod: dict = {"name": name, "file": r.s()}
         if r.byte() == 1:
             mod["src"] = _dec_strs(r)

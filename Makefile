@@ -10,9 +10,15 @@ GO_BIN     := $(BUILD)/diaspore-go
 DSPC_GO    := $(GO_DIR)/dspc/dspc.dsp.json.gz
 DSPC_TS    := $(TS_DIR)/dspc.dsp.json.gz
 DSPC_LUA   := $(LUA_DIR)/dspc.dsp.json
-STDLIB_GO  := $(GO_DIR)/interp/stdlib.json.gz
-STDLIB_TS  := $(TS_DIR)/stdlib.json.gz
-STDLIB_LUA := $(LUA_DIR)/stdlib.json
+STDLIB_PY  := src/diaspore/stdlib.dsps
+STDLIB_GO  := $(GO_DIR)/interp/stdlib.dsps
+STDLIB_TS  := $(TS_DIR)/stdlib.dsps
+STDLIB_LUA := $(LUA_DIR)/stdlib.dsps
+STORES     := $(STDLIB_PY) $(STDLIB_GO) $(STDLIB_TS) $(STDLIB_LUA)
+OLD_STORES := src/diaspore/stdlib.json src/diaspore/stdlib.json.gz \
+	$(GO_DIR)/interp/stdlib.json $(GO_DIR)/interp/stdlib.json.gz \
+	$(TS_DIR)/stdlib.json $(TS_DIR)/stdlib.json.gz \
+	$(LUA_DIR)/stdlib.json $(LUA_DIR)/stdlib.json.gz
 GO_SRC     := $(shell find $(GO_DIR) -name '*.go' -not -name '*_test.go')
 PY_SRC     := $(shell find src/diaspore -name '*.py')
 STDLIB_SRC := $(shell find src/diaspore/stdlib src/diaspore/cpython -type f -not -path '*/__pycache__/*')
@@ -30,13 +36,13 @@ cpython: build ## Run CPython language and stdlib tests against the committed ra
 	uv run --python 3.12 python tools/cpython_regressions.py --all --baseline tests/cpython_baseline.json $(CPYTHON_ARGS)
 
 # A single process pairs every compiler reference with its immutable store snapshot.
-$(DSPC_GO) $(DSPC_TS) $(DSPC_LUA) $(STDLIB_GO) $(STDLIB_TS) $(STDLIB_LUA) &: selfhost/dspc.py $(PY_SRC) $(STDLIB_SRC) tools/generate_runtime.py Makefile
+$(DSPC_GO) $(DSPC_TS) $(DSPC_LUA) $(STORES) &: selfhost/dspc.py $(PY_SRC) $(STDLIB_SRC) tools/generate_runtime.py Makefile
 	uv run python tools/generate_runtime.py
 
-$(TS_DIR)/.stdlib-stamp: src/diaspore/cpython/LICENSE src/diaspore/cpython/UNICODE_LICENSE src/diaspore/cpython/stdlib_manifest.json Makefile
+$(TS_DIR)/.stdlib-stamp: src/diaspore/cpython/LICENSE src/diaspore/cpython/UNICODE_LICENSE Makefile
 	rm -rf $(TS_DIR)/cpython
 	mkdir -p $(TS_DIR)/cpython
-	cp src/diaspore/cpython/LICENSE src/diaspore/cpython/UNICODE_LICENSE src/diaspore/cpython/stdlib_manifest.json $(TS_DIR)/cpython/
+	cp src/diaspore/cpython/LICENSE src/diaspore/cpython/UNICODE_LICENSE $(TS_DIR)/cpython/
 	touch $@
 
 $(LUA_DIR)/.stdlib-stamp: $(TS_DIR)/.stdlib-stamp
@@ -44,7 +50,8 @@ $(LUA_DIR)/.stdlib-stamp: $(TS_DIR)/.stdlib-stamp
 	cp -R $(TS_DIR)/cpython $(LUA_DIR)/cpython
 	touch $@
 
-generate: $(DSPC_GO) $(DSPC_TS) $(DSPC_LUA) $(STDLIB_GO) $(STDLIB_TS) $(STDLIB_LUA) $(TS_DIR)/.stdlib-stamp $(LUA_DIR)/.stdlib-stamp ## Generate linked compilers and compiled stdlib stores
+generate: $(DSPC_GO) $(DSPC_TS) $(DSPC_LUA) $(STORES) $(TS_DIR)/.stdlib-stamp $(LUA_DIR)/.stdlib-stamp ## Generate linked compilers and compact stdlib stores
+	rm -f $(OLD_STORES)
 
 $(GO_BIN): $(GO_SRC) $(GO_DIR)/go.mod $(DSPC_GO) $(STDLIB_GO)
 	cd $(GO_DIR) && go build -o $(CURDIR)/$@ ./cmd/diaspore-go
@@ -105,5 +112,5 @@ bench: build ## Run the benchmark on CPython and every runtime
 
 clean: ## Remove build output and generated artifacts
 	rm -rf $(BUILD) .pytest_cache tests/fuzz_failures
-	rm -rf $(DSPC_GO) $(DSPC_TS) $(DSPC_LUA) $(STDLIB_GO) $(STDLIB_TS) $(STDLIB_LUA) $(TS_DIR)/.stdlib-stamp $(TS_DIR)/cpython $(LUA_DIR)/.stdlib-stamp $(LUA_DIR)/cpython site/diaspore.wasm site/wasm_exec.js site/cpython site/build.json site/ir.schema.json
+	rm -rf $(DSPC_GO) $(DSPC_TS) $(DSPC_LUA) $(STORES) $(OLD_STORES) $(TS_DIR)/.stdlib-stamp $(TS_DIR)/cpython $(LUA_DIR)/.stdlib-stamp $(LUA_DIR)/cpython site/diaspore.wasm site/wasm_exec.js site/cpython site/build.json site/ir.schema.json
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

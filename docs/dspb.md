@@ -141,3 +141,89 @@ metadata name, including the context used for private slot-name mangling.
 When present, `binding` MUST be a string, not null. Its string reference
 precedes any keyword arguments. Class flag bits other than 0 and 1 are
 invalid. Classes without `binding` retain their existing binary encoding.
+
+## Indexed standard-library store
+
+Installed libraries use the `DSPS02` container (`stdlib.dsps`). This is not a
+program bundle: it holds an index followed by independently encoded module
+bundles. Runtimes read the container once, verify and parse only its index at
+startup, and decode a module only when requested. The index supplies module
+names and `file` paths for import resolution without reading module IR.
+
+All fixed-width integers below are unsigned little-endian. Text lengths count
+UTF-8 bytes; index names and paths require valid UTF-8 without surrogates.
+Module names consist of nonempty identifier components separated by dots.
+Ordering compares Unicode codepoints (equivalently, valid UTF-8 bytes), not
+locale-sensitive collation. Files are nonempty and contain no NUL characters.
+The index is limited to 64 MiB. Stored module lengths are between 1 byte and
+256 MiB; decoded lengths are between 6 bytes and 256 MiB. Readers check these
+limits before allocation or decompression.
+
+```
+header:
+  magic             6 bytes, ASCII "DSPS02"
+  index-length      uint32
+  index-sha256      32 raw bytes
+index:
+  content-id        32 raw bytes
+  dictionary-length uint16, at most 32768
+  dictionary        dictionary-length raw preset bytes
+  module-count      uint32
+  records           module-count records, sorted by module name
+record:
+  name-length       uint16
+  name              name-length UTF-8 bytes
+  file-length       uint16
+  file              file-length UTF-8 bytes
+  offset            uint32, relative to the payload area after the index
+  stored-length     uint32
+  decoded-length    uint32
+  codec             byte: 0 = raw DSPB, 1 = raw-DEFLATE-compressed DSPB
+  payload-sha256    32 raw bytes, hashing the stored payload
+payloads:
+  module payloads in record order, with no gaps or trailing bytes
+```
+
+The content id is exposed as `sha256:` followed by the lowercase hexadecimal
+encoding of `content-id`. It remains the SHA-256 of the canonical JSON object
+`{"diaspore_stdlib":1,"modules":{...}}`, as defined in spec section 1.
+Changing compression, string tables, or index layout does not change that id.
+Generation computes it from the complete compiled IR before encoding.
+
+Each payload decodes to a standalone `DSPB01` bundle with exactly one module.
+Its `main`, module key, module `name`, and module `file` MUST agree with the
+index. Each payload has its own string table, so decoding it requires no
+other payload. Compression applies to individual payloads, never to the
+whole store. Python, Go, and TypeScript distributions use codec 1; the
+dependency-free Lua distribution uses codec 0 with the same content id.
+
+Codec 1 uses an independent raw DEFLATE stream for each module, with no zlib
+or gzip wrapper. The index dictionary supplies its initial history window.
+An empty dictionary is valid and means ordinary raw DEFLATE. Encoders may
+choose any preset bytes without changing the canonical content id; the shipped
+encoder trains a bounded dictionary from patterns recurring across module
+payloads. Dictionary bytes are covered by the index digest and loaded
+once; module strings and IR remain lazy. Readers MUST reject dictionaries
+larger than 32768 bytes and compressed streams that are truncated, have
+trailing data, or exceed the exact declared decoded length.
+
+The Lua distribution emits raw payloads and an empty dictionary. Its loader
+understands the dictionary field but rejects compressed payloads. Installed
+containers with another magic are rejected rather than interpreted as JSON
+or as an older store layout.
+
+Readers MUST verify the index digest before using its contents, reject
+duplicate or unsorted names, unknown codecs, truncated records, overflowing
+or noncontiguous payload ranges, and extra index or container bytes. Raw
+payloads MUST have equal stored and decoded lengths. Before decoding a
+requested module, readers MUST check its stored-payload digest and decoded
+length, then validate its bundle and index identity. Decoded module IR is
+cached; per-machine globals and execution state remain separate.
+
+These hashes detect corrupted distribution bytes; they are not signatures
+and do not authenticate a maliciously replaced store. The index binds its
+declared canonical content id to the encoded module digests. Loading does not
+recompute the canonical whole-library hash, which would defeat lazy decoding.
+Caller-supplied parsed JSON stores still require canonical content-hash
+validation. Distribution licenses and provenance are shipped separately,
+not repeated in every module payload.

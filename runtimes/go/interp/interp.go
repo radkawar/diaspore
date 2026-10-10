@@ -275,12 +275,12 @@ func (vm *VM) compileModuleIR(name string, raw any) (execFn, moduleMeta, error) 
 	if !ok && mn["body"] != nil {
 		return nil, moduleMeta{}, fmt.Errorf("module %q body is not an array", name)
 	}
-	code, err := compileModule(vm, name, body)
+	code, positions, err := compileModule(vm, name, body)
 	if err != nil {
 		delete(vm.modCells, name)
 		return nil, moduleMeta{}, err
 	}
-	meta := moduleMeta{file: name, source: mn}
+	meta := moduleMeta{file: name, source: mn, positions: positions}
 	if file, ok := mn["file"].(string); ok {
 		meta.file = file
 	}
@@ -308,9 +308,10 @@ func (vm *VM) setArgv(argv []string) {
 
 // moduleMeta carries per-module traceback metadata from the bundle.
 type moduleMeta struct {
-	file   string
-	src    []string
-	source node
+	file      string
+	src       []string
+	source    node
+	positions codePositions
 }
 
 // Steps returns the number of fuel units consumed so far.

@@ -182,3 +182,12 @@ func TestDSPBLinkedRequiresStdlibStringReference(t *testing.T) {
 		t.Fatal("linked header without a valid stdlib reference was accepted")
 	}
 }
+
+func TestDSPBDuplicateModuleRejected(t *testing.T) {
+	blob := append([]byte("DSPB01"), 1, 1, 'm', 1, 0, 2,
+		0, 0, 0, 0,
+		0, 0, 0, 0)
+	if _, err := DecodeDSPB(blob); err == nil || !strings.Contains(err.Error(), "duplicate module") {
+		t.Fatalf("duplicate module accepted: %v", err)
+	}
+}

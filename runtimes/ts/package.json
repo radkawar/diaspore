@@ -1,6 +1,6 @@
 {
   "name": "diaspore",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Run Diaspore bundles (portable, sandboxed Python) in Node",
   "license": "MIT",
@@ -24,7 +24,7 @@
   "bin": {
     "diaspore-ts": "dist/cli.js"
   },
-  "files": ["dist", "dspc.dsp.json.gz", "stdlib.json.gz", "cpython", "README.md", "LICENSE"],
+  "files": ["dist", "dspc.dsp.json.gz", "stdlib.dsps", "cpython/LICENSE", "cpython/UNICODE_LICENSE", "README.md", "LICENSE"],
   "engines": {
     "node": ">=22"
   },

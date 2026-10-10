@@ -8,9 +8,10 @@ import (
 // Metadata retains only sandbox state. Reflection objects and lexical cells are
 // allocated on first access; ordinary calls keep using the compiled slot array.
 type codeMetadata struct {
-	source node
-	scope  *scope
-	object *codeObject
+	source    node
+	scope     *scope
+	object    *codeObject
+	positions codePositions
 }
 
 type functionMetadata struct {
@@ -25,6 +26,7 @@ type frameMetadata struct {
 	code      *compiledFunc
 	override  *codeObject
 	source    node
+	positions codePositions
 	back      *frame
 	lasti     int
 	retained  bool
@@ -57,6 +59,7 @@ type codeObject struct {
 	names     *Tuple
 	consts    *Tuple
 	refs      []freeRef
+	positions codePositions
 }
 
 type lexicalCell struct {
@@ -142,6 +145,10 @@ func (ns *metadataNamespace) get(key Value) (Value, bool, error) {
 		}
 		return nil, false, nil
 	}
+	return ns.getString(name)
+}
+
+func (ns *metadataNamespace) getString(name string) (Value, bool, error) {
 	if strings.HasPrefix(name, ".") {
 		return nil, false, nil
 	}
@@ -164,6 +171,10 @@ func (ns *metadataNamespace) set(key, value Value) error {
 		}
 		return ns.extra.Set(key, value)
 	}
+	return ns.setString(name, value)
+}
+
+func (ns *metadataNamespace) setString(name string, value Value) error {
 	if strings.HasPrefix(name, ".") {
 		return newError("ValueError", "reserved compiler binding is not a Python namespace entry")
 	}
@@ -482,7 +493,7 @@ func (vm *VM) compiledMetadata(cf *compiledFunc) *codeObject {
 	}
 	source := cf.metadata.source
 	co := &codeObject{cf: cf, source: source, name: cf.name,
-		qualname: metadataQualname(cf.metadata.scope),
+		qualname: metadataQualname(cf.metadata.scope), positions: cf.metadata.positions,
 		filename: vm.modMeta[cf.moduleName].file, firstline: metadataInt(source, "ln"), flags: 3}
 	if name := nStr(source, "qualname"); name != "" {
 		co.qualname = name
@@ -623,9 +634,13 @@ func (vm *VM) frameCode(f *frameObject) *codeObject {
 	if name == "" {
 		name = "<module>"
 	}
+	positions := fr.metadata.positions
+	if fr.metadata.source == nil {
+		positions = vm.modMeta[fr.moduleName].positions
+	}
 	f.code = &codeObject{source: source, name: name, qualname: name,
 		filename: vm.modMeta[fr.moduleName].file, firstline: metadataInt(source, "ln"),
-		varnames: &Tuple{}}
+		varnames: &Tuple{}, positions: positions}
 	if name == "<module>" && source != nil {
 		f.code.firstline = 1
 	}
@@ -1047,8 +1062,16 @@ func (vm *VM) metadataAttr(value Value, name string) (Value, bool, error) {
 			return d, true, nil
 		}
 	case *Instance:
-		if object.Class.IsSub(baseExc) && name == "__traceback__" {
-			return orNone(object.dictValue(name)), true, nil
+		if object.Class.IsSub(baseExc) {
+			switch name {
+			case "__traceback__", "__cause__", "__context__":
+				return orNone(object.dictValue(name)), true, nil
+			case "__suppress_context__":
+				if value := object.dictValue(name); value != nil {
+					return value, true, nil
+				}
+				return false, true, nil
+			}
 		}
 		attribute, overridden := object.Class.Lookup(name)
 		if builtin, ok := attribute.(*Builtin); ok && objectClass.NS[name] == builtin {
@@ -1219,6 +1242,13 @@ func (vm *VM) codeMetadataAttr(co *codeObject, name string) (Value, error) {
 		return co.names, nil
 	case "co_consts":
 		return co.consts, nil
+	case "co_positions":
+		return bi("co_positions", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := noArgs("co_positions", args, kw); err != nil {
+				return nil, err
+			}
+			return &codePositionIter{positions: co.positions}, nil
+		}), nil
 	case "replace":
 		return bi("replace", func(vm *VM, args []Value, kw []KwArg) (Value, error) {
 			if err := argCount("replace", args, 0, 0); err != nil {
@@ -1265,8 +1295,8 @@ func (vm *VM) codeMetadataAttr(co *codeObject, name string) (Value, error) {
 			return &copy, nil
 		}), nil
 	}
-	// Native Go closures have no CPython bytecode, evaluation stack, or line
-	// table. Do not advertise invented co_code/co_stacksize/co_linetable data.
+	// Statement positions describe the IR execution addresses, not CPython
+	// bytecode. Do not advertise invented co_code/co_stacksize/co_linetable data.
 	return nil, newErrorf("AttributeError", "'code' object has no attribute '%s'", name)
 }
 
@@ -1355,11 +1385,29 @@ func (vm *VM) metadataSetAttr(value Value, name string, replacement Value) (bool
 		}
 		return true, newError("AttributeError", "readonly attribute")
 	case *Instance:
-		if object.Class.IsSub(baseExc) && name == "__traceback__" {
-			if _, ok := replacement.(*tracebackObject); !ok {
-				if _, none := replacement.(NoneType); !none {
-					return true, newError("TypeError", "__traceback__ must be a traceback or None")
+		if object.Class.IsSub(baseExc) {
+			switch name {
+			case "__traceback__":
+				if _, ok := replacement.(*tracebackObject); !ok {
+					if _, none := replacement.(NoneType); !none {
+						return true, newError("TypeError", "__traceback__ must be a traceback or None")
+					}
 				}
+			case "__cause__", "__context__":
+				if _, none := replacement.(NoneType); !none {
+					if exception, ok := replacement.(*Instance); !ok || !exception.Class.IsSub(baseExc) {
+						return true, newErrorf("TypeError", "%s must be an exception or None", name)
+					}
+				}
+				if name == "__cause__" {
+					object.dictSet("__suppress_context__", true)
+				}
+			case "__suppress_context__":
+				if _, ok := replacement.(bool); !ok {
+					return true, newError("TypeError", "attribute value type must be bool")
+				}
+			default:
+				return false, nil
 			}
 			object.dictSet(name, replacement)
 			return true, nil
@@ -1371,6 +1419,12 @@ func (vm *VM) metadataSetAttr(value Value, name string, replacement Value) (bool
 }
 
 func (vm *VM) metadataDelAttr(value Value, name string) (bool, error) {
+	if exception, ok := value.(*Instance); ok && exception.Class.IsSub(baseExc) {
+		switch name {
+		case "__traceback__", "__cause__", "__context__", "__suppress_context__":
+			return true, newErrorf("TypeError", "cannot delete %s", name)
+		}
+	}
 	if cell, ok := value.(*lexicalCell); ok && name == "cell_contents" {
 		cell.store(nil)
 		return true, nil

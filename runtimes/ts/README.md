@@ -61,6 +61,17 @@ never silently fall back to the shipped store. Durable snapshots retain and
 check the same reference when resumed.
 `--no-stdlib` disables standard-library resolution and omits the reference.
 
+The installed `stdlib.dsps` uses the DSPS02 dictionary-only format: its checked
+index contains a shared preset dictionary and independently raw-DEFLATE-compressed
+DSPB01 modules (not gzip). Empty dictionaries and raw codec-0 modules are also
+supported; legacy DSPS01 stores are rejected. Startup reads and verifies the
+index without decoding module IR; the first import checks that module's payload
+digest, decompresses with the preset dictionary and a decoded-size bound, decodes
+it, and caches immutable IR. Interpreter globals remain separate. The canonical
+store ID is unchanged by compression; container hashes detect distribution
+corruption, not untrusted publishers. Parsed embedding stores still have their
+canonical content ID validated before use.
+
 The CLI grants no filesystem, network, or process capabilities by default.
 Durable suspension exits with code 7.
 
@@ -142,7 +153,8 @@ uv run --python 3.12 pytest -q tests/test_corpus.py -k ts_vm
 node runtimes/ts/src/cli.ts selftest-build
 ```
 
-Packing compiles the sources to `dist/` and includes the generated compiler,
-compiled standard-library store, and MIT/PSF/Unicode licenses and source manifest.
+Packing compiles the sources to `dist/` and includes one generated compiler,
+one compact standard-library store, and MIT/PSF/Unicode licenses, without
+duplicating source trees or the source manifest.
 It fails if required generated artifacts are missing. The self-test compares
 compiler output with the Python compiler and checks DSPB encoding and decoding.

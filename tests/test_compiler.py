@@ -405,9 +405,7 @@ class TestOutput:
         validate_bundle(bundle)
 
     def test_stdlib_store_root_precedence(self, tmp_path: Path, monkeypatch) -> None:
-        import gzip
-
-        from diaspore import compiler, stdlib_store
+        from diaspore import compiler, stdlib_store, stdlib_store_codec
 
         own = tmp_path / "stdlib"
         vendor = tmp_path / "cpython"
@@ -426,9 +424,13 @@ class TestOutput:
         assert store["modules"]["sample"]["file"] == "<stdlib>/sample.py"
         assert store["modules"]["upstream"]["file"] == "<stdlib>/upstream.py"
         monkeypatch.setattr(stdlib_store, "_store", store)
-        path = tmp_path / "stdlib.dsp.json.gz"
+        path = tmp_path / "stdlib.dsps"
         stdlib_store.write_stdlib_store(str(path))
-        assert json.loads(gzip.decompress(path.read_bytes())) == store
+        assert path.read_bytes()[:6] == b"DSPS02"
+        decoded = stdlib_store_codec.load_stdlib_store(path)
+        assert decoded["id"] == store["id"]
+        assert decoded["modules"]._cache == {}
+        assert dict(decoded["modules"]) == store["modules"]
         entry = tmp_path / "entry.py"
         entry.write_text("import sample\nimport upstream\n", encoding="utf-8")
         bundle = compiler.compile_bundle(str(entry), self_contained=True)

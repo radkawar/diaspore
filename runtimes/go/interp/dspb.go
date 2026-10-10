@@ -1053,6 +1053,10 @@ func DecodeDSPB(data []byte) (map[string]any, error) {
 	modCount := r.count()
 	for i := uint64(0); i < modCount && r.err == nil; i++ {
 		name := r.s()
+		if _, duplicate := modules[name]; duplicate {
+			r.fail("duplicate module %q", name)
+			break
+		}
 		mod := map[string]any{"name": name, "file": r.s()}
 		if r.byte() == 1 {
 			mod["src"] = r.decStrs()

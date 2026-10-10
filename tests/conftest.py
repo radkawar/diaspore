@@ -110,7 +110,7 @@ def run_diaspore_py(entry: Path, max_steps: int | None = None) -> Result:
 
 
 def ensure_dspc_bundles() -> None:
-    """Generate the compiler and stdlib artifacts used by portable runtimes.
+    """Generate paired compiler and compact stdlib artifacts for all four runtimes.
 
     These are build artifacts; `make generate` rebuilds only what is stale.
     """
@@ -119,6 +119,11 @@ def ensure_dspc_bundles() -> None:
     )
     if proc.returncode != 0:
         pytest.fail(f"make generate failed:\n{proc.stdout}{proc.stderr}")
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Prepare the prebuilt Python store even for Python-only test selections."""
+    ensure_dspc_bundles()
 
 
 # Runtime exclusions reflect features outside each runtime's supported subset:

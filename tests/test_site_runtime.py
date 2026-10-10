@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
+import io
+import json
 import shutil
 import subprocess
 
@@ -38,15 +41,22 @@ class Worker {
     this.onmessage({data: {id: request.id, result: {code: 0}}});
   }
 }
+const downloads = [];
 const context = createContext({Worker, URL, URLSearchParams,
-  diasporeBuild: 'build-version', diasporeStdlib: id});
+  fetch: async (url, options) => {
+    downloads.push([url.href, options.cache]);
+    return {json: async () => ({version: 'build-version', stdlib: id, package_version: '0.2.0'})};
+  }});
 const module = new SourceTextModule(readFileSync('site/js/runtime.js', 'utf8'), {
-  context, initializeImportMeta(meta) { meta.url = 'https://site.test/js/runtime.js'; },
+  context, initializeImportMeta(meta) { meta.url = 'https://site.test/diaspore/js/runtime.js'; },
 });
 await module.link(() => { throw Error('Unexpected import'); });
 await module.evaluate();
+assert.deepEqual(downloads, [['https://site.test/diaspore/build.json', 'no-store']]);
+assert.equal(worker.url.pathname, '/diaspore/js/wasm-worker.js');
 assert.equal(worker.url.searchParams.get('stdlib'), id);
 assert.equal(worker.url.searchParams.get('v'), 'build-version');
+assert.equal(module.namespace.packageVersion, '0.2.0');
 worker.onmessage({data: {ready: true}});
 const files = {'/site-packages/copy.py': 'value = 42\n'};
 await module.namespace.compile('import copy', files);
@@ -119,3 +129,29 @@ const missing = await boot(null);
 assert.equal(missing.ready, undefined);
 assert.match(missing.error, /missing a valid stdlib identity/);
 """)
+
+
+@pytest.mark.parametrize("ceiling, expected", [("0.3.0", "0.2.1"), ("0.2.0", "0.2.0")])
+def test_site_pins_available_release_at_or_below_checkout(monkeypatch, ceiling, expected):
+    spec = importlib.util.spec_from_file_location("diaspore_site_build", ROOT / "site/build.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    wheel = {"packagetype": "bdist_wheel", "filename": "diaspore-py3-none-any.whl"}
+    releases = {
+        "0.2.0": [wheel],
+        "0.2.1": [wheel],
+        "0.2.2": [{**wheel, "yanked": True}],
+        "0.3.0": [{"packagetype": "sdist", "filename": "diaspore-0.3.0.tar.gz"}],
+        "0.4.0": [wheel],
+        "invalid-version": [wheel],
+    }
+
+    def metadata(url, timeout):
+        assert url == "https://pypi.org/pypi/diaspore/json"
+        assert timeout == 30
+        return io.BytesIO(json.dumps({"releases": releases}).encode())
+
+    monkeypatch.setattr(module, "urlopen", metadata)
+    assert module._published_version(ceiling) == expected
+    with pytest.raises(RuntimeError, match="No published diaspore wheel"):
+        module._published_version("0.1.0")

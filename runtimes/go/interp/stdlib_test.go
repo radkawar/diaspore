@@ -206,23 +206,3 @@ func BenchmarkStdlibColdIndex(b *testing.B) {
 		}
 	}
 }
-
-func TestStdlibIndexValidatesContent(t *testing.T) {
-	core := map[string]any{
-		"diaspore_stdlib": float64(1),
-		"modules": map[string]any{
-			"sample": map[string]any{"body": []any{}, "file": "<stdlib>/sample.py"},
-		},
-	}
-	core["id"] = "sha256:" + BundleDigest(core)
-	var encoded strings.Builder
-	canonicalJSON(&encoded, core)
-	store, err := indexStdlib([]byte(encoded.String()))
-	if err != nil || store.modules["sample"].ir != nil {
-		t.Fatalf("valid serialized store rejected or eagerly decoded: %v", err)
-	}
-	corrupt := strings.Replace(encoded.String(), "sample.py", "tampered.py", 1)
-	if _, err := indexStdlib([]byte(corrupt)); err == nil || !strings.Contains(err.Error(), "content id mismatch") {
-		t.Fatalf("modified module bytes accepted: %v", err)
-	}
-}

@@ -23,11 +23,12 @@ site/wasm_exec.js
 site/build.json
 site/ir.schema.json
 tests/fuzz_failures/
-runtimes/go/interp/stdlib.json.gz
-runtimes/ts/stdlib.json.gz
+src/diaspore/stdlib.dsps
+runtimes/go/interp/stdlib.dsps
+runtimes/ts/stdlib.dsps
 runtimes/ts/cpython/
 runtimes/ts/.stdlib-stamp
-runtimes/lua/stdlib.json
+runtimes/lua/stdlib.dsps
 runtimes/lua/cpython/
 runtimes/lua/.stdlib-stamp
 site/cpython/

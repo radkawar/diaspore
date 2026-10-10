@@ -9,6 +9,7 @@ import (
 // (*Instance whose class derives from BaseException).
 type Raised struct {
 	metadataFrame *frame
+	contextSet    bool
 	// Exc is an exception instance whose class derives from BaseException.
 	Exc Value
 	// TB holds traceback entries, from the raising frame outward.
@@ -224,6 +225,25 @@ func init() {
 	objectHash = bi("__hash__", biObjectHash)
 	objectClass.NS["__hash__"] = objectHash
 	m := excClasses
+	m["BaseException"].NS["with_traceback"] = &Builtin{
+		Name: "with_traceback",
+		Fn: func(vm *VM, args []Value, kw []KwArg) (Value, error) {
+			if err := argCount("with_traceback", args, 2, 2); err != nil {
+				return nil, err
+			}
+			if err := noKw("with_traceback", kw); err != nil {
+				return nil, err
+			}
+			self, ok := args[0].(*Instance)
+			if !ok || !self.Class.IsSub(baseExc) {
+				return nil, newError("TypeError", "with_traceback requires a BaseException instance")
+			}
+			if _, err := vm.metadataSetAttr(self, "__traceback__", args[1]); err != nil {
+				return nil, err
+			}
+			return self, nil
+		},
+	}
 	// ExceptionGroup inherits from BaseExceptionGroup and Exception (C3).
 	eg := &Class{Name: "ExceptionGroup",
 		Bases: []*Class{m["BaseExceptionGroup"], m["Exception"]},
@@ -344,9 +364,23 @@ func excIsA(v Value, name string) bool {
 // raisedAs returns the *Raised if err is one whose exception is an instance
 // of the named class.
 func raisedAs(err error, name string) (*Raised, bool) {
-	var r *Raised
-	if errors.As(err, &r) && excIsA(r.Exc, name) {
-		return r, true
+	if err == nil {
+		return nil, false
+	}
+	if raised, ok := err.(*Raised); ok {
+		if excIsA(raised.Exc, name) {
+			return raised, true
+		}
+		return nil, false
+	}
+	return raisedAsWrapped(err, name)
+}
+
+// Keep the escaping errors.As target off the ordinary VM error path.
+func raisedAsWrapped(err error, name string) (*Raised, bool) {
+	var raised *Raised
+	if errors.As(err, &raised) && excIsA(raised.Exc, name) {
+		return raised, true
 	}
 	return nil, false
 }

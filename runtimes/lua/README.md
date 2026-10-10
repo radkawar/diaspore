@@ -9,7 +9,7 @@ semantics.
 - Lua 5.4
 - Python 3.12, uv, a POSIX host and GNU Make 4.3+ to regenerate artifacts;
   Python and uv to run the CPython conformance tests
-- `make generate` produces the trusted compiler and compiled stdlib JSON artifacts.
+- `make generate` produces the trusted compiler JSON and compact `stdlib.dsps`.
   Lua builds and runtime `compile`, `exec`, and `eval` use these installed artifacts.
 
 ## Usage
@@ -28,12 +28,19 @@ in-memory source files. It does not grant the program filesystem access.
 Vendored `json` and `abc` use private native `_json` and `_abc` providers;
 their public Python implementations remain unchanged.
 
-Builds link the installed `stdlib.json` by content id unless `--self-contained`
-is requested. The runtime verifies the store's content hash and checks the
-bundle's requested id before execution.
+Builds link the installed `stdlib.dsps` by canonical compiled-code content id
+unless `--self-contained` is requested. Startup reads and verifies only the
+DSPS02 index, then checks the bundle's requested id. The index contains that id,
+a length-prefixed preset dictionary, the module count, and sorted module records.
+Import reads and verifies one raw DSPB01 payload before decoding its IR; decoded
+modules are cached privately, with independent IR copies and globals in each VM.
+Membership and file metadata queries do not decode modules. Shipped Lua payloads
+use raw codec 0 and an empty dictionary. Caller-supplied raw containers may include
+an unused dictionary of up to 32768 bytes, which is verified with the index and
+skipped. Raw-DEFLATE codec 1 is rejected; Lua does not include an inflater.
 Resolution prefers program modules, then the linked store, then native modules.
-Store modules execute lazily with separate globals in each VM. Bundles without
-a stdlib reference are standalone: missing modules never fall back to the store.
+Bundles without a stdlib reference are standalone: missing modules never fall
+back to the store. Installed stores have no whole-store JSON fallback.
 The private `_diaspore_stdlib` bridge exposes installed code to the compiler, not
 ambient filesystem access.
 
@@ -65,6 +72,9 @@ Call `close()` once after the final host call to run imported threading shutdown
 and `atexit` callbacks; the CLI does this automatically. Compiler and stdlib
 artifacts load lazily from the runtime installation. Optional parsed
 `compiler_bundle` and `stdlib_store` embedding options override these artifacts.
+Parsed `stdlib_store` overrides still validate their full canonical content
+hash and are isolated from subsequent caller mutation. Container index and
+payload hashes detect corruption; they are not distribution signatures.
 
 `diaspore.compile(source, opts)` and `diaspore.compile_file(entry, opts)` return
 raw JSON-bundle tables. They link the installed stdlib by default; set
@@ -129,7 +139,8 @@ preserve identity and expose live caller links while generators are running.
   conversion limit. `sys.hash_info` describes unseeded FNV-1a string/bytes-key
   hashing, not CPython's SipHash; numeric metadata follows the backend values
   documented in [spec section 12](../../docs/spec.md#12-deliberate-deviations-and-exclusions).
-- Bundles must be plain JSON. Gzip, DSPB, and durable flows are unsupported.
+- User bundles must be plain JSON. Gzip bundles and durable flows are unsupported;
+  DSPB01 decoding is used internally for compiled store modules only.
 - Bytearrays support mutation and export resize locks. Memoryviews share storage,
   preserve strided aliases and read-only access, and support native scalar casts.
   Multidimensional views are explicitly unsupported.
@@ -155,6 +166,7 @@ preserve identity and expose live caller links while generators are running.
 ```sh
 uv run --python 3.12 pytest -q tests/test_corpus.py tests/test_bootstrap.py tests/test_self_suite.py -k lua
 uv run --python 3.12 pytest -q tests/test_lua_numbers.py tests/test_lua_numeric_methods.py
+uv run --python 3.12 pytest -q tests/test_lua_store_perf.py
 ```
 
 Metadata-dependent bootstrap and self-suite cases retain the explicit

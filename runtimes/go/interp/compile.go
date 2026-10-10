@@ -94,7 +94,7 @@ func (sc *scope) runtimeParent() *scope {
 }
 
 type compiler struct {
-	metadataNext  int
+	positions     codePositions
 	vm            *VM
 	moduleName    string
 	sc            *scope
@@ -123,7 +123,7 @@ func (c *compiler) fail(format string, a ...any) {
 
 func execNop(fr *frame) error { return nil }
 
-func compileModule(vm *VM, name string, body []any) (execFn, error) {
+func compileModule(vm *VM, name string, body []any) (execFn, codePositions, error) {
 	cells := map[string]*cell{}
 	vm.modCells[name] = cells
 	c := &compiler{vm: vm, moduleName: name, sc: &scope{}, cells: cells}
@@ -137,16 +137,16 @@ func compileModule(vm *VM, name string, body []any) (execFn, error) {
 			return err
 		}
 	}
-	return fn, c.err
+	return fn, c.positions, c.err
 }
 
 // compileSnippet compiles exec/eval body nodes against a supplied cell table
 // (the namespace), so names resolve to and mutate that namespace.
-func compileSnippet(vm *VM, name string, body []any, cells map[string]*cell, interactive bool) (execFn, error) {
+func compileSnippet(vm *VM, name string, body []any, cells map[string]*cell, interactive bool) (execFn, codePositions, error) {
 	vm.modCells[name] = cells
 	c := &compiler{vm: vm, moduleName: name, sc: &scope{}, cells: cells, interactive: interactive}
 	fn := c.compileBlock(body)
-	return fn, c.err
+	return fn, c.positions, c.err
 }
 
 // compileSnippetExpr compiles a single expression node against a cell table.
@@ -253,6 +253,7 @@ func (c *compiler) compileFunction(n node) *compiledFunc {
 		}
 	}
 	cf.body = inner.compileBlock(body)
+	cf.metadata.positions = inner.positions
 	if inner.err != nil {
 		c.fail("%v", inner.err)
 	}
@@ -484,18 +485,22 @@ func (c *compiler) compileBlock(stmts []any) execFn {
 
 func (c *compiler) compileStmt(s node) execFn {
 	fn := c.compileStmtInner(s)
-	index := c.metadataNext
-	c.metadataNext++
 	line, hasLine := s["ln"].(float64)
+	index := c.positions.add(int(line))
 	if c.vm.tracer != nil {
 		fn = c.vm.traceStatement(fn, int(line))
 	}
+	vm := c.vm
 	return func(fr *frame) error {
-		fr.metadata.lasti = index
+		fr.metadata.lasti = 2 * index
 		if hasLine {
 			fr.line = int(line)
 		}
-		return fn(fr)
+		err := fn(fr)
+		if err != nil {
+			vm.chainException(err)
+		}
+		return err
 	}
 }
 
@@ -938,6 +943,7 @@ func (c *compiler) compileClass(s node) execFn {
 	qualname := metadataQualname(classScope)
 	inner := &compiler{vm: vm, moduleName: c.moduleName, sc: classScope, cells: c.cells, globalMapping: c.globalMapping}
 	bodyFn := inner.compileBlock(nList(s, "body"))
+	positions := inner.positions
 	if inner.err != nil {
 		c.fail("%v", inner.err)
 	}
@@ -1077,6 +1083,7 @@ func (c *compiler) compileClass(s node) execFn {
 			}
 		}
 		cf.metadata.source = s
+		cf.metadata.positions = positions
 		cf.metadata.lasti = -1
 		vm.enterMetadataFrame(cf)
 		bodyErr := bodyFn(cf)
@@ -1192,8 +1199,10 @@ func (c *compiler) compileRaise(s node) execFn {
 		if err != nil {
 			return err
 		}
+		var cause Value
 		if causeFn != nil {
-			if _, err := causeFn(fr); err != nil {
+			cause, err = causeFn(fr)
+			if err != nil {
 				return err
 			}
 		}
@@ -1210,6 +1219,17 @@ func (c *compiler) compileRaise(s node) execFn {
 		inst, ok := v.(*Instance)
 		if !ok || !inst.Class.IsSub(baseExc) {
 			return newError("TypeError", "exceptions must derive from BaseException")
+		}
+		if causeFn != nil {
+			if cls, ok := cause.(*Class); ok && cls.IsSub(baseExc) {
+				cause, err = vm.instantiate(cls, nil, nil)
+				if err != nil {
+					return err
+				}
+			}
+			if _, err := vm.metadataSetAttr(inst, "__cause__", cause); err != nil {
+				return err
+			}
 		}
 		return &Raised{Exc: inst}
 	}
@@ -1242,7 +1262,7 @@ func (c *compiler) compileTry(s node) execFn {
 		handlers = append(handlers, ch)
 	}
 	star := s["star"] == true
-	tryBody := func(fr *frame) error {
+	tryBody := func(fr *frame) (result error) {
 		err := bodyFn(fr)
 		if err == nil {
 			return elseFn(fr)
@@ -1256,6 +1276,11 @@ func (c *compiler) compileTry(s node) execFn {
 			return vm.runStarHandlers(fr, r, handlers, elseFn)
 		}
 		inst := r.Exc.(*Instance)
+		vm.excStack = append(vm.excStack, r.Exc)
+		defer func() {
+			vm.chainException(result)
+			vm.excStack = vm.excStack[:len(vm.excStack)-1]
+		}()
 		for i := range handlers {
 			h := &handlers[i]
 			if h.matchFn != nil {
@@ -1276,9 +1301,7 @@ func (c *compiler) compileTry(s node) execFn {
 					return berr
 				}
 			}
-			vm.excStack = append(vm.excStack, r.Exc)
 			herr := h.body(fr)
-			vm.excStack = vm.excStack[:len(vm.excStack)-1]
 			if h.unbind != nil {
 				if uerr := h.unbind(fr); uerr != nil {
 					return uerr
@@ -1296,7 +1319,15 @@ func (c *compiler) compileTry(s node) execFn {
 		if isTrapOrSuspend(err) {
 			return err // traps and suspends abandon execution: no finally
 		}
-		if ferr := finalFn(fr); ferr != nil {
+		_, pendingException := err.(*Raised)
+		if pendingException {
+			vm.excStack = append(vm.excStack, err.(*Raised).Exc)
+		}
+		ferr := finalFn(fr)
+		if pendingException {
+			vm.excStack = vm.excStack[:len(vm.excStack)-1]
+		}
+		if ferr != nil {
 			return ferr
 		}
 		return err
@@ -1401,6 +1432,7 @@ func (c *compiler) compileWithItem(item node, inner execFn) execFn {
 			inst := r.Exc.(*Instance)
 			vm.excStack = append(vm.excStack, inst)
 			suppress, xerr := exit(inst.Class, inst, orNone(inst.dictValue("__traceback__")))
+			vm.chainException(xerr)
 			vm.excStack = vm.excStack[:len(vm.excStack)-1]
 			if xerr != nil {
 				return xerr
@@ -2663,15 +2695,55 @@ func (c *compiler) compileCall(e node) evalFn {
 			if err != nil {
 				return nil, err
 			}
-			if fn, ok := f.(*Function); ok {
+			fn, _ := f.(*Function)
+			var receiver Value
+			offset := 0
+			if bound, ok := f.(*BoundMethod); ok {
+				fn, _ = bound.Fn.(*Function)
+				receiver, offset = bound.Recv, 1
+			}
+			if fn != nil {
 				cf := fn.cf
-				if cf.fastCall && len(cf.params.args) == n {
-					// Zero-alloc path: args are written straight into the
-					// callee's slots; no []Value, no kwargs machinery.
-					if err := vm.fuel(); err != nil {
-						return nil, err
+				if cf.fastCall && len(cf.params.args) == n+offset {
+					// Resolved Python methods can fill their receiver and
+					// arguments directly, without two temporary argument slices.
+					if offset == 0 {
+						if err := vm.fuel(); err != nil {
+							return nil, err
+						}
 					}
 					callee := cf.getFrame()
+					idx := cf.params.argIdx
+					if offset != 0 {
+						callee.slots[idx[0]] = receiver
+					}
+					for i, aFn := range argFns {
+						v, aerr := aFn(fr)
+						if aerr != nil {
+							cf.putFrame(callee)
+							return nil, aerr
+						}
+						callee.slots[idx[i+offset]] = v
+					}
+					if offset != 0 {
+						// Argument evaluation may replace the method's code.
+						if fn.cf != cf {
+							args := make([]Value, n)
+							for i := range args {
+								args[i] = callee.slots[idx[i+1]]
+							}
+							cf.putFrame(callee)
+							return vm.call(f, args, nil)
+						}
+						// Preserve bound-method dispatch's two fuel charges,
+						// both after argument evaluation.
+						for range 2 {
+							if err := vm.fuel(); err != nil {
+								cf.putFrame(callee)
+								return nil, err
+							}
+						}
+					}
 					if fn.metadata != nil {
 						callee.metadata.override = fn.metadata.code
 					}
@@ -2681,16 +2753,7 @@ func (c *compiler) compileCall(e node) evalFn {
 						callee.globals = fn.closure.globals
 						callee.globalMapping = fn.closure.globalMapping
 					}
-					idx := cf.params.argIdx
-					for i, aFn := range argFns {
-						v, aerr := aFn(fr)
-						if aerr != nil {
-							cf.putFrame(callee)
-							return nil, aerr
-						}
-						callee.slots[idx[i]] = v
-					}
-					if n > 0 {
+					if n+offset > 0 {
 						callee.self = callee.slots[idx[0]]
 					}
 					return vm.runFrame(cf, callee)

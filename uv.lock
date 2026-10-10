@@ -22,11 +22,12 @@ wheels = [
 
 [[package]]
 name = "diaspore"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 
 [package.dev-dependencies]
 dev = [
+    { name = "packaging" },
     { name = "pydantic" },
     { name = "pytest" },
     { name = "ruff" },
@@ -36,6 +37,7 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "packaging", specifier = ">=24.0" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.6" },

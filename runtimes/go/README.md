@@ -35,11 +35,20 @@ The entry's directory is searched first, then added directories in flag order.
 The compiler has read-only access to these directories.
 
 By default, bundles contain program modules and a `stdlib` content ID. The
-runtime verifies the embedded store's content hash and the requested ID before
-execution. Module entries remain serialized until imported or requested through
-the compiler bridge; decoded immutable IR is cached across VMs. Only imported
+runtime embeds `stdlib.dsps` (dictionary-only DSPS02), checks only its compact
+index digest and the requested ID at startup, and leaves every payload untouched.
+The index includes an optional preset DEFLATE dictionary of at most 32 KiB;
+an empty dictionary supports ordinary raw DEFLATE. On first import or
+compiler-bridge access the runtime checks that module's stored-byte digest,
+decodes raw standalone DSPB01 or bounded raw DEFLATE, and validates its identity
+and IR. Exact decoded lengths, stream termination, and trailing bytes are checked.
+Installed DSPS01 stores and gzip store payloads are not supported; generated
+stores must be rebuilt. No global string table is used.
+Decoded immutable IR and load errors are cached across VMs. Only imported
 modules are compiled into runtime functions and executed. Their globals and
-import cache belong to each VM, not to the shared store.
+import cache belong to each VM, not to the shared store. The content ID is the
+canonical compiled-module hash, independent of the container encoding. Digests
+detect distribution corruption; they are not signatures.
 Program modules take precedence over linked stdlib modules, then native modules.
 Use `--self-contained` to include reachable stdlib modules and omit the link.
 A bundle without `stdlib` never implicitly imports modules from the store.
@@ -167,8 +176,13 @@ for input and finalization work.
   `FunctionType` can reconstruct a function from sandbox code, globals, defaults,
   and closure cells. `CodeType` construction from CPython bytecode is unavailable;
   `code.replace` supports names, filenames, first-line metadata, and the
-  iterable-coroutine flag, not structural bytecode changes. Shared
-  stdlib/provider restrictions are listed in spec sections 11.10 and 12.
+  iterable-coroutine flag, not structural bytecode changes. `co_positions()`
+  iterates the execution compiler's statement locations; `f_lasti` and
+  `tb_lasti` address those entries in two-byte units for traceback consumers.
+  Source start lines come from debug IR. Unavailable end lines and columns
+  are `None`; stripped bundles also report `None` for start lines. These
+  addresses are not CPython bytecode offsets. Shared stdlib/provider
+  restrictions are listed in spec sections 11.10 and 12.
 
 `sys.float_info` describes Go's IEEE-754 binary64 values through an immutable,
 tuple-compatible struct sequence, including the named precision/range fields,
@@ -216,6 +230,19 @@ and provide list/dict item iterators. Instance dictionaries retain identity;
 declared slots use separate storage and omit unset values from default state.
 These object protocols do not make opaque native resources picklable: unsupported
 native values raise `TypeError`.
+
+Instance attribute lookup and updates use string-key paths when no user-defined
+dictionary keys require equality dispatch. Fixed-arity positional Python method
+calls fill frame slots directly after normal descriptor lookup, preserving
+argument evaluation order, dynamic code replacement, and dispatch fuel charges.
+Direct exception classification avoids reflection allocations; wrapped host
+errors retain Go's `errors.As` behavior.
+
+Exceptions expose validated `__cause__`, `__context__`, `__suppress_context__`,
+and `__traceback__` attributes plus `with_traceback`. Explicit `raise ... from`
+and implicit handler/finally chaining preserve the exception objects, including
+`from None` suppression and cycle prevention. The vendored `unittest` reporter
+can record failures and continue running subsequent test cases.
 
 ## Development
 

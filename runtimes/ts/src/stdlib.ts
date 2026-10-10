@@ -1,7 +1,10 @@
 /* Content-addressed compiled stdlib storage; no runtime source lookup. */
 
 import { readFileSync } from "node:fs";
-import { bundleDigest, maybeGunzip } from "./flow.ts";
+import { createHash } from "node:crypto";
+import { inflateRawSync } from "node:zlib";
+import { bundleDigest } from "./flow.ts";
+import { DSPB_MAGIC, dspbDecode } from "./dspb.ts";
 import { fromHost } from "./host.ts";
 import { bi } from "./builtins.ts";
 import { argCount, noKw } from "./helpers.ts";
@@ -17,7 +20,7 @@ export interface StdlibStore {
   readonly modules: Readonly<Record<string, Record<string, any>>>;
 }
 
-const STORE_URL = new URL("../stdlib.json.gz", import.meta.url);
+const STORE_URL = new URL("../stdlib.dsps", import.meta.url);
 const validatedStores = new WeakSet<object>();
 const moduleSizes = new WeakMap<object, number>();
 let installedStore: StdlibStore | undefined;
@@ -75,12 +78,90 @@ export function validateStdlibStore(value: unknown): StdlibStore {
   return store as unknown as StdlibStore;
 }
 
+function parseStore(bytes: Buffer): StdlibStore {
+  const invalid = (message: string): never => {
+    throw new Error("invalid Diaspore stdlib store: " + message);
+  };
+  if (bytes.length < 80 || !bytes.subarray(0, 6).equals(Buffer.from("DSPS02"))) invalid("invalid DSPS02 header");
+  const indexLength = bytes.readUInt32LE(6), payloadStart = 42 + indexLength;
+  if (indexLength < 38 || indexLength > 64 * 1024 * 1024 || payloadStart > bytes.length) invalid("invalid index length");
+  const index = bytes.subarray(42, payloadStart);
+  if (!createHash("sha256").update(index).digest().equals(bytes.subarray(10, 42))) invalid("index digest mismatch");
+  const id = "sha256:" + index.subarray(0, 32).toString("hex");
+  const dictionaryLength = index.readUInt16LE(32);
+  if (dictionaryLength > 32768 || dictionaryLength > index.length - 38) invalid("invalid dictionary length");
+  const dictionary = index.subarray(34, 34 + dictionaryLength);
+  const count = index.readUInt32LE(34 + dictionaryLength);
+  if (count > Math.floor((index.length - 38 - dictionaryLength) / 51)) invalid("invalid module count");
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  let cursor = 38 + dictionaryLength, end = 0, previous: string | undefined;
+  const take = (length: number): Buffer => {
+    if (length > index.length - cursor) invalid("truncated index record");
+    const value = index.subarray(cursor, cursor + length);
+    cursor += length;
+    return value;
+  };
+  const text = (): string => {
+    const length = take(2).readUInt16LE(0);
+    const value = utf8.decode(take(length));
+    if (!value || value.includes("\0")) invalid("invalid index text");
+    return value;
+  };
+  const modules: Record<string, Record<string, any>> = Object.create(null);
+  for (let i = 0; i < count; i++) {
+    const name = text(), file = text(), record = take(45);
+    if (!name.split(".").every(part => /^[\p{XID_Start}_][\p{XID_Continue}_]*$/u.test(part)) ||
+        (previous !== undefined && strCmp(previous, name) >= 0)) invalid("invalid or unsorted module name");
+    previous = name;
+    const offset = record.readUInt32LE(0), storedLength = record.readUInt32LE(4);
+    const decodedLength = record.readUInt32LE(8), codec = record[12];
+    if (offset !== end || storedLength < 1 || storedLength > 256 * 1024 * 1024 ||
+        decodedLength < 6 || decodedLength > 256 * 1024 * 1024 ||
+        storedLength > bytes.length - payloadStart - offset ||
+        (codec !== 0 && codec !== 1) || (codec === 0 && storedLength !== decodedLength)) {
+      invalid("invalid payload span, length or codec");
+    }
+    end += storedLength;
+    const digest = record.subarray(13);
+    let cached: Record<string, any> | undefined;
+    Object.defineProperty(modules, name, {
+      enumerable: true,
+      get() {
+        if (cached !== undefined) return cached;
+        const stored = bytes.subarray(payloadStart + offset, payloadStart + offset + storedLength);
+        if (!createHash("sha256").update(stored).digest().equals(digest)) invalid(`payload digest mismatch for ${name}`);
+        const decoded = codec === 0 ? stored : inflateRawSync(stored, { dictionary, maxOutputLength: decodedLength });
+        if (decoded.length !== decodedLength || !decoded.subarray(0, 6).equals(DSPB_MAGIC)) {
+          invalid(`invalid decoded payload for ${name}`);
+        }
+        const bundle = dspbDecode(decoded);
+        const entries = bundle.modules as Record<string, Record<string, any>>;
+        if (bundle.diaspore !== 1 || bundle.main !== name || Object.hasOwn(bundle, "stdlib") ||
+            Object.keys(entries).length !== 1 || !Object.hasOwn(entries, name)) invalid(`invalid module bundle for ${name}`);
+        const module = entries[name];
+        if (module.name !== name || module.file !== file || !Array.isArray(module.body)) invalid(`invalid module IR for ${name}`);
+        moduleSizes.set(module, freezeJSON(module, new WeakMap()));
+        cached = module;
+        return module;
+      },
+    });
+  }
+  if (cursor !== index.length || payloadStart + end !== bytes.length) invalid("trailing index or payload bytes");
+  const store: StdlibStore = Object.freeze({ diaspore_stdlib: 1, id, modules: Object.freeze(modules) });
+  validatedStores.add(store);
+  return store;
+}
+
+/** Decode a compact store index, privately retaining bytes for lazy module loads. */
+export function decodeStdlibStore(bytes: Uint8Array): StdlibStore {
+  return parseStore(Buffer.from(bytes));
+}
+
 /** Lazily load and cache the installed compiled stdlib artifact. */
 export function loadStdlibStore(): StdlibStore {
   if (installedStore !== undefined) return installedStore;
   try {
-    const bytes = maybeGunzip(readFileSync(STORE_URL));
-    installedStore = validateStdlibStore(JSON.parse(bytes.toString("utf8")));
+    installedStore = parseStore(readFileSync(STORE_URL));
     return installedStore;
   } catch (error) {
     throw new Error("cannot load installed Diaspore stdlib store: " +
