@@ -1,5 +1,8 @@
+// Read the manifest here rather than relying on globals set by boot.js: module
+// evaluation order is not guaranteed once the browser has cached the graph.
+const manifest = await (await fetch(new URL('../build.json', import.meta.url), {cache: 'no-store'})).json();
 const workerURL = new URL('./wasm-worker.js', import.meta.url);
-workerURL.search = new URLSearchParams({v: globalThis.diasporeBuild, stdlib: globalThis.diasporeStdlib});
+workerURL.search = new URLSearchParams({v: manifest.version, stdlib: manifest.stdlib});
 const worker = new Worker(workerURL, {type: 'module'});
 let sequence = 0;
 const pending = new Map();

@@ -2,8 +2,6 @@ try {
   const response = await fetch(new URL('../build.json', import.meta.url), {cache: 'no-store'});
   if (!response.ok) throw new Error('Site assets are not built. Run make site.');
   const build = await response.json();
-  globalThis.diasporeBuild = build.version;
-  globalThis.diasporeStdlib = build.stdlib;
   const base = new URL('../', import.meta.url);
   const imports = {};
   for (const path of build.modules) {
