@@ -1,6 +1,6 @@
 [project]
 name = "diaspore"
-version = "0.1.2"
+version = "0.2.0"
 description = "Compile a Python subset to portable JSON for Python, Go, TypeScript, and Lua runtimes"
 readme = "README.md"
 license = { text = "MIT" }

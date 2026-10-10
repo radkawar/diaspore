@@ -1,6 +1,6 @@
 {
   "name": "diaspore",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "description": "Run Diaspore bundles (portable, sandboxed Python) in Node",
   "license": "MIT",

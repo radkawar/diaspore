@@ -8,8 +8,8 @@ bundle has no ambient authority, runs on a fuel budget, and can pause itself
 into a JSON snapshot that any other runtime can resume.
 
 [Playground](https://radkawar.github.io/diaspore) |
-[Specification](docs/spec.md) | [Security model](docs/security.md) |
-[Examples](examples) | [Releases](https://github.com/radkawar/diaspore/releases)
+[Specification](https://github.com/radkawar/diaspore/blob/main/docs/spec.md) | [Security model](https://github.com/radkawar/diaspore/blob/main/docs/security.md) |
+[Examples](https://github.com/radkawar/diaspore/blob/main/examples) | [Releases](https://github.com/radkawar/diaspore/releases)
 
 ```sh
 diaspore build app.py -o app.dsp.json     # compile once
@@ -39,13 +39,13 @@ lua5.4 runtimes/lua/cli.lua run app.dsp.json  # Lua
 
 | Runtime | Install | Notes |
 | --- | --- | --- |
-| diaspore-py | `uv tool install git+https://github.com/radkawar/diaspore` | Reference VM, compiler and CLI |
+| diaspore-py | `uv tool install diaspore` | Reference VM, compiler and CLI |
 | diaspore-go | [Release binaries](https://github.com/radkawar/diaspore/releases); library: `go get github.com/radkawar/diaspore/runtimes/go` | Near CPython speed; also compiles to WebAssembly |
 | diaspore-ts | [`npm install diaspore`](https://www.npmjs.com/package/diaspore) | Node 22+, no runtime dependencies |
 | diaspore-lua | [Release tarball](https://github.com/radkawar/diaspore/releases) | Pure Lua 5.4; no tasks, regex or big integers |
 
-Sources: [src/diaspore](src/diaspore), [runtimes/go](runtimes/go),
-[runtimes/ts](runtimes/ts), [runtimes/lua](runtimes/lua).
+Sources: [src/diaspore](https://github.com/radkawar/diaspore/blob/main/src/diaspore), [runtimes/go](https://github.com/radkawar/diaspore/blob/main/runtimes/go),
+[runtimes/ts](https://github.com/radkawar/diaspore/blob/main/runtimes/ts), [runtimes/lua](https://github.com/radkawar/diaspore/blob/main/runtimes/lua).
 
 ## Getting started
 
@@ -53,7 +53,7 @@ Install the compiler and reference runtime with
 [uv](https://docs.astral.sh/uv/):
 
 ```sh
-uv tool install git+https://github.com/radkawar/diaspore
+uv tool install diaspore
 diaspore build main.py -o main.dsp.json
 diaspore run main.dsp.json
 ```
@@ -74,8 +74,8 @@ uv sync
 make build    # embedded compiler + build/diaspore-go
 ```
 
-Then try the [examples](examples), starting with
-[embedding](examples/embedding): one sandboxed plugin hosted from all four
+Then try the [examples](https://github.com/radkawar/diaspore/blob/main/examples), starting with
+[embedding](https://github.com/radkawar/diaspore/blob/main/examples/embedding): one sandboxed plugin hosted from all four
 languages.
 
 ## Embedding
@@ -89,8 +89,8 @@ vm.run()
 price = vm.call("plugin", "price", order)
 ```
 
-The same pattern in [Go](runtimes/go#embedding),
-[TypeScript](runtimes/ts#embedding) and [Lua](runtimes/lua#embedding).
+The same pattern in [Go](https://github.com/radkawar/diaspore/blob/main/runtimes/go#embedding),
+[TypeScript](https://github.com/radkawar/diaspore/blob/main/runtimes/ts#embedding) and [Lua](https://github.com/radkawar/diaspore/blob/main/runtimes/lua#embedding).
 
 ## Language
 
@@ -100,7 +100,7 @@ f-strings, arbitrary-precision integers, multi-module packages, and a portable
 standard library (`json`, `math`, `re`, `time`, `random`, `collections`,
 `itertools`, `functools` and more). Unsupported syntax is a compile error with a
 `file:line`, never a silent runtime failure. The exact surface is in
-[docs/spec.md](docs/spec.md).
+[docs/spec.md](https://github.com/radkawar/diaspore/blob/main/docs/spec.md).
 
 ## Repository
 
@@ -127,4 +127,4 @@ Run `make help` for the full list.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/radkawar/diaspore/blob/main/LICENSE)
