@@ -112,4 +112,6 @@ try:
         first: int = 1
         second: int
 except TypeError as error:
-    print(type(error).__name__, str(error))
+    # CPython 3.13 appends the default field's name to this message.
+    print(type(error).__name__, str(error).startswith(
+        "non-default argument 'second' follows default argument"))
