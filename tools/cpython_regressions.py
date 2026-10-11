@@ -454,6 +454,10 @@ def ratchet(score, path):
         failures.append("upstream selected-source digest changed; regenerate baseline explicitly")
     for module, runtimes in old["modules"].items():
         for runtime, previous in runtimes.items():
+            if runtime == "cpython":
+                # The reference interpreter's counts depend on the host (locale,
+                # terminal, network); it is recorded for context, never gated.
+                continue
             current = score["modules"].get(module, {}).get("runtimes", {}).get(runtime)
             if current is None:
                 failures.append(f"{module}/{runtime}: missing measurement")
