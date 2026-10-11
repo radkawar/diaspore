@@ -4660,9 +4660,15 @@ def make_re_module(I: Interp) -> NativeModule:
         "subn": lambda pattern, repl, string, count=0, flags=0: method(
             "subn", pattern, repl, string, count, flags=flags),
     }
-    for name in ("NOFLAG", "ASCII", "A", "IGNORECASE", "I", "LOCALE", "L", "UNICODE", "U",
-                 "MULTILINE", "M", "DOTALL", "S", "VERBOSE", "X", "DEBUG", "TEMPLATE", "T"):
-        namespace[name] = int(getattr(hre, name))
+    # CPython 3.12 flag values, fixed here so the sandbox does not change with
+    # the host interpreter (3.13 removed TEMPLATE).
+    flags = {"NOFLAG": 0, "TEMPLATE": 1, "IGNORECASE": 2, "LOCALE": 4, "MULTILINE": 8,
+             "DOTALL": 16, "UNICODE": 32, "VERBOSE": 64, "DEBUG": 128, "ASCII": 256}
+    for name, short in (("TEMPLATE", "T"), ("IGNORECASE", "I"), ("LOCALE", "L"),
+                        ("MULTILINE", "M"), ("DOTALL", "S"), ("UNICODE", "U"),
+                        ("VERBOSE", "X"), ("ASCII", "A")):
+        flags[short] = flags[name]
+    namespace.update(flags)
     namespace["Pattern"] = I.type_of(compile_pattern(""))
     namespace["Match"] = I.type_of(wrap_match(hre.match("", "")))
     return NativeModule("re", namespace)

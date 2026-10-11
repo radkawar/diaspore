@@ -1,10 +1,10 @@
 [project]
 name = "diaspore"
-version = "0.3.0"
+version = "0.3.1"
 description = "Compile a Python subset to portable JSON for Python, Go, TypeScript, and Lua runtimes"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 keywords = ["python", "compiler", "sandbox", "interpreter", "portable"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -12,7 +12,6 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Compilers",
     "Topic :: Software Development :: Interpreters",
 ]
