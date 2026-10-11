@@ -215,7 +215,7 @@ func (vm *VM) makeFDOperations() (map[string]Value, func()) {
 		"O_RDONLY": int64(os.O_RDONLY), "O_WRONLY": int64(os.O_WRONLY), "O_RDWR": int64(os.O_RDWR),
 		"O_APPEND": int64(os.O_APPEND), "O_CREAT": int64(os.O_CREATE), "O_EXCL": int64(os.O_EXCL),
 		"O_TRUNC": int64(os.O_TRUNC), "O_SYNC": int64(os.O_SYNC), "O_CLOEXEC": int64(syscall.O_CLOEXEC),
-		"O_DIRECTORY": int64(syscall.O_DIRECTORY),
+		"O_DIRECTORY": int64(hostDirectoryFlag),
 		"O_NONBLOCK":  int64(nonblockFlag), "O_NOFOLLOW": int64(nofollowFlag),
 		"SEEK_SET": int64(io.SeekStart), "SEEK_CUR": int64(io.SeekCurrent), "SEEK_END": int64(io.SeekEnd),
 	}
@@ -307,13 +307,13 @@ func (vm *VM) makeFDOperations() (map[string]Value, func()) {
 		if access == 3 && lexical {
 			return nil, fdError(syscall.EINVAL, values[0])
 		}
-		supported := 3 | os.O_APPEND | os.O_CREATE | os.O_EXCL | os.O_TRUNC | os.O_SYNC | syscall.O_CLOEXEC | syscall.O_DIRECTORY | nonblockFlag | nofollowFlag
+		supported := 3 | os.O_APPEND | os.O_CREATE | os.O_EXCL | os.O_TRUNC | os.O_SYNC | syscall.O_CLOEXEC | hostDirectoryFlag | nonblockFlag | nofollowFlag
 		if int(flags)&^supported != 0 || (!lexical && !extraFlagsSupported && int(flags)&(nonblockFlag|nofollowFlag) != 0) {
 			return nil, fdError(syscall.EINVAL, values[0])
 		}
 		fd := &guestFD{readable: readable, writable: writable, directory: directory}
 		if lexical {
-			if int(flags)&syscall.O_DIRECTORY != 0 && virtual && !directory {
+			if int(flags)&hostDirectoryFlag != 0 && virtual && !directory {
 				return nil, fdError(syscall.ENOTDIR, values[0])
 			}
 			if virtual && int(flags)&(os.O_CREATE|os.O_EXCL) == os.O_CREATE|os.O_EXCL {
